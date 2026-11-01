@@ -91,8 +91,17 @@ archives = [
   # neither present it has nothing to bind, and libSoftwareAES.a from component:SoftwareAES above
   # already provides the source AES subclass.
   "prepare-storage-headers.py",
-  "component:ShengUfs",
-  "build-arm-driver.py NativeUfs --unverified",
+  # WITHOUT the two UFS entries — component:ShengUfs and build-arm-driver.py NativeUfs --unverified —
+  # for the prelink round. On arm64e the component delegates to build-sheng-source-storage.py, which
+  # authenticates every read against the OS profile's signed root policy and has none for 25F84; the
+  # classic driver it falls back to was written against the iPadOS 17 IOStorageFamily headers and does
+  # not compile against the 26-train headers prepare-storage-headers.py prepares. Neither belongs to
+  # this round: the point here is whether the collection's own kexts load. Dropping them cannot break
+  # the link — the 12377 series mentions NativeUfs only as a device-tree IOClass string — and the
+  # payload is built with native-ufs-root=0 so nothing dereferences the missing driver.
+  # Storage returns with the source runtime and a policy directory derived from the system volumes.
+  # "component:ShengUfs",
+  # "build-arm-driver.py NativeUfs --unverified",
   # WITHOUT build-ufs-original-bindings.py: it binds IOBlockStorageDevice from a *prelinked* candidate
   # and insists the plan's original_sha256 equals kernelcache.release.ipad7 (f18b4df8… in the script),
   # so on this port it fails twice over — the provenance is the iPadOS 17 image, and the candidate this
