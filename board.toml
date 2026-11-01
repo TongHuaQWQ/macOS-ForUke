@@ -16,7 +16,12 @@ include = [
   # ShengUfs is deliberately absent: archive_plan() requires an archives entry for every selected
   # kernel-stage component, and its arm64e recipe needs the profile's signed root policy. It returns
   # together with the policy directory.
-  "SoftwareAES", "ShengHidInput", "ShengNovatekTouch", "AppleKeyStoreState",
+  # ShengHidInput is absent for the same reason as ShengUfs: build-sheng-hid-input.py refuses any
+  # target except arm64 iOS 17 ("The original HID ABI builder only supports arm64 iOS 17"), and its
+  # suggested replacement, build-sheng-source-drivers.py, is a compile audit whose output still needs
+  # target-family linking. The menu counts down and boots without an input device, so a prelink round
+  # does not need the touch driver.
+  "SoftwareAES", "ShengNovatekTouch", "AppleKeyStoreState",
   "RamBlock", "VirtioMmioBlock", "VirtioMmioConsole",
   # GPU is its own track: its kernel-side components need the A732 firmware pins
   # (.cache/firmware/uke-gpu) and the owner-built Metal plug-in, which a public runner cannot produce,
@@ -122,7 +127,7 @@ archives = [
   # inert here and nothing needs the archive to link.
   # "build-sheng-platform-power.py",
   "build-libpthread-kernel.py",
-  "component:ShengHidInput",
+  # "component:ShengHidInput",
   "component:AppleKeyStoreState",
   # --- not runnable on a public runner; re-enable when the inputs exist -------------------------
   # Kept visible instead of deleted so the full build's shape stays readable.
