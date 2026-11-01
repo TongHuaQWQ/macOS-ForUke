@@ -304,3 +304,27 @@ evidence = [
   { kind = "device", reference = "docs/RECOVERY-LOG.md", result = "the panic screen and last-panic line read back from the reserved pram log on hardware", command = "fastboot boot boot.img", revision = "c77d613dc91fb54479242aa5d5902c48662b80d7" },
   { kind = "host", reference = "board.toml", result = "kernel, payload and boot images build end to end at the format-2 output path", command = "./unixnu build kernel && ./unixnu build payload && ./unixnu bootimg", revision = "4f4bf7e1f4ad56743562777becd7ac7d6714216c" },
 ]
+
+[[area]]
+id = "arm64e-capability"
+status = "device-verified"
+inputs = ["Xiaomi Pad 7 (uke, SM7675, 2410CRP4CC) running its stock Android 16 build with SukiSU root, adb reachable.",
+  "The requirements table of docs/porting/arm64e.md in the shared UniXNU checkout."]
+procedure = ["adb shell 'grep -m1 Features /proc/cpuinfo'",
+  "adb shell 'grep -c paca /proc/cpuinfo'  and  grep -c ^processor /proc/cpuinfo",
+  "adb shell 'su -c \"dmesg | grep -i authentication\"'",
+  "adb shell 'su -c \"zcat /proc/config.gz | grep ARM64_PTR_AUTH\"'"]
+findings = ["Pointer authentication is implemented by the hardware, not emulated: /proc/cpuinfo advertises paca and pacg on 8 of 8 CPUs, and the kernel reports CPU features: detected: Address authentication (architected QARMA3 algorithm) plus the same line for generic authentication. The cores are 3x CPU part 0xd80 (Cortex-X4), 4x 0xd81 (Cortex-A720) and 1x 0xd82 (Cortex-A520), all carrying the feature.",
+  "The Android kernel is built with CONFIG_ARM64_PTR_AUTH=y and CONFIG_ARM64_PTR_AUTH_KERNEL=y and boots normally under Running under Gunyah hypervisor 51/v1. EL1 writes to the SCTLR_EL1 EnIA, EnIB, EnDA and EnDB bits and to the APIAKey, APIBKey, APDAKey, APDBKey and APGAKey registers therefore do not trap. Those are requirements 2 and 4 of docs/porting/arm64e.md, satisfied under the same hypervisor configuration XNU will run under.",
+  "The algorithm is architecturally QARMA3 rather than Apple's implementation, which does not matter for this port: no signature is computed off the device. dyld signs user pointers when it loads an image and XNU signs the kernel collection during early boot, so the CPU algorithm only has to be self-consistent.",
+  "The kernelcache this port prelinks against is arm64e: kernelcache.release.mac17g, decompressed through the driver, has Mach-O cputype 0x0100000c with subtype 0xc0000002 - low byte 2 (CPU_SUBTYPE_ARM64E) with the PTRAUTH ABI flag set. An arm64 kernel cannot host it."]
+completion = ["Every requirement of docs/porting/arm64e.md that can be checked without an XNU build passes, so the macOS 26 profile can be built as arm64e instead of arm64."]
+limits = ["The PACIA/AUTIA round trip (requirement 3) was not executed on this hardware. It follows from the feature being implemented and from EnIA being enabled, but an explicit test on the XNU build would state it directly.",
+  "These checks were read from Android's kernel. The XNU kernel repeats them once it boots, and the first boot is where a wrong conclusion here would show."]
+next_action = ["Build with profiles/arch/arm64e, which the macOS profile already selects, and confirm on the first boot that the kernel programs the five key registers without trapping."]
+evidence = [
+  { kind = "device", reference = "/proc/cpuinfo", result = "8/8 CPUs report paca and pacg; 3x Cortex-X4, 4x Cortex-A720, 1x Cortex-A520", command = "adb shell grep -m1 Features /proc/cpuinfo" },
+  { kind = "device", reference = "dmesg", result = "CPU features: detected: Address authentication (architected QARMA3 algorithm); Generic authentication (architected QARMA3 algorithm); Running under Gunyah hypervisor 51/v1", command = "adb shell su -c 'dmesg | grep -i authentication'" },
+  { kind = "device", reference = "/proc/config.gz", result = "CONFIG_ARM64_PTR_AUTH=y and CONFIG_ARM64_PTR_AUTH_KERNEL=y", command = "adb shell su -c 'zcat /proc/config.gz | grep ARM64_PTR_AUTH'" },
+  { kind = "host", reference = "out/ipsw/25F84/kernelcache.decompressed", result = "cputype 0x0100000c, subtype 0xc0000002 (CPU_SUBTYPE_ARM64E with the PTRAUTH ABI flag)", command = "python3 -c 'import struct;d=open(...).read(32);print(hex(struct.unpack_from(\"<I\",d,8)[0]))'" },
+]

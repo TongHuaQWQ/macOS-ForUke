@@ -180,7 +180,10 @@ sha256 = "435c7bac9a328b8a100df930b84b65b4d579e42be44785d0e60e3729291bb864"
 
 [gpu.firmware_pins."gen71100_zap.mbn"]
 bytes = 12088
-sha256 = "1294992888e8c7c7fcd8a6d0a672cc666eff3c95e666ce5840db7e03edcc500d"
+# Pulled from this unit (uke, 2410CRP4CC) at /odm/firmware/gen71100_zap.mbn on a stock Android
+# build; the size matched the inherited pin (12,088 B) but the digest did not, so the pin above
+# came from another build or SKU. scripts/check-uke-gpu.py compares against this value.
+sha256 = "78530c380db9506149703db508ad960a966ec449b02fc8d2de90972e66bc9301"
 
 [kernel.prelink]
 tool = "kits/NativePrelink/emit_prelink.py"
