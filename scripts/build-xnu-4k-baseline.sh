@@ -3,6 +3,17 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 trap 'code=$?; echo "build-xnu-4k-baseline: FAILED at line $LINENO (exit $code): $BASH_COMMAND" >&2; exit $code' ERR
+# The kernel this script builds is arm64 — ARCH_CONFIGS=ARM64 and ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG
+# below — while the OS profile declares arch = arm64e and the driver exports that as UNIXNU_XNU_ARCH.
+# Every helper that compiles code destined for this kernel has to use the kernel's value, not the
+# profile's: build-firehose.sh reads UNIXNU_XNU_ARCH, and with arm64e it produced an arm64e.kernel
+# archive that ld then refused to link ("found architecture 'arm64e.kernel', required architecture
+# 'arm64'"), leaving ___firehose_buffer_create, __firehose_buffer_tracepoint_flush,
+# __firehose_buffer_tracepoint_reserve, __firehose_kernel_configuration_valid and
+# __firehose_merge_updates undefined. Pinning it here keeps the two in step until the 4K baseline
+# itself is qualified as an arm64e build.
+XNU_ARCH_STRING=${XNU_ARCH_STRING:-arm64}
+export UNIXNU_XNU_ARCH="$XNU_ARCH_STRING"
 # Source versions come from feeds.toml through the unixnu driver; the defaults are the qualified ones.
 XNU_TAG=${UNIXNU_XNU_TAG:-xnu-10063.141.1}
 XNU_COMMIT=${UNIXNU_XNU_COMMIT:-d8b80295118ef25ac3a784134bcf95cd8e88109f}
@@ -904,7 +915,7 @@ EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS"
 EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_WATCHDOG_POLICY=$WATCHDOG_POLICY"
 make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iphoneos}" ARCH_CONFIGS=ARM64 \
   MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
-  ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
+  ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG="$XNU_ARCH_STRING" LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
   ARM64_LINK_ADDR=0xfffffff007004000 ARM64_PLKSEG_ADDR=0xfffffff004004000 \
   DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=17.0 -DXNU_TARGET_OS_IOS" \
   DEPLOYMENT_LINKER_FLAGS="-Wl,-ios_version_min,17.0" \
