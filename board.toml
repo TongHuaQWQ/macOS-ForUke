@@ -85,7 +85,11 @@ archives = [
   "component:ArmCpu",
   "component:ArmVirtPlatform",
   "component:SoftwareAES",
-  "build-software-aes-bindings.py",
+  # WITHOUT build-software-aes-bindings.py: it either compiles the recorded overlay
+  # (scripts/data/native-aes-original-bindings.S — not in this repository) or runs the audit path,
+  # which needs build/image4-ignition/aes-interface-audit.json plus a qualified live candidate. With
+  # neither present it has nothing to bind, and libSoftwareAES.a from component:SoftwareAES above
+  # already provides the source AES subclass.
   "prepare-storage-headers.py",
   "component:ShengUfs",
   "build-arm-driver.py NativeUfs --unverified",
@@ -126,7 +130,12 @@ archives = [
   # "build-adreno740-accelerator.py",
   # "build-native-legacy-display.py",
   # "build-gpu-addon-blob.py",
-  "build-boot-log.py",
+  # WITHOUT build-boot-log.py: it compiles kits/uke/{UkeLastLog,BootWatchdogPolicy,CrashLogProbe}.c,
+  # and this repository has no kits/uke at all — those sources live in the upstream uke repository's
+  # package/ directory and were never carried over. Nothing needs them for this configuration either:
+  # CONFIG_XNU_BOOT_PROGRESS is not set, and the device series' calls into uke_panic_flush/uke_panic_text
+  # are behind XNU_WATCHDOG_POLICY, which keeps them out of the link.
+  # "build-boot-log.py",
   # The comparison kernel the fileset prelink reads, last, as upstream's 26/27 archives do:
   #   "The 27 kernel archives end with build-fileset-release-reference.py --tree ., the comparison
   #    kernel the prelink step reads." (docs/devices/sheng.md)
