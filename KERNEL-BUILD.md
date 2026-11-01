@@ -67,10 +67,16 @@ candidate it is about to produce. Both jobs run:
    as pinned feeds, runs the board archives for the full configuration, links
    the kernel and prelinks it against the iPad7,1 kernelcache.
 
-`scripts/prepare-xnu-source.py` overrides the base header restore: it uses the
-pinned xnu git tags instead of raw.githubusercontent.com, which GitHub Actions
-rate-limits with HTTP 403. `scripts/build-xnu-4k-baseline.sh` in this repository
-overrides the base script. It appends a `native_legacy_display_probe` logging
+The header restore (`prepare-xnu-source.py`) no longer needs an override here: the
+shared script now uses the pinned xnu git tags instead of raw.githubusercontent.com
+and the GitHub API, which a hosted runner's shared address gets rate-limited on
+(HTTP 403), and it fetches every missing tag in one command under an exclusive lock
+on the feed, because the driver and `build-xnu-4k-baseline.sh` both call it and a
+second `git fetch --depth 1` rewrites `.git/shallow` under the first
+("shallow file has changed since we read it").
+
+`scripts/build-xnu-4k-baseline.sh` in this repository still overrides the base
+script. It appends a `native_legacy_display_probe` logging
 stub only when `NATIVE_LEGACY_DISPLAY` is off (the bootstrap pass), and leaves
 the symbol to the legacy display archive in the shipping build.
 
