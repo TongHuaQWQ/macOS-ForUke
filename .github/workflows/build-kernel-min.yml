@@ -39,6 +39,14 @@ on:
         description: 'Core UniXNU ref (branch or commit)'
         required: true
         default: 'uke-gpu'
+      skip_prelink:
+        description: 'Copy the native kernel without the kernelcache kexts (boot test only)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   contents: read
@@ -190,7 +198,11 @@ jobs:
         run: |
           set -x
           ./unixnu defconfig bootstrap_defconfig -D ../UniXNU-uke
-          ./unixnu build kernel -D ../UniXNU-uke
+          # Pass 1 exists for the compile records and a candidate kernel, not for a final image, so it
+          # never prelinks. It also cannot: the macOS 26 kernelcache is an MH_FILESET and
+          # emit_prelink.py needs a symbol-bearing comparison kernel, which is built from the target
+          # tree once its archives exist. bootstrap_defconfig enables no archives.
+          ./unixnu build kernel --skip-prelink -D ../UniXNU-uke
           BS=$(./unixnu status --json -D ../UniXNU-uke | python3 -c 'import json,sys;print(json.load(sys.stdin)["output"])')
           echo "UKE_BS_DIR=$BS" >> "$GITHUB_ENV"
           echo "bootstrap output dir: $BS"
@@ -285,6 +297,24 @@ jobs:
           fi
           ls -l "$workspace/build/corecrypto-2023/"*.a 2>/dev/null | tail -3 || true
 
+      # A macOS 26 kernelcache is an MH_FILESET with stripped kext code, so emit_prelink.py matches it
+      # against a symbol-bearing comparison kernel: a RELEASE build of the same patched source, linked
+      # with the same archives. scripts/build-fileset-release-reference.py builds it into
+      # build/xnu/fileset-reference/ of the tree and refuses to do so without those four archives, so
+      # this only runs for a configuration that enables CONFIG_XNU_BUILD_ARCHIVES.
+      - name: Build the fileset reference kernel
+        if: inputs.skip_prelink != 'true'
+        working-directory: UniXNU
+        run: |
+          set -x
+          OUT="$UKE_OUT_DIR"
+          if ! grep -q '^CONFIG_XNU_BUILD_ARCHIVES=y' "$OUT/.config"; then
+            echo "::error::prelinking an MH_FILESET kernelcache needs build/xnu/fileset-reference, and that reference needs the four archives of a CONFIG_XNU_BUILD_ARCHIVES configuration. Re-run with uke-storage_defconfig or uke-userland_defconfig, or set skip_prelink=true for a boot test."
+            exit 1
+          fi
+          python3 "$OUT/tree/scripts/build-fileset-release-reference.py" --tree "$OUT/tree"
+          ls -l "$OUT/tree/build/xnu/fileset-reference/"
+
       - name: Link the kernel (prelink included)
         working-directory: UniXNU
         # A port under construction has more than one unknown at a time and make stops at the first,
@@ -294,7 +324,12 @@ jobs:
           MAKEFLAGS: -k
         run: |
           set -x
-          ./unixnu build kernel -D ../UniXNU-uke
+          SKIP_PRELINK=""
+          if [ "${{ inputs.skip_prelink }}" = "true" ]; then
+            SKIP_PRELINK=--skip-prelink
+            echo "::warning::skip_prelink=true: the kernel carries no kernelcache kexts, so it can boot and print but cannot mount a root"
+          fi
+          ./unixnu build kernel $SKIP_PRELINK -D ../UniXNU-uke
           OUT=$(./unixnu status --json -D ../UniXNU-uke | python3 -c 'import json,sys;print(json.load(sys.stdin)["output"])')
           echo "UKE_OUT_DIR=$OUT" >> "$GITHUB_ENV"
           ls -l "$OUT/kernel"
