@@ -219,17 +219,17 @@ jobs:
           OUT=$(./unixnu status --json -D ../UniXNU-uke | python3 -c 'import json,sys;print(json.load(sys.stdin)["output"])')
           echo "UKE_OUT_DIR=$OUT" >> "$GITHUB_ENV"
           echo "target output dir: $OUT"
-          # Every uke defconfig pins CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked", the iPadOS 17 choice: the
-          # original corecrypto kext inside the kernelcache is the provider, so
-          # build-xnu-4k-baseline.sh compiles osfmk/prng/prng_random.c with -UXNU_SOURCE_CORECRYPTO14 and
-          # omits the source provider. The 12377 series also patches OSKext::start with a hook that asks
-          # that provider for its module, and the hook is guarded by XNU_SOURCE_CORECRYPTO14 alone — so
-          # under prelinked the hook is compiled in and the function it calls is not, and the link stops
-          # on source_corecrypto14_original. Source mode compiles both sides, and the provider it adds is
-          # what finds and starts the original when the boot collection carries one (it looks for
-          # MH_FILESET plus com.apple.kec.corecrypto and shares that result through the OSKext hook), so
-          # it is the mode this series needs with or without prelinked kexts.
-          sed -i '' 's/^CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"/CONFIG_XNU_CRYPTO_BOOTSTRAP="source"/' "$OUT/.config"
+          if [ "${{ inputs.skip_prelink }}" = "true" ]; then
+            # A prelink-less kernel carries no corecrypto kext at all, so it has to bring its own
+            # provider: source mode compiles one (and, when a collection does carry the original, that
+            # provider is what finds it and shares the result through the OSKext hook).
+            #
+            # A prelinking configuration keeps the pinned "prelinked" instead. It has to:
+            # build-xnu-4k-baseline.sh refuses XNU_NATIVE_AES=1 in any other mode, because the software
+            # AES adapter needs the qualified original AES/crypto prelink closure — and uke-storage,
+            # the configuration that can prelink, sets NATIVE_AES.
+            sed -i '' 's/^CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"/CONFIG_XNU_CRYPTO_BOOTSTRAP="source"/' "$OUT/.config"
+          fi
           grep -n 'CRYPTO_BOOTSTRAP\|SOURCE_CORECRYPTO' "$OUT/.config" || true
           # Two directories are in use and they are not synonyms:
           #   build/xnu-prelink/     the audit-*.py family, including audit-mobile-graphics-legacy.py

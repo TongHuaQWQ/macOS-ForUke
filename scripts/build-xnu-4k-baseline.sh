@@ -268,6 +268,13 @@ if [ "$CRYPTO_BOOTSTRAP_MODE" = prelinked ]; then
   # Only this source-provider entry is omitted; no POST or missing-provider
   # failure is suppressed, and no replacement crypto callbacks are supplied.
   EXTRA_MAKE_ARGS+=("prng_random.o_CFLAGS_ADD=-UXNU_SOURCE_CORECRYPTO14")
+  # native-security-init.patch guards the OSKext::start hook with XNU_SOURCE_CORECRYPTO14 alone, while
+  # the definitions live in prng_random.c and are dropped just above. Without the same -U on this
+  # translation unit the hook is compiled in and the function it calls is not, and the link stops on
+  # source_corecrypto14_original — which is exactly what a prelinked configuration hit. Both sides now
+  # follow the mode: prelinked means the original corecrypto kext starts through the normal path and
+  # there is no source provider to consult.
+  EXTRA_MAKE_ARGS+=("OSKext.cpo_CFLAGS_ADD=-UXNU_SOURCE_CORECRYPTO14")
 else
   EXTRA_MAKE_ARGS+=("prng_random.o_CFLAGS_ADD=")
 fi
