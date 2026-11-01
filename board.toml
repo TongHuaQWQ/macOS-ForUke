@@ -89,12 +89,22 @@ archives = [
   "prepare-storage-headers.py",
   "component:ShengUfs",
   "build-arm-driver.py NativeUfs --unverified",
-  "build-ufs-original-bindings.py",
+  # WITHOUT build-ufs-original-bindings.py: it binds IOBlockStorageDevice from a *prelinked* candidate
+  # and insists the plan's original_sha256 equals kernelcache.release.ipad7 (f18b4df8… in the script),
+  # so on this port it fails twice over — the provenance is the iPadOS 17 image, and the candidate this
+  # workflow stages comes from a --skip-prelink build whose JSON carries no prelink plan at all.
+  # Entry above already asks for the unverified bindings, which is what this port uses.
   "component:RamBlock",
   "component:VirtioMmioBlock",
   "component:VirtioMmioConsole",
   "build-mockfs-fixture.py",
-  "build-sheng-platform-power.py",
+  # WITHOUT build-sheng-platform-power.py: it inherits ApplePMGR AON slot addresses from a recorded
+  # audit and refuses any kernelcache other than kernelcache.release.ipad7 (same f18b4df8…) —
+  # "Recorded bindings are for another kernelcache". Those addresses are prelink-ABI values that do not
+  # carry across kernelcaches, so re-pinning the hash would bind the wrong ones. CONFIG_XNU_SHENG_PMGR
+  # stays on, and its call site (zzz-boot-progress.patch) is not in this arch series, so the define is
+  # inert here and nothing needs the archive to link.
+  # "build-sheng-platform-power.py",
   "build-libpthread-kernel.py",
   "component:ShengHidInput",
   "component:AppleKeyStoreState",
