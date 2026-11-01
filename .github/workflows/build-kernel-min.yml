@@ -182,6 +182,11 @@ jobs:
       # tree by the next step.
       - name: Pass 1 — bootstrap records and the prelink candidate
         working-directory: UniXNU
+        # A port under construction has more than one unknown at a time and make stops at the first,
+        # so every run costs a round trip per error. -k carries on and one run reports them all; a run
+        # that fails produces no kernel anyway. Recursive make inherits it through MAKEFLAGS.
+        env:
+          MAKEFLAGS: -k
         run: |
           set -x
           ./unixnu defconfig bootstrap_defconfig -D ../UniXNU-uke
@@ -282,6 +287,11 @@ jobs:
 
       - name: Link the kernel (prelink included)
         working-directory: UniXNU
+        # A port under construction has more than one unknown at a time and make stops at the first,
+        # so every run costs a round trip per error. -k carries on and one run reports them all; a run
+        # that fails produces no kernel anyway. Recursive make inherits it through MAKEFLAGS.
+        env:
+          MAKEFLAGS: -k
         run: |
           set -x
           ./unixnu build kernel -D ../UniXNU-uke
@@ -289,6 +299,28 @@ jobs:
           echo "UKE_OUT_DIR=$OUT" >> "$GITHUB_ENV"
           ls -l "$OUT/kernel"
           test -f "$OUT/kernel/kernel.macho"
+
+      # The build log of a whole XNU compile is tens of thousands of lines and a failing make buries
+      # the one line that matters among warnings. Printing the diagnostics here puts the reason in the
+      # job log itself, which is the only part of a run that can be read without authentication.
+      - name: Report the build errors (on failure)
+        if: failure()
+        working-directory: UniXNU
+        run: |
+          set -x
+          logs=$(ls -1 out/uke/*/*/logs/*.log 2>/dev/null || true)
+          if [ -z "$logs" ]; then
+            echo "no logs under out/uke/*/*/logs"
+            exit 0
+          fi
+          for log in $logs; do
+            echo "=================== $log ($(wc -l < "$log") lines)"
+            echo "------------------- error lines, with context"
+            grep -n -B2 -A6 -E '(^|[^a-zA-Z])error:|fatal error:|undefined (symbol|reference)|ld: |No such file or directory|cannot find|Error [0-9]+$' "$log" \
+              | head -300 || true
+            echo "------------------- last 80 lines"
+            tail -80 "$log" || true
+          done
 
       - name: Collect artifacts (always)
         if: always()
