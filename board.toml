@@ -27,9 +27,16 @@ include = [
 # The target OS image: the unchanged iPad7,1 iPadOS 17.7.11 restore image. Give --ipsw PATH to use a local file; without
 # it the remote url is read with range requests, only the members that are needed.
 [ipsw]
-# macOS 26.5.2 (25F84) universal restore image. The per-board kernelcache this port prelinks against
-# is kernelcache.release.mac17p (t8140/t8142 class — the J700/T8140 family Snapintosh demonstrated
-# running macOS 27 under an emulated Apple platform).
+# macOS 26.5.2 (25F84) universal restore image. One IPSW serves 50+ boards, so the identity is picked
+# by the four fields below; every kernelcache and system volume is one of its BuildManifest entries.
+#
+# `fetch` is deliberately NOT overridden here: entries are BuildManifest COMPONENT names, and the path
+# is resolved through Manifest[component].Info.Path. A file name such as kernelcache.release.mac17p is
+# not a component and fails with "component ... is not in this IPSW". The OS profile already asks for
+# KernelCache, DeviceTree, StaticTrustCache and Cryptex1,SystemTrustCache; the identity below
+# (j704ap, Mac17,2, ApChipID 0x8142, ApBoardID 0x22) resolves KernelCache to kernelcache.release.mac17g
+# in all three of its identities. mac17p belongs to j700ap (ApChipID 0x8140, Mac17,1) and mac17j to the
+# 0x6050 boards — verified against the 1527 members of this image, not assumed.
 url = "https://updates.cdn-apple.com/2026SpringFCS/fullrestores/140-24263/B95838F0-6815-4F0B-A039-156526C081AD/UniversalMac_26.5.2_25F84_Restore.ipsw"
 product = "Mac17,2"
 version = "26.5.2"
@@ -37,11 +44,13 @@ build = "25F84"
 device_class = "j704ap"
 chip_id = 33090
 board_id = 34
-fetch = ["kernelcache.release.mac17p"]
 
 [ipsw.sha256]
-"044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
-"044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
+# Empty on purpose: the two 044-*.dmg pins that were here belong to the iPadOS image and name members
+# this restore image does not contain, so they could never match. The macOS members this port reads
+# are 094-56453-094.dmg.aea (OS), 094-56679-096.dmg.aea (Cryptex1,SystemOS) and 022-21678-099.dmg.aea
+# (BaseSystem); pinning them means hashing the multi-GiB members once, which happens with the userdata
+# step rather than here.
 
 # The raw image for the userdata partition: the OS and SystemOS disk images of the IPSW behind a manifest.
 # first_lba and last_lba are the GPT entry "userdata" of LUN 0, read from the tablet.
@@ -176,9 +185,21 @@ sha256 = "1294992888e8c7c7fcd8a6d0a672cc666eff3c95e666ce5840db7e03edcc500d"
 [kernel.prelink]
 tool = "kits/NativePrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
-kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
+# kernelcache.release.mac17g — the KernelCache entry of the j704ap identity declared in [ipsw], read
+# through the same pipeline the driver uses (IM4P payload, LZFSE decode, keep the single 0x0100000c
+# slice): member 32,194,421 B, decompressed Mach-O 120,930,304 B, sha256 below.
+#
+# The previous value (f18b4df8…) was kernelcache.release.ipad7 — the iPadOS 17.7.11 image this board
+# was ported against; scripts/inspect-target-prelink.py still asserts it for that cache. Inherited
+# pins are silent with the wrong IPSW and only fail here, at fetch time.
+kernelcache_sha256 = "697e01d6f9173f88ced3b00c7d711f5fdf37a1222e2baa50a8950f67a4ed11d5"
 slide = "-0x1000000"
-early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
+# No early_security_init: the inherited address (0xfffffff005ab4ae0) is the AMFI entry of the iPadOS
+# 17.7.11 kernelcache — docs/devices/nx769j.md records exactly that value as belonging to that profile
+# and 0xfffffff004e2b640 to its own, so a prelink ABI address never carries over. It also has to be
+# re-derived from mac17g's __PRELINK_INFO, and the caihong/nx769j records say running AMFI early
+# security init on a SoC with no Apple PMGR panics with "AMFI: No PMGR?" — uke is a Snapdragon. Boot
+# without the hook first and only then, if AMFI trust blocks userland, read the address out of mac17g.
 roots = [
   "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
   "com.apple.driver.AppleARMPlatform",
