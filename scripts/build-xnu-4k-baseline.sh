@@ -589,7 +589,21 @@ if { [ "$OWNER_CACHE_CARRIER" = 1 ] && [ "$OWNER_CACHE_STARTUP" != 1 ]; } ||
   echo 'Owner carrier policy requires authenticated owner startup; wrong UUID is an isolated negative control' >&2
   exit 1
 fi
-EXTRA_MAKE_ARGS+=("vm_unix.o_CFLAGS_ADD=-DXNU_OWNER_CACHE_CARRIER=$OWNER_CACHE_CARRIER -DXNU_OWNER_CACHE_CARRIER_WRONG_UUID=$OWNER_CACHE_CARRIER_WRONG_UUID")
+# xnu-12377 enforces semantic types: bsd/conf/Makefile.template compiles every bsd/vm/*.c with
+# -DVM_UNSAFE_TYPES (osfmk/conf/Makefile.template does the same for osfmk/vm/*.c), because vm_unix.c
+# reads shared_file_mapping_slide_np_ut through its sms_*_u members, which only exist when
+# VM_DEFINE_UNSAFE_TYPE defines a real struct instead of the plain-struct alias. That template
+# assignment is a makefile `+=`, and a command-line variable silently replaces it, so the override
+# below has to carry the flag itself. Without it the type falls back to the alias and vm_unix.c
+# fails with "no member named 'sms_size_u'". xnu-10063, the train this board was first ported
+# against, had no such mechanism — which is why the iPadOS series never needed this.
+# Only vm_unix.o needs it here: ubc_subr.c is bsd/kern and zalloc.c is osfmk/kern, so their
+# overrides cannot clobber a semantic-type flag.
+VM_UNIX_TYPES=
+if grep -q FORCE_UNSAFE_TYPES .cache/xnu-work/bsd/conf/Makefile.template 2>/dev/null; then
+  VM_UNIX_TYPES=-DVM_UNSAFE_TYPES
+fi
+EXTRA_MAKE_ARGS+=("vm_unix.o_CFLAGS_ADD=$VM_UNIX_TYPES -DXNU_OWNER_CACHE_CARRIER=$OWNER_CACHE_CARRIER -DXNU_OWNER_CACHE_CARRIER_WRONG_UUID=$OWNER_CACHE_CARRIER_WRONG_UUID")
 OWNER_CARRIER_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-cache-carrier-mode
 if [ "$(cat "$OWNER_CARRIER_STAMP" 2>/dev/null || echo 0:0)" != "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/vm_unix.o"
