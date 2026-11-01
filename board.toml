@@ -13,7 +13,10 @@ kit = "uke"                      # the package/ of this repository appears as ki
 [components]
 include = [
   "ArmDTPlatform", "ArmCpu", "ArmVirtPlatform",
-  "SoftwareAES", "ShengUfs", "ShengHidInput", "ShengNovatekTouch", "AppleKeyStoreState",
+  # ShengUfs is deliberately absent: archive_plan() requires an archives entry for every selected
+  # kernel-stage component, and its arm64e recipe needs the profile's signed root policy. It returns
+  # together with the policy directory.
+  "SoftwareAES", "ShengHidInput", "ShengNovatekTouch", "AppleKeyStoreState",
   "RamBlock", "VirtioMmioBlock", "VirtioMmioConsole",
   # GPU is its own track: its kernel-side components need the A732 firmware pins
   # (.cache/firmware/uke-gpu) and the owner-built Metal plug-in, which a public runner cannot produce,
