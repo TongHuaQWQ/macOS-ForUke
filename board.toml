@@ -117,6 +117,13 @@ archives = [
   # "build-native-legacy-display.py",
   # "build-gpu-addon-blob.py",
   "build-boot-log.py",
+  # The comparison kernel the fileset prelink reads, last, as upstream's 26/27 archives do:
+  #   "The 27 kernel archives end with build-fileset-release-reference.py --tree ., the comparison
+  #    kernel the prelink step reads." (docs/devices/sheng.md)
+  # It asserts the four archives above it (corecrypto both flavours, ArmDTPlatform, ArmCpu, libpthread),
+  # so the position matters. It runs only for a configuration with CONFIG_XNU_BUILD_ARCHIVES=y; the
+  # workflow builds it explicitly for uke-nodisplay_defconfig, which has no archives.
+  "build-fileset-release-reference.py --tree .",
 ]
 
 # Adreno 732 (uke) board values for the native GPU driver. The driver carries
