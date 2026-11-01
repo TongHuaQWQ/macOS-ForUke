@@ -219,6 +219,18 @@ jobs:
           OUT=$(./unixnu status --json -D ../UniXNU-uke | python3 -c 'import json,sys;print(json.load(sys.stdin)["output"])')
           echo "UKE_OUT_DIR=$OUT" >> "$GITHUB_ENV"
           echo "target output dir: $OUT"
+          if [ "${{ inputs.skip_prelink }}" = "true" ]; then
+            # Every uke defconfig pins CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked", the iPadOS 17 choice:
+            # the original corecrypto kext inside the kernelcache is the provider, so
+            # build-xnu-4k-baseline.sh compiles osfmk/prng/prng_random.c with -UXNU_SOURCE_CORECRYPTO14
+            # and omits the source provider. The 12377 series also patches OSKext::start with a hook that
+            # asks that provider for its module, and that hook is guarded by XNU_SOURCE_CORECRYPTO14
+            # alone — so under prelinked the hook is compiled in and the function it calls is not, and
+            # the link stops on source_corecrypto14_original. A boot test carries no kernelcache kexts at
+            # all, so the kernel has to bring its own provider: source mode compiles both sides.
+            sed -i '' 's/^CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"/CONFIG_XNU_CRYPTO_BOOTSTRAP="source"/' "$OUT/.config"
+            grep -n 'CRYPTO_BOOTSTRAP\|SOURCE_CORECRYPTO' "$OUT/.config" || true
+          fi
           # Two directories are in use and they are not synonyms:
           #   build/xnu-prelink/     the audit-*.py family, including audit-mobile-graphics-legacy.py
           #                          which build-native-legacy-display.py runs as its first step;
