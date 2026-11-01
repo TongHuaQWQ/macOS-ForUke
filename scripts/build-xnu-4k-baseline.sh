@@ -17,6 +17,12 @@ trap 'code=$?; echo "build-xnu-4k-baseline: FAILED at line $LINENO (exit $code):
 # CPUs do not implement FEAT_PAuth stays on arm64, which is what XNU_ARCH_STRING=arm64 selects.
 XNU_ARCH_STRING=${XNU_ARCH_STRING:-${UNIXNU_XNU_ARCH:-arm64}}
 export UNIXNU_XNU_ARCH="$XNU_ARCH_STRING"
+# The deployment target has to come from the same place the archives take it from. The driver exports
+# the profile's ios_version as UNIXNU_IOS_VERSION, scripts/kernel_target.py checks every archive object
+# against it (LC_BUILD_VERSION, patch level included), and build-arm-driver.py replays this script's own
+# compile command from the records — so a hardcoded value here makes the kernel 17.0 while the archives
+# are audited as 26.5.2: "ArmDTPlatform: deployment (2, 1114112), expected (2, 1705218)".
+IOS_VERSION=${UNIXNU_IOS_VERSION:-17.0}
 # Source versions come from feeds.toml through the unixnu driver; the defaults are the qualified ones.
 XNU_TAG=${UNIXNU_XNU_TAG:-xnu-10063.141.1}
 XNU_COMMIT=${UNIXNU_XNU_COMMIT:-d8b80295118ef25ac3a784134bcf95cd8e88109f}
@@ -927,8 +933,8 @@ make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iph
   MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG="$XNU_ARCH_STRING" LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
   ARM64_LINK_ADDR=0xfffffff007004000 ARM64_PLKSEG_ADDR=0xfffffff004004000 \
-  DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=17.0 -DXNU_TARGET_OS_IOS" \
-  DEPLOYMENT_LINKER_FLAGS="-Wl,-ios_version_min,17.0" \
+  DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=$IOS_VERSION -DXNU_TARGET_OS_IOS" \
+  DEPLOYMENT_LINKER_FLAGS="-Wl,-ios_version_min,$IOS_VERSION" \
   RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
   BUILD_LTO=0 BOUND_CHECKS=0 BUILD_WERROR="${XNU_BUILD_WERROR:-0}" MAKEJOBS=-j"${JOBS:-4}" \
   CFLAGS_EXTRA="$EXTRA_CFLAGS" "${EXTRA_MAKE_ARGS[@]}" ${XNU_HOST_MAKE_ARGS[@]+"${XNU_HOST_MAKE_ARGS[@]}"} \

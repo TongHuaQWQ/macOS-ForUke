@@ -287,11 +287,15 @@ jobs:
           # its own kernel build; this step runs the archive scripts itself, so it has to set them or
           # kernel_target falls back to arm64 and rejects the arm64e objects the arch profile asks for
           # ("ArmDTPlatform: not an arm64 object"). The arch comes from the resolved configuration; the
-          # deployment version is the one build-xnu-4k-baseline.sh passes to the kernel link
-          # (-miphoneos-version-min=17.0), because check_object compares LC_BUILD_VERSION too.
+          # deployment version is the profile's, which build-xnu-4k-baseline.sh now passes to the kernel
+          # link as well, because check_object compares LC_BUILD_VERSION too.
           STATUS=$(./unixnu status --json -D ../UniXNU-uke)
           export UNIXNU_XNU_ARCH=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["board"]["arch"]["name"])')
-          export UNIXNU_IOS_VERSION=17.0
+          # The deployment target is the profile's ios_version, exactly as the driver exports it for the
+          # kernel build and as scripts/kernel_target.py audits the archive objects. A hardcoded value
+          # here makes the archives 17.0 while the kernel is 26.5.2 (or the reverse), and the object
+          # audit stops the round on the first component.
+          export UNIXNU_IOS_VERSION=$(printf '%s' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["board"]["os"]["ios_version"])')
           echo "kernel target: $UNIXNU_XNU_ARCH (iOS $UNIXNU_IOS_VERSION)"
           ( cd "$workspace" && python3 scripts/gen-touch-firmware.py )
           ( cd "$workspace" && python3 scripts/build-corecrypto-14.py )
