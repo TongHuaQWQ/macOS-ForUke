@@ -3,16 +3,19 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 trap 'code=$?; echo "build-xnu-4k-baseline: FAILED at line $LINENO (exit $code): $BASH_COMMAND" >&2; exit $code' ERR
-# The kernel this script builds is arm64 — ARCH_CONFIGS=ARM64 and ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG
-# below — while the OS profile declares arch = arm64e and the driver exports that as UNIXNU_XNU_ARCH.
-# Every helper that compiles code destined for this kernel has to use the kernel's value, not the
-# profile's: build-firehose.sh reads UNIXNU_XNU_ARCH, and with arm64e it produced an arm64e.kernel
-# archive that ld then refused to link ("found architecture 'arm64e.kernel', required architecture
-# 'arm64'"), leaving ___firehose_buffer_create, __firehose_buffer_tracepoint_flush,
-# __firehose_buffer_tracepoint_reserve, __firehose_kernel_configuration_valid and
-# __firehose_merge_updates undefined. Pinning it here keeps the two in step until the 4K baseline
-# itself is qualified as an arm64e build.
-XNU_ARCH_STRING=${XNU_ARCH_STRING:-arm64}
+# The kernel's Mach-O architecture follows the selected arch profile, and so must every helper that
+# compiles code for it. The driver exports the profile's value as UNIXNU_XNU_ARCH; build-firehose.sh
+# reads exactly that and returns a matching libfirehose_kernel.a.
+#
+# This script used to pass ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 on the make command line, and
+# that is the one thing that overrides xnu's own forcing — makedefs/MakeInc.def turns ARM64 into
+# arm64e whenever the variable is not given (lines 372-373), and ARCH_FLAGS_ARM64 is
+# `-arch $(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)`. Hardcoding arm64 therefore built a plain arm64
+# kernel; it linked against an arm64e firehose ("found architecture 'arm64e.kernel', required
+# architecture 'arm64'") and, more importantly, an arm64 kernel cannot host the arm64e kexts of a
+# macOS 26 kernelcache (docs/porting/arm64e.md: iPadOS 26 and later are arm64e only). A device whose
+# CPUs do not implement FEAT_PAuth stays on arm64, which is what XNU_ARCH_STRING=arm64 selects.
+XNU_ARCH_STRING=${XNU_ARCH_STRING:-${UNIXNU_XNU_ARCH:-arm64}}
 export UNIXNU_XNU_ARCH="$XNU_ARCH_STRING"
 # Source versions come from feeds.toml through the unixnu driver; the defaults are the qualified ones.
 XNU_TAG=${UNIXNU_XNU_TAG:-xnu-10063.141.1}
