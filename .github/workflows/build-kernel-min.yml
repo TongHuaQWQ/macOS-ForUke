@@ -307,26 +307,33 @@ jobs:
             echo "legacy display disabled in ${{ inputs.defconfig }}: no display archive needed (stub path)"
           fi
           ls -l "$workspace/build/corecrypto-2023/"*.a 2>/dev/null | tail -3 || true
+          # Upstream's 26/27 kernel archives end with the comparison kernel:
+          #   "The 27 kernel archives end with build-fileset-release-reference.py --tree .,
+          #    the comparison kernel the prelink step reads." (docs/devices/sheng.md)
+          # This repository's configurations cannot carry that entry — [kernel] archives only runs
+          # under CONFIG_XNU_BUILD_ARCHIVES, which uke-nodisplay_defconfig does not set — so the same
+          # final entry is reproduced here, after the four archives the script asserts.
+          if [ "${{ inputs.skip_prelink }}" != "true" ]; then
+            ( cd "$workspace" && python3 scripts/build-libpthread-kernel.py )
+            ( cd "$workspace" && python3 scripts/build-fileset-release-reference.py --tree . )
+            ls -l "$workspace/build/xnu/fileset-reference/" || true
+          fi
 
       # A macOS 26 kernelcache is an MH_FILESET with stripped kext code, so emit_prelink.py matches it
-      # against a symbol-bearing comparison kernel: a RELEASE build of the same patched source, linked
-      # with the same archives. scripts/build-fileset-release-reference.py builds it into
-      # build/xnu/fileset-reference/ of the tree and refuses to do so without those four archives, so
-      # this only runs for a configuration that enables CONFIG_XNU_BUILD_ARCHIVES.
-      - name: Build the fileset reference kernel
+      # against a symbol-bearing comparison kernel. That kernel is built as the last entry of the
+      # archive step above, mirroring upstream, and profiles/os/macos-26.5.2-25F84 points prelink at it
+      # by a tree-relative path. Fail here with a reason rather than letting the emitter raise
+      # FileNotFoundError.
+      - name: Check the fileset reference kernel
         if: inputs.skip_prelink != 'true'
         working-directory: UniXNU
         run: |
           set -x
-          OUT="$UKE_OUT_DIR"
-          if ! grep -q '^CONFIG_XNU_BUILD_ARCHIVES=y' "$OUT/.config"; then
-            echo "::error::prelinking an MH_FILESET kernelcache needs build/xnu/fileset-reference, and that reference needs the four archives of a CONFIG_XNU_BUILD_ARCHIVES configuration. Re-run with uke-storage_defconfig or uke-userland_defconfig, or set skip_prelink=true for a boot test."
+          test -f "$UKE_OUT_DIR/tree/build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf" || {
+            echo "::error::prelink reads build/xnu/fileset-reference; the archive step builds it last, as upstream's 26/27 archives do. It is missing, so that step did not finish."
             exit 1
-          fi
-          export UNIXNU_XNU_ARCH=$(./unixnu status --json -D ../UniXNU-uke | python3 -c 'import json,sys; print(json.load(sys.stdin)["board"]["arch"]["name"])')
-          echo "kernel target: $UNIXNU_XNU_ARCH"
-          python3 "$OUT/tree/scripts/build-fileset-release-reference.py" --tree "$OUT/tree"
-          ls -l "$OUT/tree/build/xnu/fileset-reference/"
+          }
+          ls -l "$UKE_OUT_DIR/tree/build/xnu/fileset-reference/"
 
       - name: Link the kernel (prelink included)
         working-directory: UniXNU
