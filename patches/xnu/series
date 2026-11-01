@@ -1,0 +1,22 @@
+# macOS device patch series, application order.
+# native-smp-secondary-bcm2837: the SoC tree's own native-smp-secondary.patch is written for
+# xnu-10063. On xnu-12377 its board_config.h hunk is already satisfied (BCM2837 carries
+# MAX_CPUS 8 / MAX_CPU_CLUSTERS 2); only the MPIDR core-numbering fix is still needed, so that
+# one hunk lives here instead of in the soc layer.
+native-smp-secondary-bcm2837.patch
+offline-owner-root-auth-bypass.patch
+zzzz-offline-owner-systemos-bringup.patch
+zzzzz-video-console-physical-fb.patch
+zzzzzz-video-console-text.patch
+zzzzzzz-last-panic-print.patch
+# Deferred for the first macOS boot: five diagnostics (pmap assert, watchdog policy,
+# ramoops print, panic flush, vm alloc log). Their context moved with Darwin 25 and
+# porting them is only worth doing once the kernel reaches userland.
+# zzzzzzzz-uke-pmap-assert-owner.patch
+# zzzzzzzz-uke-watchdog-policy.patch
+# zzzzzzzzz-uke-ramoops-print.patch
+# zzzzzzzzzzz-uke-panic-flush.patch
+zzzzzzzzzzz-uke-trustcache-headers.patch
+# zzzzzzzzzzz-uke-vm-alloc-log.patch
+zzzzzzzzzzzz-uke-gpu-sandbox-client-grant.patch
+zzzzzzzzzzzz-uke-gpu-addon-stage-log.patch

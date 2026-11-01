@@ -1,0 +1,435 @@
+# Board description of the Xiaomi Pad 7 (uke, SM7675), read by the unixnu build driver.
+schema_version = 2
+
+[board]
+name = "uke"
+soc = "SM7675"
+soc_source = "sm7675"
+os_profile = "macos-26.5.2-25F84"
+description = "Xiaomi Pad 7"
+kit = "uke"                      # the package/ of this repository appears as kits/uke in the build tree
+
+# The full component selection; the resolver adds dependencies and orders their recipes.
+[components]
+include = [
+  "ArmDTPlatform", "ArmCpu", "ArmVirtPlatform",
+  "SoftwareAES", "ShengUfs", "ShengHidInput", "ShengNovatekTouch", "AppleKeyStoreState",
+  "RamBlock", "VirtioMmioBlock", "VirtioMmioConsole",
+  # GPU is its own track: its kernel-side components need the A732 firmware pins
+  # (.cache/firmware/uke-gpu) and the owner-built Metal plug-in, which a public runner cannot produce,
+  # and kernel.py:archive_plan requires every selected component with a kernel build recipe to appear
+  # in [kernel] archives. Restore these three lines together with the GPU archive entries.
+  # "Adreno740", "AdrenoMetal",
+  "GopFramebuffer", "QcomGeniSpi",
+  "XnuPrelink", "DarwinBoot", "VerifiedRoot", "AirNir", "AdrenoPM4", "AdrenoFirmware", "ArmSmmu4K",
+]
+
+# The target OS image: the unchanged iPad7,1 iPadOS 17.7.11 restore image. Give --ipsw PATH to use a local file; without
+# it the remote url is read with range requests, only the members that are needed.
+[ipsw]
+# macOS 26.5.2 (25F84) universal restore image. The per-board kernelcache this port prelinks against
+# is kernelcache.release.mac17p (t8140/t8142 class — the J700/T8140 family Snapintosh demonstrated
+# running macOS 27 under an emulated Apple platform).
+url = "https://updates.cdn-apple.com/2026SpringFCS/fullrestores/140-24263/B95838F0-6815-4F0B-A039-156526C081AD/UniversalMac_26.5.2_25F84_Restore.ipsw"
+product = "Mac17,2"
+version = "26.5.2"
+build = "25F84"
+device_class = "j704ap"
+chip_id = 33090
+board_id = 34
+fetch = ["kernelcache.release.mac17p"]
+
+[ipsw.sha256]
+"044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
+"044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
+
+# The raw image for the userdata partition: the OS and SystemOS disk images of the IPSW behind a manifest.
+# first_lba and last_lba are the GPT entry "userdata" of LUN 0, read from the tablet.
+[userdata]
+first_lba = 0x2d3000
+last_lba = 0x38417fa             # this unit: 58,988,539 x 4096 B = 225.0 GiB (12 GB reference: 0x3b147fa)
+lba_bytes = 4096
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS" },
+]
+
+[kernel]
+defconfig = "uke_defconfig"
+# Declared explicitly: the iOS chain uses the arch profile's four-layer default, but a macOS guest
+# drops the soc layer (see the note below) and carries what it still needs in this repository.
+# No soc layer: UniXNU-sm7675-common's soc series targets xnu-10063; its one still-needed hunk
+# (the MPIDR core numbering) lives in patches/xnu/native-smp-secondary-bcm2837.patch.
+patch_series = ["arch:patches/xnu/series", "os:patches/xnu/series", "device:patches/xnu/series"]
+# The four-layer series of the resolver: shared arch patches, the SoC platform
+# patches, the OS patches and the board's own. Empty fragments: the board's
+# defconfigs carry the full configuration.
+config_fragments = []
+# Archive builders of the kernel step, in order. They run only for a configuration with
+# CONFIG_XNU_BUILD_ARCHIVES=y (configs/uke-full_defconfig), after the bootstrap pass has left the
+# compile records behind. component: entries are catalog recipes; the rest are scripts of the
+# build tree with their arguments.
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform",
+  "component:ArmCpu",
+  "component:ArmVirtPlatform",
+  "component:SoftwareAES",
+  "build-software-aes-bindings.py",
+  "prepare-storage-headers.py",
+  "component:ShengUfs",
+  "build-arm-driver.py NativeUfs --unverified",
+  "build-ufs-original-bindings.py",
+  "component:RamBlock",
+  "component:VirtioMmioBlock",
+  "component:VirtioMmioConsole",
+  "build-mockfs-fixture.py",
+  "build-sheng-platform-power.py",
+  "build-libpthread-kernel.py",
+  "component:ShengHidInput",
+  "component:AppleKeyStoreState",
+  # --- not runnable on a public runner; re-enable when the inputs exist -------------------------
+  # Kept visible instead of deleted so the full build's shape stays readable.
+  #
+  #   prepare-uke-gmu.py / component:Adreno740 / build-native-adreno-kits.py /
+  #   build-adreno740-accelerator.py
+  #       need the A732 GPU firmware pins in .cache/firmware/uke-gpu (extracted from the device's
+  #       /vendor/firmware_mnt/image and /odm/firmware — see proprietary-files.txt).
+  #   build-native-legacy-display.py
+  #       gated by audit-mobile-graphics-legacy.py against a previously qualified candidate.
+  #   build-gpu-addon-blob.py
+  #       packs the owner-built Metal plug-in bundle, which no clean tree has.
+  #
+  # "prepare-uke-gmu.py",
+  # "component:Adreno740",
+  # "build-native-adreno-kits.py",
+  # "build-adreno740-accelerator.py",
+  # "build-native-legacy-display.py",
+  # "build-gpu-addon-blob.py",
+  "build-boot-log.py",
+]
+
+# Adreno 732 (uke) board values for the native GPU driver. The driver carries
+# an A740 and an A732 profile; scripts/check-uke-gpu.py compares these values
+# with a device DT dump, and scripts/prepare-uke-gmu.py turns the recorded DT
+# facts into the headers NativeAdreno consumes. The catalog values are from
+# MCC45TR/senemos-uke-kernel-mainline patch 0036 (public A732 entry), not a
+# device run.
+[gpu]
+model = "Adreno732"
+chip_id = "0x43030b00"
+compatible = "qcom,adreno-gpu-gen7-11-0"
+family = "ADRENO_7XX_GEN2"
+gpu_base = "0x3d00000"
+gpu_size = "0x40000"
+gmu_base = "0x3d68000"
+gmu_size = "0x37000"
+gmu_pdc_base = "0xb280000"
+gmu_pdc_size = "0x10000"
+gpucc_base = "0x3d90000"          # qcom,cliffs-gpucc
+gpucc_size = "0xa000"
+gcc_base = "0x100000"             # qcom,cliffs-gcc
+smmu_base = "0x3da0000"
+smmu_size = "0x40000"
+sid_user = 0x00
+sid_secure = 0x02
+sid_gmu = 0x05
+gmem_bytes = "0x180000"           # 1.5 MiB
+gmu_chip_id = "0x70b0000"         # a6xx_info.gmu_chipid for 0x43030b00
+gmu_cgc_mode = "0x00020202"
+preempt_record_bytes = "0x225000"  # 2196 KiB
+# Reserved GMU payload pool: physical pages the driver adopts over IODeviceMemory::withRange
+# instead of allocating from the kernel VM after userland has wired it. Must match the ADT's
+# gmu-memory node (scripts/make-uke-adt.py) and the "GMU Pool" entry of the uke UEFI memory map.
+gmu_pool_base = "0xc8000000"
+gmu_pool_bytes = "0x2000000"
+ubwc_version = 4
+ubwc_swizzle = 3                  # levels 2 and 3
+highest_bank_bit = 16
+gmu_core_clock_hz = 220000000     # GMU core clock target for the A732
+gmu_hub_clock_hz = 200000000
+# Collected from the rooted device on 2026-10-21. The firmware is gen71100
+# (matching compatible qcom,adreno-gpu-gen7-11-0), not the gen71500 sibling.
+frequencies_mhz = [950, 900, 835, 736, 684, 633, 500, 353, 255]
+num_pwrlevels = 9
+initial_pwrlevel = 8
+min_pwrlevel = 8
+max_pwrlevel = 0
+firmware_sqe = ["gen71100_sqe.fw", "gen71500_sqe.fw", "a732_sqe.fw"]
+firmware_gmu = ["gen71100_gmu.bin", "gen71500_gmu.bin", "a732_gmu.bin"]
+firmware_zap = ["gen71100_zap.mbn", "gen71500_zap.mbn", "a732_zap.mbn"]
+firmware_source = "/vendor/firmware + /odm/firmware"
+
+[gpu.firmware_pins."gen71100_sqe.fw"]
+bytes = 66036
+sha256 = "b6df660d109504dbea5a266910b037a33d893a11c6de52f524a5fd112008c401"
+
+[gpu.firmware_pins."gen71100_gmu.bin"]
+bytes = 80680
+sha256 = "435c7bac9a328b8a100df930b84b65b4d579e42be44785d0e60e3729291bb864"
+
+[gpu.firmware_pins."gen71100_zap.mbn"]
+bytes = 12088
+sha256 = "1294992888e8c7c7fcd8a6d0a672cc666eff3c95e666ce5840db7e03edcc500d"
+
+[kernel.prelink]
+tool = "kits/NativePrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
+slide = "-0x1000000"
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
+roots = [
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.driver.AppleARMPlatform",
+  "com.apple.driver.AppleARMWatchdogTimer",
+  "com.apple.driver.AppleAudioClockLibs",
+  "com.apple.driver.AppleEffaceableStorage",
+  "com.apple.driver.AppleIISController",
+  "com.apple.driver.AppleM2ScalerCSCDriver",
+  "com.apple.driver.AppleMobileFileIntegrity",
+  "com.apple.driver.ApplePMGR",
+  "com.apple.driver.IODARTFamily",
+  "com.apple.filesystems.apfs",
+  "com.apple.iokit.CoreAnalyticsFamily",
+  "com.apple.iokit.IOAVFamily",
+  "com.apple.iokit.IOAudio2Family",
+  "com.apple.iokit.IOCECFamily",
+  "com.apple.iokit.IOCryptoAcceleratorFamily",
+  "com.apple.iokit.IOGPUFamily",
+  "com.apple.iokit.IOHDCPFamily",
+  "com.apple.iokit.IOMobileGraphicsFamily",
+  "com.apple.iokit.IOReportFamily",
+  "com.apple.iokit.IOSlowAdaptiveClockingFamily",
+  "com.apple.iokit.IOStorageFamily",
+  "com.apple.iokit.IOSurface",
+  "com.apple.kec.Libm",
+  "com.apple.kec.corecrypto",
+  "com.apple.kext.AppleMatch",
+  "com.apple.kext.CoreTrust",
+  "com.apple.security.AppleImage4",
+  "com.apple.security.sandbox",
+  "com.apple.iokit.IOHIDFamily",
+  "com.apple.iokit.IOHIDEventDriver",
+]
+
+[firmware]
+config = "uke"                   # Resources/Configs/uke.toml in the Mu-Silicium checkout (--uefi)
+dsc = "Platforms/Xiaomi/ukePkg/uke.dsc"
+fd = "Build/ukePkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+preflight = ["scripts/check-uke.py"]
+submodules = ["Common/Mu", "Common/Mu_OEM_Sample", "Silicium-ACPI", "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl"]
+patches = ["Resources/MuPatches/Gic-Spurious.patch"]
+packages = [
+  "{uefi}",
+  "{uefi}/Platforms/Xiaomi",
+  "{tree}/package",
+  "{tree}/drivers/DarwinBoot",
+  "{edk2}",
+  "{uefi}/Common/Mu",
+  "{uefi}/Common/Mu_OEM_Sample",
+  "{uefi}/Silicon/Qualcomm",
+  "{uefi}/Silicon/Silicium",
+  "{uefi}/Silicium-ACPI",
+  "{uefi}/Silicium-ACPI/Platforms/Xiaomi",
+  "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
+]
+
+[firmware.defines]
+ENABLE_SECUREBOOT = "1"
+DEVICE_MODEL = "uke"
+MEMORY_PROTECTION = "TRUE"
+SHIP_MODE = "FALSE"
+BUILDID_STRING = "uke-research"
+
+# The ramdisk of the boot image: a FAT volume with the UniXNU config, the kernel, its device tree and
+# the optional trust cache and Data seed. The loader (DarwinBoot) is part of the firmware volume.
+[payload]
+volume = "UKEESP"
+size_mib = 80
+loader = "firmware"
+title = "uke first boot: source 4K XNU to console"
+dram_size = "0x140000000"            # XNU VM DRAM: this unit's whole high run (0x8C0000000-0xA0000000, 5 GiB).
+                                     # 8 GB SKU (MemTotal 7492 MiB); the 12 GB reference has 0x240000000 here.
+dram_base = "0x8C0000000"            # high DRAM range 0x8C0000000-0xA0000000; the ADT writes /chosen/dram-base
+skip_setup_tool = "scripts/seed-data-skip-setup.py"   # used by --skip-setup
+panic_screen = true                  # native XNU panic output; Font.h is vendored in scripts/
+trust_cache_sha256 = [
+  "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
+]
+# The owner-built Metal addon (build-gpu-addon-blob.py, produced by the kernel
+# archives above): payloads/kernel.macho.gpuaddon, placed by the DarwinBoot
+# loader after the trust caches and staged into Data by kern_exec.c.
+gpu_addon = "build/uke-gpu-addon/gpu-addon.z"
+kernel_args = [
+  "-v",
+  "serial=3",
+  "debug=0x14e",
+  # DEVELOPMENT kernels keep kprintf off unless this is set; uke has no UART,
+  # so kprintf then falls back to the framebuffer video console. Graphics boot
+  # suppresses text until -uketextconsole switches the console to text mode.
+  "-enable_kprintf_spam",
+  "-uketextconsole",
+  "kt_fixed_zones=120",
+  "offline-legacy-register=1",
+  "offline-legacy-gop=1",
+  "offline-legacy-unit-scale=2",
+  "offline-legacy-pm=1",
+  "offline-legacy-validate=1",
+  "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1",
+  "offline-legacy-default-surface=1",
+  # own-present (the gpu-framepresent v2/v3 verified set): presentBase resolves
+  # the swap record's overlay surface after each SwapEnd and copies it to the
+  # GOP. Without this the path is silent and the screen stays on the boot frame
+  # (the 2026-10-27/28 frozen-screen runs never set it).
+  "offline-legacy-base-present=1",
+  # the screen console must not draw over presented frames; it is muted only
+  # after the first successful copy, so logs survive until the UI takes over.
+  "offline-legacy-noconsole=1",
+  "offline-hid-home=1",
+  "offline-hid-input=1",
+  # Touch bring-up (docs/TOUCH-PORT.md on-screen set): stage 4 = firmware
+  # download + frame loop; sheng-touch-hid=1 publishes digitizer reports
+  # (required); poll mode is the device-proven frame path (the interrupt path
+  # is not yet verified on hardware and falls back to polling by itself).
+  "sheng-touch=4",
+  "sheng-touch-hid=1",
+  "sheng-touch-poll=1",
+  "offline-legacy-phase=4",
+  # GPU track (same values as gpu-framepresent v2/v3): the staged A732 bring-up
+  # publishes the Metal device and the compositor submits the 1200-byte overlay
+  # records whose layer 6 frame the own-present path resolves.
+  "sheng-gpu-power=9",
+  "sheng-gpu-metal=1",
+  # GPU scanout hand-off (upstream GpuScanoutClient path): the addon plugin's
+  # scanout client blits the offered frame into the scanout on the GPU; a
+  # refused offer or failed copy falls back to the CPU copy (fail-safe).
+  "sheng-fb-gpu=1",
+  # DPU direct scanout: map the compositor's plain BGRA surface into the display bank's stage-1
+  # window and flip VIG0/VIG1, instead of the 27 MB CPU copy per frame.
+  "uke-dpu-scanout=3",
+  "sheng-gpu-pool=1536",
+  # The display refresh tick (upstream display port): 120 Hz vsync messages from the family's own sender, so the render
+  # server paces to the panel instead of its 1/60 s heartbeat, and IOMFBDisplayRefresh reports the panel rate.
+  "sheng-vsync=120",
+  # stage the owner-built NativeAdrenoMetal bundle (addon blob) into Data so the
+  # render server opens a native Metal device; iconservicesagent then keeps
+  # CoreImage on that device instead of the null-GL crash loop.
+  "sheng-gpu-addon=1",
+  "sheng-iconservices=1",
+  "offline-mobile-graphics-client=1",
+  "offline-mobile-graphics-load=1",
+  "offline-apfs-load=1",
+  "boot-progress=2",
+  "-apfs_shared_datavolume",
+  "offline-key-events=1",
+  "native-ufs-root=1",
+  "native-ufs-allow-unverified=1",
+  "sheng-data-persist=2",
+  "sheng-staged-apps=1",
+  "sheng-log=1",
+  "sheng-pmgr=2",
+  "sheng-lite=1",
+  "sheng-aks=1",
+  "sheng-disable-watchdogd=1",
+  "sheng-smp=1",
+  "armcpu-spi-ipi=1",
+  "-no_slto_panic",
+  "ml-timeout-lock-panic-scale=40",
+]
+# Fixups of signed text, applied by the kernel after signature validation (patches/xnu/native-text-fixup.patch); they reach it as
+# /chosen/text-fixups, not on the command line. Each is <file name>,<file offset>,<original>,<replacement>, in hex. uke runs the
+# same 21H461 iPadOS build as sheng, so sheng's fixup list applies verbatim.
+text_fixups = [
+  # +[AWAttentionAwarenessConfiguration initialize] (21H461) only forces +[AWClientPreferences initialize] and deadlocks
+  # SpringBoard startup against it (ABBA between the main thread and Siri's SASMyriadController); it returns at once instead.
+  "dyld_shared_cache_arm64.15,421e8bc,28ad1bb0008544f9,c0035fd6008544f9",
+  "dyld_shared_cache_arm64.13,1b05bec,44008052,24008052",
+  "dyld_shared_cache_arm64.13,1b05b08,44008052,24008052",
+  # BTAudioHALPlugin's factory returns NULL, so audiomxd skips it: with bluetoothd disabled (sheng-lite) the plugin reconnects to the
+  # audio device and hangs audiomxd's startup (int-141), which keeps the speaker from ever being ready.
+  "BTAudioHALPlugin,38bec,ffc300d1f44f01a9,000080d2c0035fd6",
+]
+
+[payload.adt]
+tool = "scripts/make-uke-adt.py"
+chip_id = "207"
+owned_memory_size = "0x100000000"     # 4 GiB of this unit's 5 GiB high run (0x8C0000000..0xA0000000).
+                                      # Ladder if DarwinBoot reports Out of Resources or the VM misbehaves:
+                                      # 0xC0000000 (3 GiB) -> 0x80000000 (2 GiB). 12 GB reference used 4.75 GiB.
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+# mount(8) phase 1 requires a boot manifest hash to name /private/preboot/<hash>.
+# uke has no Apple personalization manifest, so this is an explicit bring-up
+# owner boot-set identity (SHA-384 of "UkeBringup.BootSet.v1\0"), not Apple data.
+boot_manifest_hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5139ec7b580d63ca9319e218962a2236f23faca"
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
+packed_data_ramdisk = true
+persistent_data = true               # sheng-data-persist keeps Data writes, so Data is not ephemeral storage
+ipad_identity = true
+unique_chip_id = "required"          # the platform seed is not stored in any repository
+
+# Image parameters come from the Mu-Silicium device config; [bootimg.image] would override them.
+
+# The stock ABL powers the panel off when the device tree has no splash region, so add it.
+[bootimg.image]
+header_version = 4
+base           = 0x00000000
+kernel_offset  = 0x00008000
+tags_offset    = 0x01e00000
+pagesize       = 4096
+
+[[bootimg.dtb_node]]
+path = "/reserved-memory/splash_region"
+props = [
+  { name = "label", type = "s", value = "cont_splash_region" },
+  { name = "reg", type = "x", value = ["0x0", "0xe3940000", "0x0", "0x2b00000"] },
+]
+
+# The boot image has no ramdisk. The payload is the vendor_boot vendor ramdisk,
+# which the ABL loads at 0x1000000; UkeBootMemoryDxe publishes this range as
+# the FAT volume the boot manager scans.
+[[bootimg.dtb_node]]
+path = "/chosen"
+props = [
+  { name = "linux,initrd-start", type = "x", value = ["0x1000000"] },
+  { name = "linux,initrd-end", type = "x", value = ["0x6000000"] },
+]
+
+[device_tree]
+source = "device:dts/uke.dts"
+include_dirs = ["soc:dts"]
+
+# Board ADT overrides on top of the OS profile identity (the make-uke-adt.py
+# baseline). The panic log and the GMU pool ride as top-level nodes.
+[adt.chosen.u32]
+embedded-panic-log-size = 0x380000
+
+[adt.chosen.bytes]
+boot-manifest-hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5139ec7b580d63ca9319e218962a2236f23faca"
+
+[adt.defaults.u32]
+sleep-disabled = 1
+"kern.maxvnodes" = 0x13400
+
+[adt.product.string]
+model = "xiaomi,uke"
+
+[adt.product.u32]
+thin-bezel = 1
+
+[adt.buttons.string]
+compatible = "buttons"
+device_type = "buttons"
+
+[adt.buttons.strings]
+button-names = ["hold", "voldown", "volup"]
+
+[adt.buttons.u32]
+home-button-type = 2
+
+[adt.pram.bytes]
+reg = "000080ff000000000000380000000000"
+
+[adt.gmu-memory.bytes]
+reg = "000000c8000000000000000200000000"
