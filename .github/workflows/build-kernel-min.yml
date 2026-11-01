@@ -337,7 +337,12 @@ jobs:
       # by a tree-relative path. Fail here with a reason rather than letting the emitter raise
       # FileNotFoundError.
       - name: Check the fileset reference kernel
-        if: inputs.skip_prelink != 'true'
+        # Only the two configurations whose archives this workflow builds itself need the check here.
+        # A configuration with CONFIG_XNU_BUILD_ARCHIVES (uke-storage, uke-userland, …) gets the
+        # comparison kernel from board.toml [kernel] archives, which the driver runs inside
+        # "unixnu build kernel", immediately before prelink — so at this point in the job it does not
+        # exist yet, and a check here would fail on a configuration that is doing the right thing.
+        if: inputs.skip_prelink != 'true' && contains(fromJSON('["uke_defconfig","uke-nodisplay_defconfig"]'), inputs.defconfig)
         working-directory: UniXNU
         run: |
           set -x
