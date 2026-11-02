@@ -30,6 +30,8 @@ on:
           - uke_defconfig
           - uke-nodisplay_defconfig
           - uke-storage_defconfig
+          - uke-macos_defconfig
+          - uke-userland_defconfig
           - uke-full_defconfig
       core_repository:
         description: 'Core UniXNU repository (owner/name)'
