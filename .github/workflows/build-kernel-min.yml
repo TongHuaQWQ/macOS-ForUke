@@ -430,6 +430,22 @@ jobs:
                   | python3 -c 'import json,sys;print(json.load(sys.stdin)["output"])' 2>/dev/null || true)
           fi
           echo "collecting from: ${OUT:-<unresolved>}"
+          # Every artifact must say which trees and which switches made it. One round was downloaded
+          # and analysed twice because nothing in it traced back to a ref: it came from a branch without
+          # the switch ports, and only a line number in a make command gave that away.
+          {
+            echo "device  $(git -C UniXNU-uke rev-parse HEAD 2>/dev/null || echo unknown) ($(git -C UniXNU-uke rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'))"
+            echo "core    $(git -C UniXNU rev-parse HEAD 2>/dev/null || echo unknown) ($(git -C UniXNU rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?'))"
+            echo "defconfig ${{ inputs.defconfig }}  skip_prelink ${{ inputs.skip_prelink }}"
+            echo "darwinboot $(git -C UniXNU/drivers/DarwinBoot rev-parse HEAD 2>/dev/null || echo unknown)"
+            echo
+            echo "# effective kernel switches (the .config the driver resolved)"
+            grep -E '^(CONFIG_XNU_BUILD_LTO|CONFIG_XNU_DEPLOYMENT_OS|CONFIG_XNU_KERNEL_CHAINED_FIXUPS|CONFIG_XNU_CRYPTO_BOOTSTRAP|CONFIG_XNU_NATIVE_AES|CONFIG_XNU_BUILD_ARCHIVES)|^# CONFIG_XNU_(NATIVE_UFS|SHENG_PMGR)' "$OUT/.config" 2>/dev/null || echo 'no .config'
+            echo
+            echo "# closure the board asked for"
+            python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));c=d.get("closure") or [];print("closure %d bundles: %s%s" % (len(c), ", ".join(c[:8]), " ..." if len(c) > 8 else ""));print("mapping_complete %s allow_missing %s" % (d.get("mapping_complete"), d.get("allow_missing")))' "$OUT/kernel/kernel.json" 2>/dev/null || echo 'kernel.json not readable'
+          } > artifacts/BUILD-INFO.txt 2>&1
+          cat artifacts/BUILD-INFO.txt
           if [ -n "$OUT" ] && [ -f "$OUT/kernel/kernel.macho" ]; then
             cp "$OUT/kernel/kernel.macho" artifacts/
             cp "$OUT/kernel/kernel.json" artifacts/ 2>/dev/null || true
