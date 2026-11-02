@@ -106,16 +106,8 @@ jobs:
           set -x
           git -C UniXNU-uke rev-parse HEAD
           git -C UniXNU rev-parse HEAD
-          git -C UniXNU/kits/XnuPrelink rev-parse HEAD
-
-      # The reviewed pairing anchors of this board live in this repository, keyed by the original
-      # kernelcache they were reviewed against; see prelink/stage-anchors.py for why. The kit reads
-      # them from its own fixtures/ directory, so they are copied in here, after the pin is checked.
-      - name: Stage the reviewed pairing anchors
-        run: |
-          set -x
-          python3 UniXNU-uke/prelink/stage-anchors.py --device UniXNU-uke --core UniXNU
-          ls -l UniXNU/kits/XnuPrelink/fixtures/
+          # The XnuPrelink submodule is initialised later, by the tree step, so this must not fail here.
+          git -C UniXNU/kits/XnuPrelink rev-parse HEAD 2>/dev/null || echo 'kits/XnuPrelink not initialised yet'
 
       - name: Install the host tools (with retry)
         run: |
