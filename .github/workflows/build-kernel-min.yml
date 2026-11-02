@@ -402,6 +402,12 @@ jobs:
               | head -120 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # Annotations are rendered into the run page as plain text, so the first few real failures are
+          # repeated as ::error:: lines: that is what a reader without log access can actually see.
+          grep -h -m 3 -E '(^|[^a-zA-Z])error:|needs component entries|only supports|no policy directory|undefined symbol' $logs 2>/dev/null \
+            | head -3 | cut -c1-200 | while IFS= read -r line; do
+                echo "::error title=build failure::${line}"
+              done
           for log in $logs; do
             echo "=================== $log ($(wc -l < "$log") lines)"
             echo "------------------- error lines, with context"
