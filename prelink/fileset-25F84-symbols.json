@@ -1,0 +1,43 @@
+{
+  "inputs": {
+    "kernelcache_sha256": "697e01d6f9173f88ced3b00c7d711f5fdf37a1222e2baa50a8950f67a4ed11d5",
+    "entry": "com.apple.kernel"
+  },
+  "functions": [
+    {
+      "original": "0xfffffe000b7f1a3c",
+      "original_size": 76,
+      "original_sha256": "92b839addafbbab69ecebd42cce30d85cac8bc729cdb9a6948fab3c431c51604",
+      "native_symbol": "_lck_mtx_try_lock",
+      "evidence": "76 bytes with its only call at +0x3c into lck_mtx_try_lock_slow, which is the native lck_mtx_try_lock to the byte (same size, same call offset, same callee). Position agrees: 0xfffffe000b7f19f8 lck_mtx_lock_spin_always precedes it and 0xfffffe000b7f1a88 lck_mtx_try_lock_slow follows, as in the native text. Source: osfmk/kern/lck_mtx.c."
+    },
+    {
+      "original": "0xfffffe000c0f0db4",
+      "original_size": 56,
+      "original_sha256": "603eee46004ccb5c32ed574042d53ea229f626b93ea80b9ce39dc503faea3168",
+      "native_symbol": "_pmap_claim_reserved_ppl_page",
+      "evidence": "Panic stub whose own literals name it: pmap.c, pmap_claim_reserved_ppl_page and \"function not supported in this environment\". The native pmap_claim_reserved_ppl_page is the same non-PPL stub (12 bytes: returns NULL). Source: osfmk/arm/pmap_ppl_interface.c."
+    },
+    {
+      "original": "0xfffffe000c0f0dec",
+      "original_size": 56,
+      "original_sha256": "dd0d6661384fc35976ce330ee0479a782274c52f40d77b9a95a07b2b7f20d0a9",
+      "native_symbol": "_pmap_free_reserved_ppl_page",
+      "evidence": "Twin of the record above: its literals are pmap.c, pmap_free_reserved_ppl_page and \"function not supported in this environment\". The native pmap_free_reserved_ppl_page is the same non-PPL stub (8 bytes: plain return). Source: osfmk/arm/pmap_ppl_interface.c."
+    },
+    {
+      "original": "0xfffffe000bf71fc8",
+      "original_size": 144,
+      "original_sha256": "9f52a506c42c570111b023525bdcc43c54846e85e1bf32ac37aa512e65f582ec",
+      "native_symbol": "_IOMallocData",
+      "evidence": "Allocates with kalloc_ext at +0x2c, records IOStatistics::getKextNodeFromBacktrace at +0x5c and releases a lock with IORWLockUnlock at +0x7c. It begins exactly where the original _IOFreePageable ends (216 bytes from 0xfffffe000bf71ef0), which is where the native _IOMallocData begins once the native _IOFreePageable (232 bytes) ends; the native wrapper is only a 24-byte thunk to IOMalloc_internal, so no shape method can reach it. Source: libkern/c++/IOLib.cpp."
+    },
+    {
+      "original": "0xfffffe000bf72208",
+      "original_size": 136,
+      "original_sha256": "0b2561307335247fbae1d3dcde8a031a9024089dab668f6694bf6419a9618d28",
+      "native_symbol": "_IOFreeData",
+      "evidence": "Fifth of the six 144-byte wrappers that follow _IOFreePageable (0xfffffe000bf71fc8 + 4 * 0x90) and the only one of them that frees: kfree_ext at +0x28 with the same IOStatistics and IORWLockUnlock tail as the alloc at the head of the block. That makes it the free counterpart of _IOMallocData, matching the native pair. Source: libkern/c++/IOLib.cpp."
+    }
+  ]
+}
