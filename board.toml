@@ -320,6 +320,12 @@ BUILDID_STRING = "uke-research"
 [payload]
 volume = "UKEESP"
 size_mib = 80
+# A prelinked macOS kernel is a kernel collection: its image is as large as the original kernelcache
+# (132.8 MiB for 25F84), and vendor_boot_a is 96 MiB (0x6000000). The payload therefore carries
+# Payloads/kernel.macho.lzma (22.8 MiB, LZMA_ALONE) and DarwinBoot decompresses it before parsing;
+# a boot-test kernel is a plain MH_EXECUTE and stays uncompressed, because the loader reads the plain
+# file first. See docs/11 §27 and docs/13 §5.
+compress_kernel = true
 loader = "firmware"
 title = "uke first boot: source 4K XNU to console"
 dram_size = "0x140000000"            # XNU VM DRAM: this unit's whole high run (0x8C0000000-0xA0000000, 5 GiB).

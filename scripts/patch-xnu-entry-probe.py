@@ -31,6 +31,7 @@ not match. Offsets are specific to the kernel built by build-xnu-4k-baseline.sh.
 """
 import argparse
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -139,7 +140,9 @@ def kernel_symbols(kernel):
     table = {}
     for line in subprocess.run([nm, '-n', kernel], capture_output=True, text=True, check=True).stdout.splitlines():
         parts = line.split()
-        if len(parts) == 3:
+        # llvm-nm prints table headers and per-entry banners for an MH_FILESET kernel collection
+        # ("Symbols:" and friends); only an address-first triple is a symbol.
+        if len(parts) == 3 and re.fullmatch(r'[0-9a-fA-F]+', parts[0]):
             table.setdefault(int(parts[0], 16), parts[2])
     return table
 
