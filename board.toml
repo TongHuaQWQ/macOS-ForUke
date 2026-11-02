@@ -240,6 +240,9 @@ bytes = 12088
 sha256 = "78530c380db9506149703db508ad960a966ec449b02fc8d2de90972e66bc9301"
 
 [kernel.prelink]
+# kits/NativePrelink is the compatibility name of the XnuPrelink kit (components.toml legacy_name);
+# the tree links it to the pinned fork. Do not "modernise" this path to kits/XnuPrelink: the alias is
+# resolved from the catalog's recorded repository, and both names point at the same checkout anyway.
 tool = "kits/NativePrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
 # kernelcache.release.mac17g — the KernelCache entry of the j704ap identity declared in [ipsw], read
