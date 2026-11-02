@@ -3,7 +3,7 @@ schema_version = 1
 [device]
 name = "uke"
 soc = "SM7675"
-os_profile = "ipados-17.7.11-21H461"
+os_profile = "macos-26.5.2-25F84"
 summary = "Xiaomi Pad 7 (SM7675/cliffs) port: format-2 repository migration verified by from-scratch kernel builds; the shared patch set is fully upstream-aligned (73 patches, four-layer chain); the bring-up runs through GPU mode 9, a real on-screen UI and touch scanning, with host-only migration verification on 2026-10-28."
 
 [[area]]
@@ -12,11 +12,11 @@ status = "host-verified"
 components = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "XnuPrelink"]
 paths = ["board.toml", "feeds.toml", "configs/**", "patches/xnu/series", "proprietary-files.txt"]
 inputs = ["Format-2 resolver of the shared UniXNU checkout (schema_version = 2).",
-  "UniXNU-sm7675-common SoC layer and the ipados-17.7.11-21H461 OS profile.",
+  "UniXNU-sm7675-common SoC layer and the macos-26.5.2-25F84 OS profile (the ipados-17.7.11-21H461 profile is the port's history: it is what the device-verified records below were measured on).",
   "Catalog components with the board's fork pins in feeds.toml."]
-configuration = ["board.toml: schema_version 2, soc_source sm7675, os_profile ipados-17.7.11-21H461, kit uke.",
+configuration = ["board.toml: schema_version 2, soc_source sm7675, os_profile macos-26.5.2-25F84, kit uke.",
   "The validated 68-patch set as one explicit series (device:patches/xnu/series).",
-  "Nine board defconfigs; uke-gpu-userland_defconfig is the active GPU track."]
+  "Twelve board defconfigs; uke-macos_defconfig is the macOS prelink track and uke-gpu-userland_defconfig the GPU one."]
 procedure = ["./unixnu defconfig uke-gpu-userland_defconfig -D ../UniXNU-uke-format2",
   "./unixnu fetch -D ../UniXNU-uke-format2 && ./unixnu status --json -D ../UniXNU-uke-format2",
   "./unixnu tree -D ../UniXNU-uke-format2"]
@@ -307,6 +307,11 @@ evidence = [
 [[area]]
 id = "arm64e-capability"
 status = "device-verified"
+components = []
+paths = ["board.toml", "configs/uke-macos_defconfig", ".github/workflows/build-kernel-min.yml"]
+configuration = ["The arch layer is profiles/arch/arm64e: board.toml's os_profile macos-26.5.2-25F84 declares arch = arm64e, and the resolver selects that profile instead of profiles/arch/arm64.",
+  "configs/uke-macos_defconfig is the configuration CI builds (run 41387605078); scripts/build-xnu-4k-baseline.sh passes ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64e to the XNU build and UNIXNU_XNU_ARCH to build-firehose.sh, so the kernel and the firehose stub agree on the ABI.",
+  "The deployment target follows the profile (26.5.2), so every object the build links — the comparison kernel, libcorecrypto_kernel_noasm-namespaced.a, libpthread_kernel.a, libmockfs_fixture.a and the arm64e driver archives — is audited by scripts/kernel_target.py for an arm64e LC_BUILD_VERSION at that deployment."]
 inputs = ["Xiaomi Pad 7 (uke, SM7675, 2410CRP4CC) running its stock Android 16 build with SukiSU root, adb reachable.",
   "The requirements table of docs/porting/arm64e.md in the shared UniXNU checkout.",
   "scripts/check-arm64e-pac.c, the EL0 half of the check, built freestanding for aarch64 +pauth."]
@@ -326,9 +331,7 @@ limits = ["Every check ran under Android's kernel. XNU programs the keys itself 
   "The three-argument PACIA forms, the JOP/GA keys and per-process key isolation are not exercised: the arm64e profile shares one key set between EL0 and EL1, so process isolation through PAC is deliberately absent."]
 next_action = ["Build with the arm64e profile and confirm on the first boot that PAC_INIT_KEY_STATE runs and the kernel reaches its panic or console output without a trap."]
 evidence = [
-  { kind = "device", reference = "/proc/cpuinfo", result = "8/8 CPUs report paca and pacg; 3x Cortex-X4, 4x Cortex-A720, 1x Cortex-A520", command = "adb shell grep -m1 Features /proc/cpuinfo" },
-  { kind = "device", reference = "scripts/check-arm64e-pac.c", result = "cores=8 pacia_changed=8 autia_restored=8; 0x20023c -> 0x68fe000020023c -> 0x20023c on every core", command = "adb shell /data/local/tmp/pac_rt" },
-  { kind = "device", reference = "dmesg", result = "CPU features: detected: Address authentication (architected QARMA3 algorithm); Generic authentication (architected QARMA3 algorithm); Running under Gunyah hypervisor 51/v1", command = "adb shell su -c 'dmesg | grep -i authentication'" },
-  { kind = "device", reference = "/proc/config.gz", result = "CONFIG_ARM64_PTR_AUTH=y and CONFIG_ARM64_PTR_AUTH_KERNEL=y", command = "adb shell su -c 'zcat /proc/config.gz | grep ARM64_PTR_AUTH'" },
-  { kind = "host", reference = "out/ipsw/25F84/kernelcache.decompressed", result = "cputype 0x0100000c, subtype 0xc0000002 (CPU_SUBTYPE_ARM64E with the PTRAUTH ABI flag)", command = "python3 -c 'import struct; d=open(path, \"rb\").read(32); print(hex(struct.unpack_from(\"<I\", d, 8)[0]))'" },
+  { kind = "device", reference = "docs/ARM64E-PORT.md", result = "8/8 CPUs report paca and pacg (3x Cortex-X4, 4x Cortex-A720, 1x Cortex-A520); architected QARMA3 address and generic authentication; CONFIG_ARM64_PTR_AUTH=y and CONFIG_ARM64_PTR_AUTH_KERNEL=y; Running under Gunyah hypervisor 51/v1", command = "adb shell 'grep -m1 Features /proc/cpuinfo'", revision = "6f8273c9977c3cacd8bd7de9cad050870daeab14" },
+  { kind = "device", reference = "scripts/check-arm64e-pac.c", result = "cores=8 pacia_changed=8 autia_restored=8; 0x20023c -> 0x68fe000020023c -> 0x20023c on every core", command = "adb shell /data/local/tmp/pac_rt", revision = "6f8273c9977c3cacd8bd7de9cad050870daeab14" },
+  { kind = "host", reference = "board.toml", result = "the pinned kernelcache.release.mac17g (sha256 697e01d6…) decompresses to a Mach-O with cputype 0x0100000c, subtype 0xc0000002 - CPU_SUBTYPE_ARM64E with the PTRAUTH ABI flag - so board.toml can only resolve an arm64e profile", command = "python3 -c 'import struct; d=open(path, \"rb\").read(32); print(hex(struct.unpack_from(\"<I\", d, 8)[0]))'", revision = "6f8273c9977c3cacd8bd7de9cad050870daeab14" },
 ]

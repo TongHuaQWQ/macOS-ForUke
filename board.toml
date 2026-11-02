@@ -93,11 +93,17 @@ archives = [
   "component:ArmCpu",
   "component:ArmVirtPlatform",
   "component:SoftwareAES",
-  # WITHOUT build-software-aes-bindings.py: it either compiles the recorded overlay
-  # (scripts/data/native-aes-original-bindings.S — not in this repository) or runs the audit path,
-  # which needs build/image4-ignition/aes-interface-audit.json plus a qualified live candidate. With
-  # neither present it has nothing to bind, and libSoftwareAES.a from component:SoftwareAES above
-  # already provides the source AES subclass.
+  # WITHOUT build-software-aes-bindings.py. The overlay it compiles is in the core checkout
+  # (scripts/data/native-aes-original-bindings.S), so the step itself would run — but its `.set`
+  # values are the measured iPadOS 17.7.11 prelink layout of IOAESAccelerator (0xfffffff004a8…), and
+  # prelink-ABI addresses do not carry across kernelcaches (same argument as build-sheng-platform-power.py
+  # below). With the step absent, libSoftwareAES.a(NativeAES.o) imported createSpecialKeys,
+  # performAESQuantum, completeAESQuantum, disableHardwareKey, performImmediateAES, the base
+  # constructor and the destructor with nothing to define them, and run 41387605078 died at the link.
+  # CONFIG_XNU_NATIVE_AES is off in configs/uke-macos_defconfig for this round, which keeps that
+  # archive out of the link entirely. Reinstating both needs an audit of mac17g's own collection (the
+  # extent emit_prelink.py plans for com.apple.iokit.IOCryptoAcceleratorFamily), not a re-pinned
+  # address set.
   "prepare-storage-headers.py",
   # WITHOUT the two UFS entries — component:ShengUfs and build-arm-driver.py NativeUfs --unverified —
   # for the prelink round. On arm64e the component delegates to build-sheng-source-storage.py, which

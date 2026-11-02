@@ -1,25 +1,35 @@
 # uke macOS prelink configuration: everything the kernel needs to link and prelink, and nothing whose
 # archive this port cannot build yet.
 #
-# Same as configs/uke-storage_defconfig except two switches, because build-xnu-4k-baseline.sh refuses
-# to link when a switch is on but its archive is absent ("test -f "$UFS_ARCHIVE"" at line ~742, and the
-# same pattern for the PMGR archive):
+# Three switches differ from configs/uke-storage_defconfig. Each is off because the archive it
+# selects cannot be built (or cannot be built correctly) for the macOS 26.5.2 train yet:
 #
 #   * CONFIG_XNU_NATIVE_UFS is off — the SangUfs component left [components] include: on arm64e it
 #     delegates to build-sheng-source-storage.py, which authenticates every read against the OS
 #     profile's signed root policy, and no policy exists for 25F84 yet.
 #   * CONFIG_XNU_SHENG_PMGR is off — its archive comes from build-sheng-platform-power.py, which
 #     inherits ApplePMGR slot addresses from an audit pinned to the iPadOS 17 kernelcache.
+#   * CONFIG_XNU_NATIVE_AES is off — the NativeAES subclass derives from IOAESAccelerator, whose
+#     methods live in the prelinked IOCryptoAcceleratorFamily, so its vtable can only be bound to a
+#     measured address set. The one recorded set is scripts/data/native-aes-original-bindings.S,
+#     measured on kernelcache.release.ipad7 (the iPadOS 17.7.11 image this board used to pin), and
+#     prelink-ABI addresses do not carry across kernelcaches — board.toml now pins mac17g. Linking
+#     that overlay anyway is what made run 41387605078 fail: libSoftwareAES.a(NativeAES.o) imports
+#     IOAESAccelerator::createSpecialKeys/performAESQuantum/…, and the recorded overlay's own step
+#     (build-software-aes-bindings.py) is not in board.toml's archive list, so nothing defined them.
+#     With the switch off, build-xnu-4k-baseline.sh force-loads no libSoftwareAES.a and no object
+#     references IOAESAccelerator::*. AES comes back with an audit of mac17g.
 #
 # What this configuration is for: building the comparison kernel and prelinking the real macOS
 # collection into a kernel. Storage returns with the policy directory; the payload for this round is
 # built with native-ufs-root=0.
 #
 # BUILD_ARCHIVES stays on: it is what lets board.toml [kernel] archives run, and
-# build-fileset-release-reference.py is the last of those entries.
-# builders that cannot run on a cold tree in public CI.
+# build-fileset-release-reference.py is the last of those entries. component:SoftwareAES stays in that
+# list too — it is what audits the subclass against the 26.5.2 headers — but its archive is not linked
+# while the switch is off.
 #
-# Enabled (from uke-full_defconfig): SOURCE_PTHREAD, NATIVE_AES, SOURCE_MOCKFS, BUILD_ARCHIVES.
+# Enabled (from uke-full_defconfig): SOURCE_PTHREAD, SOURCE_MOCKFS, BUILD_ARCHIVES.
 #
 # Left out on purpose:
 #   * CONFIG_XNU_NATIVE_LEGACY_DISPLAY — its archive is gated by
@@ -33,13 +43,11 @@
 # A732 firmware pins in .cache/firmware/uke-gpu and the owner-built Metal plug-in, neither of which
 # a public runner can produce. See the [kernel] archives comment in board.toml.
 
-# Full uke configuration for the stage-6 kernel (storage + root).
+# Kernel configuration carried over from configs/uke-storage_defconfig.
 #
 # Everything here is reproducible from the pinned sources and the pinned
-# kernelcache alone: the AES subclass binds to the recorded original
-# addresses in scripts/data/native-aes-original-bindings.S, and NativeUfs is
-# built in the bring-up ("adopt the running controller") mode, without a
-# verified-root policy bundle. CONFIG_XNU_BUILD_ARCHIVES makes the unixnu
+# kernelcache alone: the AES subclass is built but not linked (see the header),
+# and NativeUfs is off entirely. CONFIG_XNU_BUILD_ARCHIVES makes the unixnu
 # driver run the board archive list before the final link; the bootstrap pass
 # and the first-console configurations leave it unset.
 #
@@ -51,7 +59,7 @@ CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
 # CONFIG_XNU_NATIVE_UFS is not set
-CONFIG_XNU_NATIVE_AES=y
+# CONFIG_XNU_NATIVE_AES is not set
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 CONFIG_XNU_SOURCE_MOCKFS=y
 CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
