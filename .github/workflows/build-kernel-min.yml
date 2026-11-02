@@ -19,6 +19,12 @@
 name: build-uke-kernel-min
 
 on:
+  # A push to a ci-* branch runs this workflow with the same defaults as the form below, so an agent or
+  # a script can start a round by pushing a branch instead of needing a token. Nothing else is affected:
+  # main and the round-* experiment branches stay manual.
+  push:
+    branches:
+      - 'ci-*'
   workflow_dispatch:
     inputs:
       defconfig:
@@ -54,6 +60,12 @@ permissions:
   contents: read
 
 env:
+  # One source of truth for the run's parameters. workflow_dispatch supplies them; a push to a ci-*
+  # branch has no inputs, so these fall back to the round's defaults. Steps read env.*, never inputs.*.
+  UKE_DEFCONFIG: ${{ inputs.defconfig || 'uke-macos_defconfig' }}
+  UKE_CORE_REPO: ${{ inputs.core_repository || 'TongHuaQWQ/UniXNU' }}
+  UKE_CORE_REF: ${{ inputs.core_ref || 'macos' }}
+  UKE_SKIP_PRELINK: ${{ inputs.skip_prelink || 'false' }}
   HOMEBREW_NO_AUTO_UPDATE: 1
   HOMEBREW_NO_INSTALL_CLEANUP: 1
   # Do NOT export UNIXNU_OUT / UNIXNU_DEVICE here: scripts/unixnu/config.py reads them as the output
@@ -75,7 +87,7 @@ jobs:
           xcode-select -p
           brew --version
           df -h /
-          echo "repo=$GITHUB_REPOSITORY ref=$GITHUB_REF defconfig=${{ inputs.defconfig }} core=${{ inputs.core_repository }}@${{ inputs.core_ref }}"
+          echo "repo=$GITHUB_REPOSITORY ref=$GITHUB_REF defconfig=${{ env.UKE_DEFCONFIG }} core=${{ env.UKE_CORE_REPO }}@${{ env.UKE_CORE_REF }}"
 
       - name: Check out the device repository
         uses: actions/checkout@v4
@@ -85,8 +97,8 @@ jobs:
       - name: Check out UniXNU
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.core_repository }}
-          ref: ${{ inputs.core_ref }}
+          repository: ${{ env.UKE_CORE_REPO }}
+          ref: ${{ env.UKE_CORE_REF }}
           path: UniXNU
 
       - name: Record revisions
@@ -216,12 +228,12 @@ jobs:
         working-directory: UniXNU
         run: |
           set -x
-          ./unixnu defconfig ${{ inputs.defconfig }} -D ../UniXNU-uke
+          ./unixnu defconfig ${{ env.UKE_DEFCONFIG }} -D ../UniXNU-uke
           ./unixnu tree -D ../UniXNU-uke
           OUT=$(./unixnu status --json -D ../UniXNU-uke | python3 -c 'import json,sys;print(json.load(sys.stdin)["output"])')
           echo "UKE_OUT_DIR=$OUT" >> "$GITHUB_ENV"
           echo "target output dir: $OUT"
-          if [ "${{ inputs.skip_prelink }}" = "true" ]; then
+          if [ "${{ env.UKE_SKIP_PRELINK }}" = "true" ]; then
             # A prelink-less kernel carries no corecrypto kext at all, so it has to bring its own
             # provider: source mode compiles one (and, when a collection does carry the original, that
             # provider is what finds it and shares the result through the OSKext hook).
@@ -264,7 +276,7 @@ jobs:
       # is what the archive builders need: build/xnu/ios-obj/... (EXPORT_HDRS and the compile records).
       # The separate bootstrap config's tree cannot provide them: format 2 gives every config its own tree.
       - name: Pass 2 — compile records inside the target tree (link expected to fail)
-        if: contains(fromJSON('["uke_defconfig","uke-nodisplay_defconfig"]'), inputs.defconfig)
+        if: contains(fromJSON('["uke_defconfig","uke-nodisplay_defconfig"]'), env.UKE_DEFCONFIG)
         working-directory: UniXNU
         run: |
           set -x
@@ -279,7 +291,7 @@ jobs:
       # The first-console configuration does not opt in to the board archive list, so its archives are
       # built here explicitly, in the same tree as the records from pass 2.
       - name: Build the first-console archives
-        if: contains(fromJSON('["uke_defconfig","uke-nodisplay_defconfig"]'), inputs.defconfig)
+        if: contains(fromJSON('["uke_defconfig","uke-nodisplay_defconfig"]'), env.UKE_DEFCONFIG)
         working-directory: UniXNU
         run: |
           set -x
@@ -309,7 +321,7 @@ jobs:
           # qualified baseline. uke_defconfig wants it; uke-nodisplay_defconfig deliberately does not, and
           # build-xnu-4k-baseline.sh inserts uke_display_probe_stub into bsd/init.c instead, so the link
           # succeeds without it.
-          if [ "${{ inputs.defconfig }}" = "uke_defconfig" ]; then
+          if [ "${{ env.UKE_DEFCONFIG }}" = "uke_defconfig" ]; then
             mkdir -p "$workspace/build/display-analysis"
             UKE_OUT_DIR="$UKE_OUT_DIR" python3 - <<'PY2'
           import json, os
@@ -322,7 +334,7 @@ jobs:
             ( cd "$workspace" && python3 scripts/build-native-legacy-display.py )
             ls -l "$workspace/build/native-legacy-display/" 2>/dev/null || true
           else
-            echo "legacy display disabled in ${{ inputs.defconfig }}: no display archive needed (stub path)"
+            echo "legacy display disabled in ${{ env.UKE_DEFCONFIG }}: no display archive needed (stub path)"
           fi
           ls -l "$workspace/build/corecrypto-2023/"*.a 2>/dev/null | tail -3 || true
           # Upstream's 26/27 kernel archives end with the comparison kernel:
@@ -331,7 +343,7 @@ jobs:
           # This repository's configurations cannot carry that entry — [kernel] archives only runs
           # under CONFIG_XNU_BUILD_ARCHIVES, which uke-nodisplay_defconfig does not set — so the same
           # final entry is reproduced here, after the four archives the script asserts.
-          if [ "${{ inputs.skip_prelink }}" != "true" ]; then
+          if [ "${{ env.UKE_SKIP_PRELINK }}" != "true" ]; then
             ( cd "$workspace" && python3 scripts/build-libpthread-kernel.py )
             ( cd "$workspace" && python3 scripts/build-fileset-release-reference.py --tree . )
             ls -l "$workspace/build/xnu/fileset-reference/" || true
@@ -348,7 +360,7 @@ jobs:
         # comparison kernel from board.toml [kernel] archives, which the driver runs inside
         # "unixnu build kernel", immediately before prelink — so at this point in the job it does not
         # exist yet, and a check here would fail on a configuration that is doing the right thing.
-        if: inputs.skip_prelink != 'true' && contains(fromJSON('["uke_defconfig","uke-nodisplay_defconfig"]'), inputs.defconfig)
+        if: env.UKE_SKIP_PRELINK != 'true' && contains(fromJSON('["uke_defconfig","uke-nodisplay_defconfig"]'), env.UKE_DEFCONFIG)
         working-directory: UniXNU
         run: |
           set -x
@@ -368,7 +380,7 @@ jobs:
         run: |
           set -x
           SKIP_PRELINK=""
-          if [ "${{ inputs.skip_prelink }}" = "true" ]; then
+          if [ "${{ env.UKE_SKIP_PRELINK }}" = "true" ]; then
             SKIP_PRELINK=--skip-prelink
             echo "::warning::skip_prelink=true: the kernel carries no kernelcache kexts, so it can boot and print but cannot mount a root"
           fi
@@ -397,7 +409,7 @@ jobs:
           {
             echo "## Kernel build failure"
             echo
-            echo "\`${GITHUB_JOB}\` · defconfig \`${{ inputs.defconfig }}\` · core \`${{ inputs.core_repository }}@${{ inputs.core_ref }}\` · skip_prelink \`${{ inputs.skip_prelink }}\`"
+            echo "\`${GITHUB_JOB}\` · defconfig \`${{ env.UKE_DEFCONFIG }}\` · core \`${{ env.UKE_CORE_REPO }}@${{ env.UKE_CORE_REF }}\` · skip_prelink \`${{ env.UKE_SKIP_PRELINK }}\`"
             echo
             echo '```'
             grep -h -B1 -A3 -E '(^|[^a-zA-Z])error:|fatal error:|undefined (symbol|reference)|ld: |cannot find|needs component entries|only supports|no policy directory' $logs \
