@@ -1,8 +1,8 @@
 # uke macOS prelink configuration: everything the kernel needs to link and prelink, and nothing whose
 # archive this port cannot build yet.
 #
-# Three switches differ from configs/uke-storage_defconfig. Each is off because the archive it
-# selects cannot be built (or cannot be built correctly) for the macOS 26.5.2 train yet:
+# Four switches differ from configs/uke-storage_defconfig. Three are off because the archive they
+# select cannot be built (or cannot be built correctly) for the macOS 26.5.2 train yet:
 #
 #   * CONFIG_XNU_NATIVE_UFS is off — the SangUfs component left [components] include: on arm64e it
 #     delegates to build-sheng-source-storage.py, which authenticates every read against the OS
@@ -19,6 +19,7 @@
 #     (build-software-aes-bindings.py) is not in board.toml's archive list, so nothing defined them.
 #     With the switch off, build-xnu-4k-baseline.sh force-loads no libSoftwareAES.a and no object
 #     references IOAESAccelerator::*. AES comes back with an audit of mac17g.
+#   * CONFIG_XNU_CRYPTO_BOOTSTRAP is "source" instead of "prelinked" — see the note above that line.
 #
 # What this configuration is for: building the comparison kernel and prelinking the real macOS
 # collection into a kernel. Storage returns with the policy directory; the payload for this round is
@@ -115,7 +116,18 @@ CONFIG_XNU_NATIVE_PAN=y
 # CONFIG_XNU_BOOT_PROGRESS is not set
 # CONFIG_XNU_NATIVE_ADRENO is not set
 
-CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
+# `source`, not `prelinked`. The source provider is what the collection case is written for:
+# patches/xnu-12377/source-corecrypto14-bootstrap.patch starts the original com.apple.kec.corecrypto
+# *out of the boot kernel collection* before anything needs crypto and lets OSKext's later start of
+# that module return the same result, so there is exactly one provider ("Registering two providers
+# would leave the second one's PRNG context uninitialized"). `prelinked` does the opposite: it drops
+# the provider definitions with -UXNU_SOURCE_CORECRYPTO14 in prng_random.o, and with them the FIPS
+# POST object the kernel otherwise carries — run 41403174431 died in emit_prelink with
+#   ValueError: Expected one 32-byte corecrypto HMAC field
+# because fileset_segmented.patch_entry_header() reseals `__TEXT,__fips_hmacs` over the relocated
+# __TEXT_EXEC,__text, and `prelinked` leaves no such section to reseal. The same switch is what the
+# iOS 26/27 boards set (UniXNU-sheng: CONFIG_XNU_CRYPTO_BOOTSTRAP="source").
+CONFIG_XNU_CRYPTO_BOOTSTRAP="source"
 CONFIG_XNU_EXTRA_LD_ARCHIVES=""
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n
