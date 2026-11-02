@@ -389,6 +389,19 @@ jobs:
             echo "no logs under out/uke/*/*/logs"
             exit 0
           fi
+          # The step summary is rendered into the run page itself, and the run page is readable without
+          # authentication — the job logs are not. Writing the error lines here is what makes a failure
+          # diagnosable from outside the runner.
+          {
+            echo "## Kernel build failure"
+            echo
+            echo "\`${GITHUB_JOB}\` · defconfig \`${{ inputs.defconfig }}\` · core \`${{ inputs.core_repository }}@${{ inputs.core_ref }}\` · skip_prelink \`${{ inputs.skip_prelink }}\`"
+            echo
+            echo '```'
+            grep -h -B1 -A3 -E '(^|[^a-zA-Z])error:|fatal error:|undefined (symbol|reference)|ld: |cannot find|needs component entries|only supports|no policy directory' $logs \
+              | head -120 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           for log in $logs; do
             echo "=================== $log ($(wc -l < "$log") lines)"
             echo "------------------- error lines, with context"
