@@ -418,10 +418,17 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # Annotations are rendered into the run page as plain text, so the first few real failures are
           # repeated as ::error:: lines: that is what a reader without log access can actually see.
-          grep -h -m 3 -E '(^|[^a-zA-Z])error:|needs component entries|only supports|no policy directory|undefined symbol' $logs 2>/dev/null \
-            | head -3 | cut -c1-200 | while IFS= read -r line; do
-                echo "::error title=build failure::${line}"
-              done
+          #
+          # Each line names the log it came from, and the last matching logs win instead of the first:
+          # kernel-bootstrap.log links without the archive builders by design (XNU_BOOTSTRAP=1), so its
+          # linker error is tolerated and the pass that matters is a later one. An earlier round annotated
+          # exactly that tolerated error and hid the real failure.
+          for log in $logs; do
+            line=$(grep -m 1 -E '(^|[^a-zA-Z])error:|needs component entries|only supports|no policy directory|undefined symbol|symbol\(s\) not found' "$log" 2>/dev/null | cut -c1-160)
+            if [ -n "$line" ]; then echo "$(basename "$log"): $line"; fi
+          done | tail -3 | cut -c1-200 | while IFS= read -r line; do
+              echo "::error title=build failure::${line}"
+            done || true
           for log in $logs; do
             echo "=================== $log ($(wc -l < "$log") lines)"
             echo "------------------- error lines, with context"
