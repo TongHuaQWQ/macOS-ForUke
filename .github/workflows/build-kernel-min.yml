@@ -433,6 +433,11 @@ jobs:
           if [ -n "$OUT" ] && [ -f "$OUT/kernel/kernel.macho" ]; then
             cp "$OUT/kernel/kernel.macho" artifacts/
             cp "$OUT/kernel/kernel.json" artifacts/ 2>/dev/null || true
+            # The pairing map is the only channel that names which original function an --allow-missing
+            # redirect stood in for: Apple publishes no KDK for macOS 26, so the stripped kernelcache has
+            # no symbols to compare against, and a device panic only prints the caller address. With the
+            # map, stubbed[bundle][address] resolves to the kext that called and the pairing it wanted.
+            cp "$OUT/kernel/kernel.map.json" artifacts/ 2>/dev/null || echo "no kernel.map.json" >> artifacts/MISSING.txt
             shasum -a 256 "$OUT/kernel/kernel.macho" | tee artifacts/kernel.macho.sha256
           else
             echo "kernel.macho was not produced" | tee artifacts/MISSING.txt
