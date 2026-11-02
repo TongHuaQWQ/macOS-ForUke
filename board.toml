@@ -253,12 +253,21 @@ slide = "-0x1000000"
 # security init on a SoC with no Apple PMGR panics with "AMFI: No PMGR?" — uke is a Snapdragon. Boot
 # without the hook first and only then, if AMFI trust blocks userland, read the address out of mac17g.
 # ROUND A (branch round-a-minimal): the smallest closure that still carries a real kext, so the
-# collection boot can be judged on mechanism alone. com.apple.kec.Libm is the one closure member whose
-# report entry is empty -- 0 stubbed sites and 0 missing targets (docs/11 §30.2 ranks the rest: apfs
-# 5,362 stubbed sites, IOHIDFamily 14,384, corecrypto 194 and the first one that panicked).
+# collection boot can be judged on mechanism alone. Three facts pick the kext (docs/11 §31):
+#
+#   * com.apple.kec.Libm was the obvious choice -- 0 stubbed sites in the report -- but it has NO
+#     __DATA_CONST segment, and fileset_layout.validate() calls min() over the retained kext ranges
+#     inside __DATA_CONST, so emission dies with "min() iterable argument is empty". Kit bug, upstream.
+#   * com.apple.kext.CoreTrust and com.apple.iokit.IOHIDEventDriver are clean in the report but their
+#     dependency closure pulls com.apple.kec.corecrypto (the kext that panicked) or IOHIDFamily
+#     (14,384 stubbed sites).
+#   * com.apple.driver.AppleAudioClockLibs closes over {itself, kpi.bsd, kpi.iokit, kpi.libkern,
+#     kpi.mach, kpi.unsupported} only, has __DATA_CONST, and reports 3 stubbed sites on 1 target.
+#     It is a library kext: it exports symbols and runs nothing, so it exercises loading, not calls.
+#
 # Everything below stays here, commented, for the restore on main.
 roots = [
-  "com.apple.kec.Libm",
+  "com.apple.driver.AppleAudioClockLibs",
 ]
 
 # The full prelink closure, unchanged from main:
