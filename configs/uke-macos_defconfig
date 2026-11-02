@@ -54,6 +54,17 @@
 # CONFIG_XNU_<NAME> becomes XNU_<NAME> for the kernel build.
 
 CONFIG_XNU_BUILD_ARCHIVES=y
+# Link the kernel the way a kernel *collection* needs it: `-Wl,-add_split_seg_info -Wl,-kernel`
+# instead of the standalone `-fuse-ld=ld-classic -Wl,-threaded_starts_section` pair
+# (patches/xnu-12377/arm64e-threaded-starts.patch switches on this define).
+#
+# Without it, emit_prelink.py dies in fileset_layout.split_references:
+#   ValueError: Native image has no split-segment relocation information
+# because a standalone link carries no LC_SEGMENT_SPLIT_INFO (0x1e), and the fileset emitter relocates
+# the native kernel into the collection's __TEXT/__DATA ranges using exactly those records. The
+# standalone pairing is what the boot-test configurations keep: arm_init rebases and signs
+# __TEXT,__thread_starts itself, which only ld-classic emits.
+CONFIG_XNU_KERNEL_CHAINED_FIXUPS=y
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
 CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
