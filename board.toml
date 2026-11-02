@@ -165,7 +165,9 @@ archives = [
   # It asserts the four archives above it (corecrypto both flavours, ArmDTPlatform, ArmCpu, libpthread),
   # so the position matters. It runs only for a configuration with CONFIG_XNU_BUILD_ARCHIVES=y; the
   # workflow builds it explicitly for uke-nodisplay_defconfig, which has no archives.
-  "build-fileset-release-reference.py --tree .",
+  # --lto: the comparison kernel is built the way Apple builds theirs, so the matcher's
+  # reference-order/reference-shape anchors see comparable codegen (docs/11 §33).
+  "build-fileset-release-reference.py --tree . --lto",
 ]
 
 # Adreno 732 (uke) board values for the native GPU driver. The driver carries

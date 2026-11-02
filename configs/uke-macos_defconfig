@@ -55,6 +55,12 @@
 # CONFIG_XNU_<NAME> becomes XNU_<NAME> for the kernel build.
 
 CONFIG_XNU_BUILD_ARCHIVES=y
+# ROUND B experiment (branch round-b-lto): apple's kernelcache.release.* is an LTO build, and the
+# fileset prelink pairs each kext call against our kernel by comparing code. A non-LTO reconstruction
+# differs wherever Apple inlined, which is why the last full-closure report named only 1,508 of the
+# 3,826 kext-facing targets. Watch `functions matched` and `kext-facing targets named` in the prelink
+# log: they are directly comparable to the 8,781 / 1508 baseline (docs/11 §32.1).
+CONFIG_XNU_BUILD_LTO=y
 # Link the kernel the way a kernel *collection* needs it: `-Wl,-add_split_seg_info -Wl,-kernel`
 # instead of the standalone `-fuse-ld=ld-classic -Wl,-threaded_starts_section` pair
 # (patches/xnu-12377/arm64e-threaded-starts.patch switches on this define).
