@@ -61,6 +61,12 @@ CONFIG_XNU_BUILD_ARCHIVES=y
 # 3,826 kext-facing targets. Watch `functions matched` and `kext-facing targets named` in the prelink
 # log: they are directly comparable to the 8,781 / 1508 baseline (docs/11 §32.1).
 CONFIG_XNU_BUILD_LTO=y
+# Build FOR macOS, not for iOS. XNU_TARGET_OS_* is not just a deployment flag: it decides which code
+# the kernel compiles at all, and Apple's macOS kernel is an XNU_TARGET_OS_OSX build. Until now the
+# device repo's copy of build-xnu-4k-baseline.sh shadowed the core's macOS branch and pinned
+# -DXNU_TARGET_OS_IOS, so whole families of kext-facing functions never existed in our kernel; those
+# are exactly the entries that end up as `--allow-missing` stubs (docs/11 §34).
+CONFIG_XNU_DEPLOYMENT_OS="macos"
 # Link the kernel the way a kernel *collection* needs it: `-Wl,-add_split_seg_info -Wl,-kernel`
 # instead of the standalone `-fuse-ld=ld-classic -Wl,-threaded_starts_section` pair
 # (patches/xnu-12377/arm64e-threaded-starts.patch switches on this define).
