@@ -252,39 +252,49 @@ slide = "-0x1000000"
 # re-derived from mac17g's __PRELINK_INFO, and the caihong/nx769j records say running AMFI early
 # security init on a SoC with no Apple PMGR panics with "AMFI: No PMGR?" — uke is a Snapdragon. Boot
 # without the hook first and only then, if AMFI trust blocks userland, read the address out of mac17g.
+# ROUND A (branch round-a-minimal): the smallest closure that still carries a real kext, so the
+# collection boot can be judged on mechanism alone. com.apple.kec.Libm is the one closure member whose
+# report entry is empty -- 0 stubbed sites and 0 missing targets (docs/11 §30.2 ranks the rest: apfs
+# 5,362 stubbed sites, IOHIDFamily 14,384, corecrypto 194 and the first one that panicked).
+# Everything below stays here, commented, for the restore on main.
 roots = [
-  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
-  "com.apple.driver.AppleARMPlatform",
-  "com.apple.driver.AppleARMWatchdogTimer",
-  "com.apple.driver.AppleAudioClockLibs",
-  "com.apple.driver.AppleEffaceableStorage",
-  "com.apple.driver.AppleIISController",
-  "com.apple.driver.AppleM2ScalerCSCDriver",
-  "com.apple.driver.AppleMobileFileIntegrity",
-  "com.apple.driver.ApplePMGR",
-  "com.apple.driver.IODARTFamily",
-  "com.apple.filesystems.apfs",
-  "com.apple.iokit.CoreAnalyticsFamily",
-  "com.apple.iokit.IOAVFamily",
-  "com.apple.iokit.IOAudio2Family",
-  "com.apple.iokit.IOCECFamily",
-  "com.apple.iokit.IOCryptoAcceleratorFamily",
-  "com.apple.iokit.IOGPUFamily",
-  "com.apple.iokit.IOHDCPFamily",
-  "com.apple.iokit.IOMobileGraphicsFamily",
-  "com.apple.iokit.IOReportFamily",
-  "com.apple.iokit.IOSlowAdaptiveClockingFamily",
-  "com.apple.iokit.IOStorageFamily",
-  "com.apple.iokit.IOSurface",
   "com.apple.kec.Libm",
-  "com.apple.kec.corecrypto",
-  "com.apple.kext.AppleMatch",
-  "com.apple.kext.CoreTrust",
-  "com.apple.security.AppleImage4",
-  "com.apple.security.sandbox",
-  "com.apple.iokit.IOHIDFamily",
-  "com.apple.iokit.IOHIDEventDriver",
 ]
+
+# The full prelink closure, unchanged from main:
+# roots = [
+#   "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+#   "com.apple.driver.AppleARMPlatform",
+#   "com.apple.driver.AppleARMWatchdogTimer",
+#   "com.apple.driver.AppleAudioClockLibs",
+#   "com.apple.driver.AppleEffaceableStorage",
+#   "com.apple.driver.AppleIISController",
+#   "com.apple.driver.AppleM2ScalerCSCDriver",
+#   "com.apple.driver.AppleMobileFileIntegrity",
+#   "com.apple.driver.ApplePMGR",
+#   "com.apple.driver.IODARTFamily",
+#   "com.apple.filesystems.apfs",
+#   "com.apple.iokit.CoreAnalyticsFamily",
+#   "com.apple.iokit.IOAVFamily",
+#   "com.apple.iokit.IOAudio2Family",
+#   "com.apple.iokit.IOCECFamily",
+#   "com.apple.iokit.IOCryptoAcceleratorFamily",
+#   "com.apple.iokit.IOGPUFamily",
+#   "com.apple.iokit.IOHDCPFamily",
+#   "com.apple.iokit.IOMobileGraphicsFamily",
+#   "com.apple.iokit.IOReportFamily",
+#   "com.apple.iokit.IOSlowAdaptiveClockingFamily",
+#   "com.apple.iokit.IOStorageFamily",
+#   "com.apple.iokit.IOSurface",
+#   "com.apple.kec.Libm",
+#   "com.apple.kec.corecrypto",
+#   "com.apple.kext.AppleMatch",
+#   "com.apple.kext.CoreTrust",
+#   "com.apple.security.AppleImage4",
+#   "com.apple.security.sandbox",
+#   "com.apple.iokit.IOHIDFamily",
+#   "com.apple.iokit.IOHIDEventDriver",
+# ]
 
 [firmware]
 config = "uke"                   # Resources/Configs/uke.toml in the Mu-Silicium checkout (--uefi)
