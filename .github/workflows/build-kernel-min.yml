@@ -442,6 +442,12 @@ jobs:
           else
             echo "kernel.macho was not produced" | tee artifacts/MISSING.txt
           fi
+          # The comparison kernel's own build log lives in the tree, not in logs/: when that build dies
+          # before linking, everything needed to explain it is in here.
+          if [ -n "$OUT" ] && [ -d "$OUT/tree/build/xnu/fileset-reference" ]; then
+            mkdir -p artifacts/fileset-reference
+            cp "$OUT"/tree/build/xnu/fileset-reference/*.log artifacts/fileset-reference/ 2>/dev/null || true
+          fi
           if [ -n "$OUT" ] && [ -d "$OUT/logs" ]; then
             cp -R "$OUT/logs" artifacts/logs
           else

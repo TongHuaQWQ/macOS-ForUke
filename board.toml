@@ -165,9 +165,11 @@ archives = [
   # It asserts the four archives above it (corecrypto both flavours, ArmDTPlatform, ArmCpu, libpthread),
   # so the position matters. It runs only for a configuration with CONFIG_XNU_BUILD_ARCHIVES=y; the
   # workflow builds it explicitly for uke-nodisplay_defconfig, which has no archives.
-  # --lto: the comparison kernel is built the way Apple builds theirs, so the matcher's
-  # reference-order/reference-shape anchors see comparable codegen (docs/11 §33).
-  "build-fileset-release-reference.py --tree . --lto",
+  # WITHOUT --lto for this round: the comparison kernel's LTO build died before linking ("RELEASE
+  # reference exit 2", then a FileNotFoundError on the link.filelist it never wrote). The hypothesis
+  # under test is about the *native* kernel's codegen -- the matcher pairs Apple's kext calls against
+  # it -- so keep the proven snapshot build here and flip only CONFIG_XNU_BUILD_LTO (docs/11 §34).
+  "build-fileset-release-reference.py --tree .",
 ]
 
 # Adreno 732 (uke) board values for the native GPU driver. The driver carries
