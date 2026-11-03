@@ -64,11 +64,3 @@ lck-gate-probe.patch
 # appearing the kernel still runs and only one thread is blocked, and if they stop the console itself
 # stopped updating.
 uke-heartbeat.patch
- — deferred: this patch anchors on the PE_parse_boot_argn block inside
-# IOService::initialize(), and after the 78 base patches that hunk no longer matches in CI
-# ("patch failed: iokit/Kernel/IOService.cpp:489"), while it applies cleanly here. The gate probe
-# below already answers both questions this was meant to answer, without a periodic print: AppleImage4
-# calls lck_mtx_gate_alloc_init early and gate close/open/handoff later, so the "lck-gate:" lines are
-# a timeline of how far it got, which also proves the console is still printing. Re-anchor and bring
-# it back only if that timeline comes out empty.
-# uke-heartbeat.patch
