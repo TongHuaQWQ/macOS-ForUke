@@ -73,3 +73,10 @@ uke-heartbeat.patch
 # already copies at boot, and the enabled last-panic-print patch shows it once the framebuffer console
 # attaches. A panic that never reached the screen therefore reports itself on the next boot.
 uke-stage-last-panic.patch
+
+# uke-gate-last-panic: B23 staged the panic text in the pram header and last-panic-print() shows it
+# from vcattach(), but the two panels taken after that boot start at AppleImage4's own banner: the
+# line had already scrolled off. The gate probe does print where the panel still updates, so it now
+# carries the staged text on its first call, immediately before the point where the screen stops.
+# "(no previous panic captured)" means the last boot did not panic at all — a spin, not a panic.
+uke-gate-last-panic.patch

@@ -1,0 +1,44 @@
+diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
+index ff20b3e..88b520e 100644
+--- a/osfmk/kern/locks.c
++++ b/osfmk/kern/locks.c
+@@ -3424,6 +3424,16 @@ lck_gate_probe(const char *what, lck_mtx_t *lock, gate_t *gate)
+ {
+ 	extern int printf(const char *format, ...) __printflike(1, 2);
+ 
++	{
++		static bool announced;
++
++		if (!announced) {
++			extern const char *uke_last_panic_text(void);
++
++			announced = true;
++			printf("PREVIOUS XNU LOG: %s\n", uke_last_panic_text());
++		}
++	}
+ 	printf("lck-gate: %s lock=%p gate=%p data=%llx\n", what, (void *)lock, (void *)gate,
+ 	    (unsigned long long)(gate ? gate->gt_data : 0));
+ }
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index b262c90..43986a2 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -238,6 +238,18 @@ check_for_panic_log(void)
+  * check_for_panic_log() already copies out at boot, so a panic that never reached the screen is
+  * printed by pe_print_last_panic() on the following boot.
+  */
++#if DEVELOPMENT || DEBUG
++/*
++ * uke-last-panic-text: the staged text of the boot that died, for probes that print somewhere the
++ * console still works. vcattach() prints it far too early to survive on a panel that stops scrolling.
++ */
++const char *
++uke_last_panic_text(void)
++{
++	return last_panic_text_valid ? last_panic_text : "(no previous panic captured)";
++}
++#endif /* DEVELOPMENT || DEBUG */
++
+ void
+ uke_stage_last_panic(const char *text)
+ {
