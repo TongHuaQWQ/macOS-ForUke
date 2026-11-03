@@ -49,3 +49,11 @@ fileset-wait-probe.patch
 # resource never appears and the wait never returns. Publishing it where the IODTNVRAM instance is
 # registered claims exactly what is true and lets the kext continue.
 publish-ionvram-resource.patch
+
+# lck-gate-probe: B14 still stopped with the same 12 nonce-magazine lines and printed no
+# fileset-wait: line at all, so AppleImage4 never reached a waitForService. In that function
+# (0x958922c) the calls right after the magazine read are IOLockLock / lck_mtx_gate_close /
+# IOLockUnlock, and both a stuck mutex and gate_ilock() (a spin on the gate's interlock bit with no
+# timeout) hang silently. This prints at the entry of every lck_mtx_gate_* call and on every
+# contended lck_mtx_lock, so one boot says which of the two it is.
+lck-gate-probe.patch
