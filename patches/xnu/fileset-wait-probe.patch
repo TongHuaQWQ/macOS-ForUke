@@ -1,0 +1,76 @@
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+index 4903e7d..88c42ab 100644
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -6607,10 +6607,71 @@ IOService::waitForMatchingServiceWithToken( OSDictionary * matching,
+ 	return result;
+ }
+ 
++#if DEVELOPMENT || DEBUG
++/*
++ * fileset-wait-probe: name the service a kext blocks on, and optionally bound the wait.
++ *
++ * A kext waiting for a service this kernel never publishes produces no output at all:
++ * waitForService(matching, NULL) becomes UINT64_MAX here, so the caller sleeps forever. AppleImage4
++ * stops exactly that way right after its nonce magazine reports "failed to read nonce slot data",
++ * from serviceMatching("IONVRAM") and serviceMatching("IOAESAccelerator") followed by an infinite
++ * wait, and neither service exists in this collection.
++ *
++ * fileset-wait-log=1 prints each request (provider class and timeout) before the wait, and
++ * fileset-wait-cap-ms=N replaces an unbounded timeout with N ms, so the caller sees NULL, takes its
++ * own error path and says what it needed instead of hanging. Both default to off.
++ */
++static uint64_t gFilesetWaitCapNS;
++static bool     gFilesetWaitLog;
++static bool     gFilesetWaitProbed;
++
++static void
++fileset_wait_probe_read_boot_args(void)
++{
++	uint64_t cap_ms = 0;
++	int      log    = 0;
++
++	if (gFilesetWaitProbed) {
++		return;
++	}
++	PE_parse_boot_argn("fileset-wait-cap-ms", &cap_ms, sizeof(cap_ms));
++	PE_parse_boot_argn("fileset-wait-log", &log, sizeof(log));
++	gFilesetWaitCapNS  = cap_ms * 1000000ULL;
++	gFilesetWaitLog    = (log != 0);
++	gFilesetWaitProbed = true;
++}
++
++static uint64_t
++fileset_wait_probe(OSDictionary * matching, uint64_t timeout)
++{
++	OSString * wanted = NULL;
++
++	fileset_wait_probe_read_boot_args();
++
++	if (gFilesetWaitLog) {
++		wanted = OSDynamicCast(OSString,
++		    matching ? matching->getObject(kIOProviderClassKey) : NULL);
++		IOLog("fileset-wait: %s timeout %llu%s\n",
++		    wanted ? wanted->getCStringNoCopy() : "?",
++		    timeout, timeout == UINT64_MAX ? " (infinite)" : "");
++	}
++	if (gFilesetWaitCapNS && timeout > gFilesetWaitCapNS) {
++		if (gFilesetWaitLog) {
++			IOLog("fileset-wait: capped to %llu ms\n", gFilesetWaitCapNS / 1000000ULL);
++		}
++		timeout = gFilesetWaitCapNS;
++	}
++	return timeout;
++}
++#endif /* DEVELOPMENT || DEBUG */
++
+ IOService *
+ IOService::waitForMatchingService( OSDictionary * matching,
+     uint64_t timeout)
+ {
++#if DEVELOPMENT || DEBUG
++	timeout = fileset_wait_probe(matching, timeout);
++#endif /* DEVELOPMENT || DEBUG */
+ 	return IOService::waitForMatchingServiceWithToken(matching, timeout, NULL);
+ }
+ 

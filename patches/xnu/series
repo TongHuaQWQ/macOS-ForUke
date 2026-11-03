@@ -33,3 +33,11 @@ zzzzzzzzzzzz-uke-gpu-addon-stage-log.patch
 # Only correct while the loaded collection is a Mac collection: an iPad collection expects padding
 # off, so this patch belongs to the macOS profiles and must not be shared with an iOS series.
 kext-vtable-padding.patch
+
+# fileset-wait-probe: a kext waiting for a service this kernel never publishes produces no output at
+# all (waitForService(matching, NULL) becomes UINT64_MAX). AppleImage4 blocks exactly that way after
+# its nonce magazine reports "failed to read nonce slot data", because it waits for "IONVRAM" and
+# "IOAESAccelerator" and neither exists in this collection. Inert unless the boot args are passed:
+#   fileset-wait-log=1        print each request (provider class + timeout) before the wait
+#   fileset-wait-cap-ms=N     cap an unbounded wait at N ms so the caller takes its own error path
+fileset-wait-probe.patch
