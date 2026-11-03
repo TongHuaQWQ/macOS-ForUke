@@ -93,6 +93,9 @@ archives = [
   "component:ArmCpu",
   "component:ArmVirtPlatform",
   "component:SoftwareAES",
+  # The overlay below is now the measured mac17g layout (native-aes-original-bindings.S was
+  # rewritten from mac17g's own symbol table), so the step can run again.
+  "build-software-aes-bindings.py",
   # WITHOUT build-software-aes-bindings.py. The overlay it compiles is in the core checkout
   # (scripts/data/native-aes-original-bindings.S), so the step itself would run — but its `.set`
   # values are the measured iPadOS 17.7.11 prelink layout of IOAESAccelerator (0xfffffff004a8…), and
