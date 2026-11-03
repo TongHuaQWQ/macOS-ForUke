@@ -41,3 +41,11 @@ kext-vtable-padding.patch
 #   fileset-wait-log=1        print each request (provider class + timeout) before the wait
 #   fileset-wait-cap-ms=N     cap an unbounded wait at N ms so the caller takes its own error path
 fileset-wait-probe.patch
+
+# publish-ionvram-resource: AppleImage4 waits with no timeout for the "IONVRAM" resource
+# (resourceMatching("IONVRAM") = IOResources + IOResourceMatch). Apple publishes that resource from
+# IOPlatformExpert::registerNVRAMController() when a platform NVRAM controller registers; this kernel
+# creates its IODTNVRAM from the device tree's /options node but never registers a controller, so the
+# resource never appears and the wait never returns. Publishing it where the IODTNVRAM instance is
+# registered claims exactly what is true and lets the kext continue.
+publish-ionvram-resource.patch
