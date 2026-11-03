@@ -64,3 +64,12 @@ lck-gate-probe.patch
 # appearing the kernel still runs and only one thread is blocked, and if they stop the console itself
 # stopped updating.
 uke-heartbeat.patch
+
+# uke-stage-last-panic: B22's panel showed the gate probe firing (lck-gate: alloc_init) and then the
+# twelve AppleImage4 nonce-magazine lines, and after that not one uke-heartbeat line: the whole kernel
+# or at least the console path stopped, which is exactly why the deferred panic-flush and ramoops
+# patches existed. Those need UkeLastLog's staging block and a consumer, so this is the self-contained
+# version: the panic funnel formats its text into the pram panic header that check_for_panic_log()
+# already copies at boot, and the enabled last-panic-print patch shows it once the framebuffer console
+# attaches. A panic that never reached the screen therefore reports itself on the next boot.
+uke-stage-last-panic.patch

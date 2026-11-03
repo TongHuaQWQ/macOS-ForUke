@@ -1,0 +1,74 @@
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 48f9405..8a62c05 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1274,6 +1274,26 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ 	/* Turn off I/O tracing once we've panicked */
+ 	iotrace_disable();
+ 
++#if DEVELOPMENT || DEBUG
++	/*
++	 * uke-stage-last-panic: this machine's only console is the panel, so a panic whose screen never
++	 * gets drawn leaves no evidence at all, which is what a total freeze right after AppleImage4's
++	 * nonce magazine lines looks like. The boot path already reads a previous-boot panic out of the
++	 * pram region and prints it once the framebuffer console attaches (pe_print_last_panic), so the
++	 * text is staged in that exact format before the machine-layer handler takes over.
++	 */
++	{
++		extern void uke_stage_last_panic(const char *);
++		char uke_panic_text[512];
++		va_list uke_copy;
++
++		va_copy(uke_copy, *panic_args);
++		vsnprintf(uke_panic_text, sizeof uke_panic_text, panic_format_str, uke_copy);
++		va_end(uke_copy);
++		uke_stage_last_panic(uke_panic_text);
++	}
++#endif /* DEVELOPMENT || DEBUG */
++
+ 	/* call machine-layer panic handler */
+ 	ml_panic_trap_to_debugger(panic_format_str, panic_args, reason, ctx, panic_options_mask, panic_caller, panic_initiator);
+ 
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index abb7641..b262c90 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -232,6 +232,38 @@ check_for_panic_log(void)
+ 	bzero((void *)gPanicBase, gPanicSize);
+ }
+ 
++#if DEVELOPMENT || DEBUG
++/*
++ * uke-stage-last-panic: write the panic text into the pram panic header, in the format
++ * check_for_panic_log() already copies out at boot, so a panic that never reached the screen is
++ * printed by pe_print_last_panic() on the following boot.
++ */
++void
++uke_stage_last_panic(const char *text)
++{
++	struct embedded_panic_header *header;
++	vm_offset_t offset;
++	size_t length = 0;
++
++	if (!gPanicBase || (gPanicSize == 0) || (text == NULL)) {
++		return;
++	}
++	while (text[length] != '\0') {
++		length++;
++	}
++	length++;
++	offset = sizeof(*header);
++	if ((offset + length) > gPanicSize) {
++		return;
++	}
++	header = (struct embedded_panic_header *)(uintptr_t)gPanicBase;
++	header->eph_magic = EMBEDDED_PANIC_MAGIC;
++	header->eph_panic_log_offset = (uint32_t)offset;
++	header->eph_panic_log_len = (uint32_t)length;
++	memcpy((void *)(gPanicBase + offset), text, length);
++}
++#endif /* DEVELOPMENT || DEBUG */
++
+ void
+ pe_print_last_panic(void)
+ {
