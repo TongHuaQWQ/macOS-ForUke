@@ -1,15 +1,16 @@
 diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
-index 6824ed8..14de840 100644
+index 6824ed8..0ff2337 100644
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -451,6 +451,27 @@ void userServerAckTimerExpired(void *, void *);
+@@ -451,8 +451,42 @@ void userServerAckTimerExpired(void *, void *);
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  
  void
 +#if DEVELOPMENT || DEBUG
 +/*
 + * uke-heartbeat: a stuck kext and a console that stopped refreshing look identical on the panel.
-+ * A line every two seconds from a thread call tells them apart.
++ * A line every two seconds from a thread call tells them apart: heartbeats that keep coming mean the
++ * kernel still runs and one thread is blocked, while silence means the console itself stopped.
 + */
 +static thread_call_t gUkeHeartbeatCall;
 +
@@ -17,7 +18,7 @@ index 6824ed8..14de840 100644
 +ukeHeartbeat(thread_call_param_t p0, thread_call_param_t p1)
 +{
 +	static uint64_t beats;
-+	uint64_t deadline;
++	uint64_t deadline = 0;
 +
 +	beats++;
 +	kprintf("uke-heartbeat %llu\n", beats);
@@ -29,20 +30,18 @@ index 6824ed8..14de840 100644
 +
  IOService::initialize( void )
  {
- 	kern_return_t       err;
-@@ -496,6 +517,15 @@ IOService::initialize( void )
- 		} else {
- 			gIODextRelaunchMax = 1000;
- 		}
 +#if DEVELOPMENT || DEBUG
-+	gUkeHeartbeatCall = thread_call_allocate(ukeHeartbeat, NULL);
-+	if (gUkeHeartbeatCall) {
-+		uint64_t heartbeatDeadline;
-+		if (clock_interval_to_deadline(2, 1000000000, &heartbeatDeadline) == KERN_SUCCESS) {
++	{
++		uint64_t heartbeatDeadline = 0;
++
++		gUkeHeartbeatCall = thread_call_allocate(ukeHeartbeat, NULL);
++		if (gUkeHeartbeatCall &&
++		    clock_interval_to_deadline(2, 1000000000, &heartbeatDeadline) == KERN_SUCCESS) {
 +			thread_call_enter_delayed(gUkeHeartbeatCall, heartbeatDeadline);
 +		}
 +	}
 +#endif /* DEVELOPMENT || DEBUG */
- 	}
- 	PE_parse_boot_argn("iocthreads", &gMaxConfigThreads, sizeof(gMaxConfigThreads));
++
+ 	kern_return_t       err;
  
+ 	gIOServicePlane     = IORegistryEntry::makePlane( kIOServicePlane );
