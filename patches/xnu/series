@@ -63,7 +63,8 @@ lck-gate-probe.patch
 # then nothing changes). Two seconds apart, a thread call prints "uke-heartbeat <n>": if those keep
 # appearing the kernel still runs and only one thread is blocked, and if they stop the console itself
 # stopped updating.
-# uke-heartbeat.patch — deferred: this patch anchors on the PE_parse_boot_argn block inside
+uke-heartbeat.patch
+ — deferred: this patch anchors on the PE_parse_boot_argn block inside
 # IOService::initialize(), and after the 78 base patches that hunk no longer matches in CI
 # ("patch failed: iokit/Kernel/IOService.cpp:489"), while it applies cleanly here. The gate probe
 # below already answers both questions this was meant to answer, without a periodic print: AppleImage4

@@ -1,18 +1,15 @@
 diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
-index 4903e7d..9773b48 100644
+index 6824ed8..14de840 100644
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -448,6 +448,30 @@ void userServerAckTimerExpired(void *, void *);
+@@ -451,6 +451,27 @@ void userServerAckTimerExpired(void *, void *);
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  
  void
 +#if DEVELOPMENT || DEBUG
 +/*
-+ * uke-heartbeat: a kext that hangs silently and a console that stops refreshing look identical on
-+ * the panel, which is exactly the ambiguity B12..B15 ran into: AppleImage4 prints twelve lines about
-+ * its nonce magazine and then nothing changes. A line every two seconds from a thread call tells the
-+ * two apart: heartbeats that keep appearing mean the kernel still runs and only the stuck thread is
-+ * blocked, while no further heartbeat means the console itself stopped updating.
++ * uke-heartbeat: a stuck kext and a console that stopped refreshing look identical on the panel.
++ * A line every two seconds from a thread call tells them apart.
 + */
 +static thread_call_t gUkeHeartbeatCall;
 +
@@ -23,7 +20,7 @@ index 4903e7d..9773b48 100644
 +	uint64_t deadline;
 +
 +	beats++;
-+	IOLog("uke-heartbeat %llu\n", beats);
++	kprintf("uke-heartbeat %llu\n", beats);
 +	if (clock_interval_to_deadline(2, 1000000000, &deadline) == KERN_SUCCESS) {
 +		thread_call_enter_delayed(gUkeHeartbeatCall, deadline);
 +	}
@@ -33,10 +30,10 @@ index 4903e7d..9773b48 100644
  IOService::initialize( void )
  {
  	kern_return_t       err;
-@@ -489,6 +513,16 @@ IOService::initialize( void )
- 	PE_parse_boot_argn("dextrelaunch", &gIODextRelaunchMax, sizeof(gIODextRelaunchMax));
- 	PE_parse_boot_argn("iocthreads", &gMaxConfigThreads, sizeof(gMaxConfigThreads));
- 
+@@ -496,6 +517,15 @@ IOService::initialize( void )
+ 		} else {
+ 			gIODextRelaunchMax = 1000;
+ 		}
 +#if DEVELOPMENT || DEBUG
 +	gUkeHeartbeatCall = thread_call_allocate(ukeHeartbeat, NULL);
 +	if (gUkeHeartbeatCall) {
@@ -46,7 +43,6 @@ index 4903e7d..9773b48 100644
 +		}
 +	}
 +#endif /* DEVELOPMENT || DEBUG */
-+
- 	gIOUserClientClassKey = OSSymbol::withCStringNoCopy( kIOUserClientClassKey );
+ 	}
+ 	PE_parse_boot_argn("iocthreads", &gMaxConfigThreads, sizeof(gMaxConfigThreads));
  
- 	gIOUserClassKey       = OSSymbol::withCStringNoCopy(kIOUserClassKey);

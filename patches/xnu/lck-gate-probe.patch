@@ -1,40 +1,23 @@
-diff --git a/osfmk/kern/lock_mtx.c b/osfmk/kern/lock_mtx.c
-index cb488ce..a967ec9 100644
---- a/osfmk/kern/lock_mtx.c
-+++ b/osfmk/kern/lock_mtx.c
-@@ -967,6 +967,12 @@ lck_mtx_lock_slow(
- 	lck_mtx_state_t         state,
- 	lck_mtx_mode_t          mode)
- {
-+#if DEVELOPMENT || DEBUG
-+	{
-+		extern int printf(const char *fmt, ...);
-+		printf("lck-mtx: contended lock=%p self=%p\n", (void *)lock, (void *)thread);
-+	}
-+#endif
- #pragma unused(state)
- #if CONFIG_DTRACE
- 	lck_mtx_state_t ostate = {
 diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
-index 8026f14..7e2905d 100644
+index 94a34dc..890a042 100644
 --- a/osfmk/kern/locks.c
 +++ b/osfmk/kern/locks.c
-@@ -3012,8 +3012,29 @@ lck_rw_gate_assert(__assert_only lck_rw_t *lock, gate_t *gate, gate_assert_flags
+@@ -3412,8 +3412,29 @@ lck_rw_gate_assert(__assert_only lck_rw_t *lock, gate_t *gate, gate_assert_flags
   *   Arg2: pointer to the gate data declared with decl_lck_mtx_gate_data.
   */
  void
 +#if DEVELOPMENT || DEBUG
 +/*
-+ * lck-gate-probe: B14 showed AppleImage4 stopping with no output at all right after its nonce
-+ * magazine reports "failed to read nonce slot data", and the next calls in that function are
-+ * IOLockLock / lck_mtx_gate_close / IOLockUnlock (AppleImage4 0x958922c, +0x3d0 .. +0x3e0). Both a
-+ * mutex whose owner never releases it and gate_ilock() (a spin on the gate's interlock bit, no
-+ * timeout) hang without printing anything, so one line per gate call says which half it is.
++ * lck-gate-probe: AppleImage4 stops with no output at all right after its nonce magazine reports
++ * "failed to read nonce slot data", and the next calls in that function are IOLockLock /
++ * lck_mtx_gate_close / IOLockUnlock (AppleImage4 0x958922c, +0x3d0 .. +0x3e0). Both a mutex whose
++ * owner never releases it and gate_ilock() (a spin on the gate's interlock bit with no timeout) hang
++ * without printing anything, so one line per gate call says which half of that window it is.
 + */
 +static void
 +lck_gate_probe(const char *what, lck_mtx_t *lock, gate_t *gate)
 +{
-+	extern int printf(const char *fmt, ...);
++	extern int printf(const char *format, ...) __printflike(1, 2);
 +
 +	printf("lck-gate: %s lock=%p gate=%p data=%llx\n", what, (void *)lock, (void *)gate,
 +	    (unsigned long long)(gate ? gate->gt_data : 0));
@@ -49,7 +32,7 @@ index 8026f14..7e2905d 100644
  	(void) lock;
  	gate_init(gate, GT_INIT_DEFAULT);
  }
-@@ -3032,6 +3053,7 @@ lck_mtx_gate_init(lck_mtx_t *lock, gate_t *gate)
+@@ -3432,6 +3453,7 @@ lck_mtx_gate_init(lck_mtx_t *lock, gate_t *gate)
  gate_t*
  lck_mtx_gate_alloc_init(lck_mtx_t *lock)
  {
@@ -57,7 +40,7 @@ index 8026f14..7e2905d 100644
  	(void) lock;
  	return gate_alloc_init();
  }
-@@ -3049,6 +3071,7 @@ lck_mtx_gate_alloc_init(lck_mtx_t *lock)
+@@ -3449,6 +3471,7 @@ lck_mtx_gate_alloc_init(lck_mtx_t *lock)
  void
  lck_mtx_gate_destroy(lck_mtx_t *lock, gate_t *gate)
  {
@@ -65,7 +48,7 @@ index 8026f14..7e2905d 100644
  	(void) lock;
  	gate_destroy(gate);
  }
-@@ -3068,6 +3091,7 @@ lck_mtx_gate_destroy(lck_mtx_t *lock, gate_t *gate)
+@@ -3468,6 +3491,7 @@ lck_mtx_gate_destroy(lck_mtx_t *lock, gate_t *gate)
  void
  lck_mtx_gate_free(lck_mtx_t *lock, gate_t *gate)
  {
@@ -73,7 +56,7 @@ index 8026f14..7e2905d 100644
  	(void) lock;
  	gate_free(gate);
  }
-@@ -3101,6 +3125,7 @@ lck_mtx_gate_free(lck_mtx_t *lock, gate_t *gate)
+@@ -3501,6 +3525,7 @@ lck_mtx_gate_free(lck_mtx_t *lock, gate_t *gate)
  int
  lck_mtx_gate_try_close(__assert_only lck_mtx_t *lock, gate_t *gate)
  {
@@ -81,7 +64,7 @@ index 8026f14..7e2905d 100644
  	LCK_MTX_ASSERT(lock, LCK_MTX_ASSERT_OWNED);
  
  	return gate_try_close(gate);
-@@ -3125,6 +3150,7 @@ lck_mtx_gate_try_close(__assert_only lck_mtx_t *lock, gate_t *gate)
+@@ -3525,6 +3550,7 @@ lck_mtx_gate_try_close(__assert_only lck_mtx_t *lock, gate_t *gate)
  void
  lck_mtx_gate_close(__assert_only lck_mtx_t *lock, gate_t *gate)
  {
@@ -89,7 +72,7 @@ index 8026f14..7e2905d 100644
  	LCK_MTX_ASSERT(lock, LCK_MTX_ASSERT_OWNED);
  
  	return gate_close(gate);
-@@ -3146,6 +3172,7 @@ lck_mtx_gate_close(__assert_only lck_mtx_t *lock, gate_t *gate)
+@@ -3546,6 +3572,7 @@ lck_mtx_gate_close(__assert_only lck_mtx_t *lock, gate_t *gate)
  void
  lck_mtx_gate_open(__assert_only lck_mtx_t *lock, gate_t *gate)
  {
@@ -97,7 +80,7 @@ index 8026f14..7e2905d 100644
  	LCK_MTX_ASSERT(lock, LCK_MTX_ASSERT_OWNED);
  
  	gate_open(gate);
-@@ -3179,6 +3206,7 @@ lck_mtx_gate_open(__assert_only lck_mtx_t *lock, gate_t *gate)
+@@ -3579,6 +3606,7 @@ lck_mtx_gate_open(__assert_only lck_mtx_t *lock, gate_t *gate)
  kern_return_t
  lck_mtx_gate_handoff(__assert_only lck_mtx_t *lock, gate_t *gate, gate_handoff_flags_t flags)
  {
@@ -105,7 +88,7 @@ index 8026f14..7e2905d 100644
  	LCK_MTX_ASSERT(lock, LCK_MTX_ASSERT_OWNED);
  
  	return gate_handoff(gate, flags);
-@@ -3206,6 +3234,7 @@ lck_mtx_gate_handoff(__assert_only lck_mtx_t *lock, gate_t *gate, gate_handoff_f
+@@ -3606,6 +3634,7 @@ lck_mtx_gate_handoff(__assert_only lck_mtx_t *lock, gate_t *gate, gate_handoff_f
  void
  lck_mtx_gate_steal(__assert_only lck_mtx_t *lock, gate_t *gate)
  {
@@ -113,7 +96,7 @@ index 8026f14..7e2905d 100644
  	LCK_MTX_ASSERT(lock, LCK_MTX_ASSERT_OWNED);
  
  	gate_steal(gate);
-@@ -3240,6 +3269,7 @@ lck_mtx_gate_steal(__assert_only lck_mtx_t *lock, gate_t *gate)
+@@ -3640,6 +3669,7 @@ lck_mtx_gate_steal(__assert_only lck_mtx_t *lock, gate_t *gate)
  gate_wait_result_t
  lck_mtx_gate_wait(lck_mtx_t *lock, gate_t *gate, lck_sleep_action_t lck_sleep_action, wait_interrupt_t interruptible, uint64_t deadline)
  {
@@ -121,3 +104,20 @@ index 8026f14..7e2905d 100644
  	LCK_MTX_ASSERT(lock, LCK_MTX_ASSERT_OWNED);
  
  	if (lck_sleep_action & LCK_SLEEP_UNLOCK) {
+diff --git a/osfmk/kern/lock_mtx.c b/osfmk/kern/lock_mtx.c
+index c8e0d1a..de4e557 100644
+--- a/osfmk/kern/lock_mtx.c
++++ b/osfmk/kern/lock_mtx.c
+@@ -838,6 +838,12 @@ lck_mtx_lock_slow(
+ 	lck_mtx_state_t         state,
+ 	lck_mtx_mode_t          mode)
+ {
++#if DEVELOPMENT || DEBUG
++	{
++		extern int printf(const char *format, ...) __printflike(1, 2);
++		printf("lck-mtx: contended lock=%p self=%p\n", (void *)lock, (void *)thread);
++	}
++#endif
+ #pragma unused(state)
+ #if CONFIG_DTRACE
+ 	lck_mtx_state_t ostate = {
