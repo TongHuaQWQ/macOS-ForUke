@@ -57,3 +57,10 @@ publish-ionvram-resource.patch
 # timeout) hang silently. This prints at the entry of every lck_mtx_gate_* call and on every
 # contended lck_mtx_lock, so one boot says which of the two it is.
 lck-gate-probe.patch
+
+# uke-heartbeat: a stuck kext and a console that stopped refreshing look identical on the panel,
+# which is the ambiguity B12..B15 kept hitting (AppleImage4 prints twelve nonce-magazine lines and
+# then nothing changes). Two seconds apart, a thread call prints "uke-heartbeat <n>": if those keep
+# appearing the kernel still runs and only one thread is blocked, and if they stop the console itself
+# stopped updating.
+uke-heartbeat.patch
