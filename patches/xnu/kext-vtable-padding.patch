@@ -1,0 +1,58 @@
+diff --git a/libkern/libkern/c++/OSMetaClass.h b/libkern/libkern/c++/OSMetaClass.h
+index 78315a2..65a1d71 100644
+--- a/libkern/libkern/c++/OSMetaClass.h
++++ b/libkern/libkern/c++/OSMetaClass.h
+@@ -162,11 +162,29 @@ class OSInterface
+ 
+ #ifdef XNU_KERNEL_PRIVATE
+ 
+-#if !XNU_TARGET_OS_OSX
+-#define APPLE_KEXT_VTABLE_PADDING   0
+-#else /* !XNU_TARGET_OS_OSX */
++/*
++ * The kexts this kernel loads are Mac kexts: they come out of a macOS kernelcache, which is built
++ * with vtable padding on. Every OSMetaClassDeclareReservedUnused() then emits a
++ * _RESERVED<Class><index> virtual whose stub panics with "<Class>::_RESERVED<Class>%d called", and
++ * those slots sit between real virtual methods. Without them, every method after the first
++ * reserved block sits at a lower vtable index, so a kext's hardcoded offset lands on a different
++ * method - and because the slot's pointer is signed with a salt that belongs to the method, the
++ * call fails authentication instead of returning a wrong answer.
++ *
++ *   AppleImage4 does obj->vtable[0x2d8](obj, key) and casts the result to OSData, so at that
++ *   offset Apple's kernel has IORegistryEntry::getProperty(const char*). With padding off this
++ *   kernel has IOService::handleOpen there, whose salt is 0x55eb instead of getProperty's 0x37a5,
++ *   and the blraa fails: "PAC failure from kernel with IA key while branching to X8".
++ *
++ * Measured on the 25F84 collection over 298 kernel classes: 296 order their virtuals exactly as
++ * Apple's does, 150 are index-identical once Apple's padding slots are dropped, and 146 more
++ * differ only by insertions - our methods are an order-preserving subsequence of Apple's.
++ *
++ * XNU enables padding only for XNU_TARGET_OS_OSX; this kernel builds as PLATFORM=iPhoneOS but its
++ * kexts are Mac kexts, so the macOS ABI has to be requested explicitly. This belongs to a macOS
++ * profile only: an iPad collection expects padding off.
++ */
+ #define APPLE_KEXT_VTABLE_PADDING   1
+-#endif /* !XNU_TARGET_OS_OSX */
+ 
+ #else /* XNU_KERNEL_PRIVATE */
+ 
+@@ -182,11 +200,16 @@ class OSInterface
+ #endif /* XNU_KERNEL_PRIVATE */
+ 
+ #ifdef XNU_KERNEL_PRIVATE
+-#if XNU_TARGET_OS_OSX && defined(__arm64__)
++/*
++ * Container alignment is derived from the padding everywhere except arm64 macOS, which pins it to
++ * 1. Turning padding on alone would flip this to 0 and change the layout of OSArray/OSDictionary
++ * instances, so pin it to the arm64 macOS value here.
++ */
++#if defined(__arm64__)
+ #define APPLE_KEXT_ALIGN_CONTAINERS      1
+-#else /* XNU_TARGET_OS_OSX && defined(__arm64__) */
++#else /* defined(__arm64__) */
+ #define APPLE_KEXT_ALIGN_CONTAINERS     (0 == APPLE_KEXT_VTABLE_PADDING)
+-#endif /* XNU_TARGET_OS_OSX && defined(__arm64__) */
++#endif /* defined(__arm64__) */
+ 
+ #else /* XNU_KERNEL_PRIVATE */
+ 

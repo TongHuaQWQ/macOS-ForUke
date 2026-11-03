@@ -20,3 +20,16 @@ zzzzzzzzzzz-uke-trustcache-headers.patch
 # zzzzzzzzzzz-uke-vm-alloc-log.patch
 zzzzzzzzzzzz-uke-gpu-sandbox-client-grant.patch
 zzzzzzzzzzzz-uke-gpu-addon-stage-log.patch
+
+# kext-vtable-padding: the kexts this kernel loads come from a Mac kernelcache, whose classes carry
+# OSMetaClassDeclareReservedUnused() slots. XNU emits those only for XNU_TARGET_OS_OSX, and this
+# kernel builds as PLATFORM=iPhoneOS, so every virtual method after the first padding block sits at
+# a lower vtable index here than in the kext's headers. AppleImage4 then calls
+# obj->vtable[0x2d8] expecting IORegistryEntry::getProperty and lands on IOService::handleOpen,
+# whose signing salt differs, so the authenticated call fails:
+#   "PAC failure from kernel with IA key while branching to X8" at pc 0xfffffff009581910.
+# Measured on 25F84: 296 of 298 kernel classes order their virtuals identically to Apple's, 150 are
+# index-identical once the padding is dropped and 146 differ only by insertions.
+# Only correct while the loaded collection is a Mac collection: an iPad collection expects padding
+# off, so this patch belongs to the macOS profiles and must not be shared with an iOS series.
+kext-vtable-padding.patch
