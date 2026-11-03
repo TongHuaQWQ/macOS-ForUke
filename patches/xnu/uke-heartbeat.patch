@@ -1,11 +1,11 @@
 diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
-index 6824ed8..0ff2337 100644
+index 6824ed8..4ab1576 100644
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -451,8 +451,42 @@ void userServerAckTimerExpired(void *, void *);
+@@ -450,9 +450,43 @@ void userServerAckTimerExpired(void *, void *);
+ 
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  
- void
 +#if DEVELOPMENT || DEBUG
 +/*
 + * uke-heartbeat: a stuck kext and a console that stopped refreshing look identical on the panel.
@@ -28,6 +28,7 @@ index 6824ed8..0ff2337 100644
 +}
 +#endif /* DEVELOPMENT || DEBUG */
 +
+ void
  IOService::initialize( void )
  {
 +#if DEVELOPMENT || DEBUG

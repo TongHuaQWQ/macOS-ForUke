@@ -1,11 +1,11 @@
 diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
-index 94a34dc..890a042 100644
+index 94a34dc..ff20b3e 100644
 --- a/osfmk/kern/locks.c
 +++ b/osfmk/kern/locks.c
-@@ -3412,8 +3412,29 @@ lck_rw_gate_assert(__assert_only lck_rw_t *lock, gate_t *gate, gate_assert_flags
+@@ -3411,9 +3411,30 @@ lck_rw_gate_assert(__assert_only lck_rw_t *lock, gate_t *gate, gate_assert_flags
+  *   Arg1: lck_mtx_t lock used to protect the gate.
   *   Arg2: pointer to the gate data declared with decl_lck_mtx_gate_data.
   */
- void
 +#if DEVELOPMENT || DEBUG
 +/*
 + * lck-gate-probe: AppleImage4 stops with no output at all right after its nonce magazine reports
@@ -26,6 +26,7 @@ index 94a34dc..890a042 100644
 +#define lck_gate_probe(what, lock, gate) do { } while (0)
 +#endif
 +
+ void
  lck_mtx_gate_init(lck_mtx_t *lock, gate_t *gate)
  {
 +	lck_gate_probe("init", lock, gate);
