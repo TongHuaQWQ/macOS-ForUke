@@ -1,8 +1,8 @@
 diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
-index 6824ed8..4ab1576 100644
+index 6824ed8..824ba32 100644
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -450,9 +450,43 @@ void userServerAckTimerExpired(void *, void *);
+@@ -450,9 +450,42 @@ void userServerAckTimerExpired(void *, void *);
  
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  
@@ -22,9 +22,8 @@ index 6824ed8..4ab1576 100644
 +
 +	beats++;
 +	kprintf("uke-heartbeat %llu\n", beats);
-+	if (clock_interval_to_deadline(2, 1000000000, &deadline) == KERN_SUCCESS) {
-+		thread_call_enter_delayed(gUkeHeartbeatCall, deadline);
-+	}
++	clock_interval_to_deadline(2, kSecondScale, &deadline);
++	thread_call_enter_delayed(gUkeHeartbeatCall, deadline);
 +}
 +#endif /* DEVELOPMENT || DEBUG */
 +
@@ -36,8 +35,8 @@ index 6824ed8..4ab1576 100644
 +		uint64_t heartbeatDeadline = 0;
 +
 +		gUkeHeartbeatCall = thread_call_allocate(ukeHeartbeat, NULL);
-+		if (gUkeHeartbeatCall &&
-+		    clock_interval_to_deadline(2, 1000000000, &heartbeatDeadline) == KERN_SUCCESS) {
++		if (gUkeHeartbeatCall) {
++			clock_interval_to_deadline(2, kSecondScale, &heartbeatDeadline);
 +			thread_call_enter_delayed(gUkeHeartbeatCall, heartbeatDeadline);
 +		}
 +	}
