@@ -84,7 +84,10 @@ CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
 # CONFIG_XNU_NATIVE_UFS is not set
-CONFIG_XNU_NATIVE_AES=y
+# CONFIG_XNU_NATIVE_AES is not set   # sheng (iPadOS 26/27) never sets it either: SoftwareAES
+# provides IOAESAccelerator through build-software-aes-bindings.py, and turning this on would only
+# trip build-xnu-4k-baseline.sh's "requires the qualified original AES/crypto prelink closure"
+# guard, whose condition is CRYPTO_BOOTSTRAP=prelinked, which this profile is not.
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 CONFIG_XNU_SOURCE_MOCKFS=y
 CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
