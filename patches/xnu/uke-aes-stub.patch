@@ -1,0 +1,114 @@
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -6754,6 +6754,15 @@
+ 		return NULL;
+ 	}
+ 
++#if DEVELOPMENT || DEBUG
++	/*
++	 * Every wait path funnels through this function, so the probe lives here rather than only on
++	 * waitForMatchingService: AppleImage4's silence produced no fileset-wait line at all, which says its
++	 * block does not come through the wrapper.
++	 */
++	timeout = fileset_wait_probe(matching, timeout);
++#endif /* DEVELOPMENT || DEBUG */
++
+ 	result = NULL;
+ 	cancelArgs.ref = &result;
+ 	cancelArgs.canceled = false;
+@@ -6864,6 +6873,7 @@
+ static uint64_t gFilesetWaitCapNS;
+ static bool     gFilesetWaitLog;
+ static bool     gFilesetWaitProbed;
++static bool     gUkeAesStubTried;
+ 
+ static void
+ fileset_wait_probe_read_boot_args(void)
+@@ -6881,6 +6891,56 @@
+ 	gFilesetWaitProbed = true;
+ }
+ 
++/*
++ * uke-aes-stub: AppleImage4's start waits without a timeout for a service of class IOAESAccelerator,
++ * and this collection has the class (IOCryptoAcceleratorFamily is prelinked) but no instance of it, so
++ * the wait never completes and the boot stops silently after the nonce magazine. Publishing an instance
++ * of the *original* class needs no vtable binding at all - unlike the NativeAES subclass, which is why
++ * SoftwareAES is off in this profile - so it is the cheapest way to find out whether the wait is only a
++ * matching problem. uke-aes-stub=1 enables it; off by default.
++ */
++static void
++fileset_wait_publish_aes_stub(const char * className)
++{
++	OSString * name;
++	OSObject * object;
++	IOService * service;
++
++	if (gUkeAesStubTried) {
++		return;
++	}
++	gUkeAesStubTried = true;
++
++	name = OSString::withCString(className);
++	if (name == NULL) {
++		return;
++	}
++	object = OSMetaClass::allocClassWithName(name);
++	name->release();
++	if (object == NULL) {
++		kprintf("uke-aes-stub: class %s is not registered\n", className);
++		return;
++	}
++	service = OSDynamicCast(IOService, object);
++	if ((service == NULL) || !service->init()) {
++		kprintf("uke-aes-stub: %s cannot be initialised\n", className);
++		object->release();
++		return;
++	}
++	if (!service->attach(IOService::getServiceRoot())) {
++		kprintf("uke-aes-stub: %s cannot be attached\n", className);
++		service->release();
++		return;
++	}
++	if (!service->registerService()) {
++		kprintf("uke-aes-stub: %s cannot be published\n", className);
++		service->detachAll(gIOServicePlane);
++		service->release();
++		return;
++	}
++	kprintf("uke-aes-stub: published %s at %p\n", className, service);
++}
++
+ static uint64_t
+ fileset_wait_probe(OSDictionary * matching, uint64_t timeout)
+ {
+@@ -6888,12 +6948,23 @@
+ 
+ 	fileset_wait_probe_read_boot_args();
+ 
+-	if (gFilesetWaitLog) {
+-		wanted = OSDynamicCast(OSString,
+-		    matching ? matching->getObject(kIOProviderClassKey) : NULL);
+-		IOLog("fileset-wait: %s timeout %llu%s\n",
+-		    wanted ? wanted->getCStringNoCopy() : "?",
+-		    timeout, timeout == UINT64_MAX ? " (infinite)" : "");
++	wanted = OSDynamicCast(OSString,
++	    matching ? matching->getObject(kIOProviderClassKey) : NULL);
++	kprintf("fileset-wait: %s timeout %llu%s\n",
++	    wanted ? wanted->getCStringNoCopy() : "?",
++	    timeout, timeout == UINT64_MAX ? " (infinite)" : "");
++	(void)gFilesetWaitLog;
++	{
++		uint32_t stub = 0;
++
++		if (PE_parse_boot_argn("uke-aes-stub", &stub, sizeof(stub)) && (stub != 0) &&
++		    (wanted == NULL)) {
++			wanted = OSDynamicCast(OSString,
++			    matching ? matching->getObject(kIOProviderClassKey) : NULL);
++		}
++		if ((stub != 0) && (wanted != NULL) && wanted->isEqualTo("IOAESAccelerator")) {
++			fileset_wait_publish_aes_stub("IOAESAccelerator");
++		}
+ 	}
+ 	if (gFilesetWaitCapNS && timeout > gFilesetWaitCapNS) {
+ 		if (gFilesetWaitLog) {

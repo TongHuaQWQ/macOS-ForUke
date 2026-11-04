@@ -109,3 +109,9 @@ uke-stall-probe.patch
 # do not exist at kernel link time (that was a link error). Whether the platform layer came up is read from
 # behaviour instead - samples > 0 means the architectural timer is delivering.
 uke-armcpu-probe.patch
+
+# AppleImage4's start waits without a timeout for a class IOAESAccelerator service; the class is prelinked but
+# no instance exists. uke-aes-stub=1 publishes an instance of the original class at the wait itself (no vtable
+# binding needed), and the wait probe moved onto waitForMatchingServiceWithToken, the implementation every path
+# funnels through, because the wrapper produced no output at all.
+uke-aes-stub.patch
