@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,297 @@
+@@ -1050,3 +1056,359 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -61,6 +61,15 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +
 +/* -1 = off, unsupported or unreadable; 0 = not tried yet; 1 = mapped */
 +static int          uke_gic_mapped;
++/*
++ * When to arm the timer's PPI. 1 arms it from arm_init(), which is Apple's own order (PE_init_cpu ->
++ * pe_init_fiq -> fiq_context_init) but proved too early on this platform: with the interrupt live from
++ * there on, the boot never reached the point where it paints the console. 2 arms it at the first gate
++ * probe, i.e. once kext startup has begun - after the console exists and before the wait that hangs
++ * without a timer. 0 disables the feature. uke-gic=<0|1|2>.
++ */
++static int          uke_gic_mode = 1;
++static unsigned int uke_boot_stage;
 +/* -1 = not chosen yet; 0 = group 0 (FIQ, sleh_fiq dispatches); 1 = group 1 (IRQ, sleh_irq does) */
 +static int          uke_gic_group = -1;
 +static vm_offset_t  uke_gic_distributor;
@@ -98,7 +107,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	void const *     property;
 +	unsigned int     property_size;
 +	uint64_t const * regions;
-+	uint32_t         disabled = 1;
++	uint32_t         mode = 1;
 +	uint32_t         pidr2;
 +	vm_offset_t      soc_base;
 +	DTEntry          soc_entry;
@@ -107,7 +116,10 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		return uke_gic_mapped > 0;
 +	}
 +	uke_gic_mapped = -1;
-+	if (PE_parse_boot_argn("uke-gic", &disabled, sizeof(disabled)) && (disabled == 0)) {
++	if (PE_parse_boot_argn("uke-gic", &mode, sizeof(mode))) {
++		uke_gic_mode = (int)(mode <= 2 ? mode : 1);
++	}
++	if (uke_gic_mode == 0) {
 +		printf("uke-gic: disabled by boot-arg\n");
 +		return FALSE;
 +	}
@@ -192,8 +204,8 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 + * Per-CPU half: wake this CPU's redistributor, group and enable PPI 27, and open the CPU interface.
 + * Safe to call more than once; secondary CPUs reach it from start_cpu().
 + */
-+void
-+uke_gic_start_cpu(void)
++static void
++uke_gic_arm_cpu(void)
 +{
 +	vm_offset_t      redistributor = 0;
 +	uint64_t         offset, typer, mpidr, deadline;
@@ -283,13 +295,56 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	    uke_gic_read32(redistributor + UKE_GICR_ISENABLER0), group0 ? "FIQ" : "IRQ");
 +}
 +
++/* uke-gic=1: arm with the timer itself, which is Apple's order for this call site. */
++void
++uke_gic_start_cpu(void)
++{
++	if (uke_gic_mode == 1) {
++		uke_gic_arm_cpu();
++	}
++}
++
++/*
++ * Boot progress marker: the stall detector only speaks once kext startup has begun, so an early-boot
++ * idle (before the console exists) can never be reported as "stuck in one place".
++ */
++void
++uke_boot_stage_set(unsigned int stage)
++{
++	if (stage > uke_boot_stage) {
++		uke_boot_stage = stage;
++	}
++}
++
++unsigned int
++uke_boot_stage_get(void)
++{
++	return uke_boot_stage;
++}
++
++/*
++ * Arm from a probe (uke-gic=2). Called on the CPU that is running kext startup, which is the one whose
++ * timer matters here; secondary CPUs get theirs when they next reach arm_init's call.
++ */
++void
++uke_gic_arm_now(void)
++{
++	if (uke_gic_mode != 2) {
++		return;
++	}
++	if (uke_gic_mapped == 1 && (uke_gic_group == 0 || uke_gic_group == 1)) {
++		return;              /* already armed by an earlier call on this boot */
++	}
++	uke_gic_arm_cpu();
++}
++
 +/*
 + * sleh_irq hands the timer here when PPI 27 is group 1: there is no registered interrupt handler on
 + * this platform, so cdp->interrupt_handler is NULL and any IRQ that is not ours would fault. Returning
 + * TRUE means the interrupt was acknowledged and dealt with.
 + */
 +boolean_t
-+uke_gic_timer_irq(void)
++uke_gic_timer_irq(boolean_t pop_programmed)
 +{
 +	uint64_t iar;
 +
@@ -301,7 +356,14 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		/* Acknowledge a spurious read as consumed: falling through would run a NULL handler. */
 +		return TRUE;
 +	}
-+	rtclock_intr(TRUE);
++	/*
++	 * Before the kernel programs its first decrementer pop the timer's condition is already asserted,
++	 * so running the timer queue there would be work on state that does not exist yet. Acknowledge and
++	 * drop it; the caller passes whether rtcPop has been programmed.
++	 */
++	if (pop_programmed) {
++		rtclock_intr(TRUE);
++	}
 +	__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
 +	return TRUE;
 +}
@@ -349,7 +411,7 @@ diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -3010,6 +3010,24 @@
+@@ -3010,6 +3010,25 @@
  
  	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
  
@@ -361,9 +423,10 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 +	 * falling through would fault: take the timer ourselves and return.
 +	 */
 +	{
-+		extern boolean_t uke_gic_timer_irq(void);
++		extern boolean_t uke_gic_timer_irq(boolean_t pop_programmed);
 +
-+		if (uke_gic_timer_irq()) {
++		/* rtcPop is set to EndOfAllTime until setPop() programs the first decrementer deadline. */
++		if (uke_gic_timer_irq(cdp->rtcPop != (uint64_t)-1)) {
 +			entropy_collect();
 +			sleh_interrupt_handler_epilogue();
 +			return;
@@ -374,3 +437,47 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
  #if USE_APPLEARMSMP
  	PE_handle_ext_interrupt();
  #else
+diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
+--- a/osfmk/arm/rtclock.c
++++ b/osfmk/arm/rtclock.c
+@@ -506,6 +506,19 @@
+ 	}
+ 
+ 	/* Detector 1: a watched CPU keeps executing the same instructions. */
++	{
++		extern unsigned int uke_boot_stage_get(void);
++
++		/*
++		 * Before kext startup an idle boot CPU is the normal state, not a hang: with the timer live
++		 * from arm_init() every one of its interrupts lands on the same instruction of the idle
++		 * return path and the window looks "stuck". The stage marker is set by the gate probe.
++		 */
++		if (uke_boot_stage_get() == 0) {
++			lane->stuck_start = 0;
++			return;
++		}
++	}
+ 	if (((cpu == 0) || uke_diag_all_cpus) && uke_diag_stuck(lane, &low, &high)) {
+ 		/*
+ 		 * A delay loop or a long copy looks exactly like this for its duration, so a narrow
+diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
+--- a/osfmk/kern/locks.c
++++ b/osfmk/kern/locks.c
+@@ -3466,6 +3466,17 @@
+ 		{
+ 			extern uint64_t uke_diag_total_samples(void);
+ 			extern uint64_t uke_diag_last_pc(void);
++			extern void uke_gic_arm_now(void);
++			extern void uke_boot_stage_set(unsigned int);
++
++			/*
++			 * uke-gic=2 arms the timer's interrupt here rather than in arm_init(): kext startup is
++			 * the earliest point that is both past console creation and before the wait that hangs
++			 * when no timer tick can arrive. The stage marker keeps the stall detector quiet before
++			 * this point, where an idle CPU is normal and not evidence of anything.
++			 */
++			uke_boot_stage_set(1);
++			uke_gic_arm_now();
+ 
+ 			printf("uke-stall-probe: samples=%llu last_pc=%#llx\n",
+ 			    (unsigned long long)uke_diag_total_samples(),
