@@ -94,3 +94,10 @@ uke-spin-watchdog.patch
 # masked (a spin, caught by another CPU going quiet) panics with the address instead of
 # freezing the panel. Every threshold is a boot arg, so tuning needs no rebuild.
 uke-stall-probe.patch
+
+# The virtual timer's PPI 27 is enabled in the GIC from the boot CPU and from every secondary, because
+# on this platform nothing else ever did: pe_fiq.c (the only code that does it) is compiled for VMAPPLE
+# only, so the timer counted down and no interrupt was ever forwarded. Group 0 (FIQ) when the
+# distributor is single-security-state, group 1 (IRQ) otherwise, in which case sleh_irq dispatches it.
+# uke-gic=0 turns the whole thing off.
+uke-gic-timer.patch
