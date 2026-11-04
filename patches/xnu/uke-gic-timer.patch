@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,262 @@
+@@ -1050,3 +1056,297 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -100,6 +100,8 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	uint64_t const * regions;
 +	uint32_t         disabled = 1;
 +	uint32_t         pidr2;
++	vm_offset_t      soc_base;
++	DTEntry          soc_entry;
 +
 +	if (uke_gic_mapped != 0) {
 +		return uke_gic_mapped > 0;
@@ -119,8 +121,35 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		return FALSE;
 +	}
 +	regions = (uint64_t const *)property;
-+	uke_gic_distributor = ml_io_map(regions[0], regions[1]);
-+	uke_gic_redistributors = ml_io_map(regions[2], regions[3]);
++	/*
++	 * The ADT stores a child of /arm-io with addresses relative to the arm-io window, exactly like
++	 * pe_fiq.c, so the window base has to be added back: without it this maps physical 0x100000
++	 * instead of 0x17100000 and the first distributor read faults.
++	 */
++	soc_base = 0;
++	if (SecureDTLookupEntry(NULL, "/arm-io", &soc_entry) == kSuccess) {
++		void const * ranges;
++		unsigned int ranges_size = 0;
++
++		if ((SecureDTGetProperty(soc_entry, "ranges", &ranges, &ranges_size) == kSuccess) &&
++		    (ranges_size >= 2 * sizeof(uint64_t))) {
++			soc_base = (vm_offset_t)((uint64_t const *)ranges)[1];
++		}
++	}
++	if ((regions[0] == 0) || (regions[1] == 0) || (regions[1] > 0x1000000) ||
++	    (regions[2] == 0) || (regions[3] == 0) || (regions[3] > 0x1000000)) {
++		printf("uke-gic: implausible intc reg %#llx/%#llx %#llx/%#llx\n",
++		    (unsigned long long)regions[0], (unsigned long long)regions[1],
++		    (unsigned long long)regions[2], (unsigned long long)regions[3]);
++		return FALSE;
++	}
++	if (soc_base == 0) {
++		printf("uke-gic: no arm-io window base (ranges missing), refusing to map %#llx\n",
++		    (unsigned long long)regions[0]);
++		return FALSE;
++	}
++	uke_gic_distributor = ml_io_map(soc_base + regions[0], regions[1]);
++	uke_gic_redistributors = ml_io_map(soc_base + regions[2], regions[3]);
 +	uke_gic_redistributor_size = regions[3];
 +	uke_gic_redistributor_stride = 0x20000;
 +	if ((SecureDTGetProperty(entry, "redistributor-stride", &property, &property_size) == kSuccess) &&
@@ -135,6 +164,12 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		    (unsigned long long)uke_gic_redistributor_stride);
 +		return FALSE;
 +	}
++	printf("uke-gic: soc=%#llx gicd pa=%#llx va=%#llx gicr pa=%#llx va=%#llx stride=%#llx\n",
++	    (unsigned long long)soc_base, (unsigned long long)(soc_base + regions[0]),
++	    (unsigned long long)uke_gic_distributor, (unsigned long long)(soc_base + regions[2]),
++	    (unsigned long long)uke_gic_redistributors,
++	    (unsigned long long)uke_gic_redistributor_stride);
++
 +	/* Read-only sanity check before a single write: a GICv3 distributor reports architecture 3. */
 +	pidr2 = uke_gic_read32(uke_gic_distributor + UKE_GICD_PIDR2);
 +	uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
