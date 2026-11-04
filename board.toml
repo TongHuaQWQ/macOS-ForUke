@@ -355,6 +355,11 @@ kernel_args = [
   "-v",
   "serial=3",
   "debug=0x14e",
+  # Round B14 diagnostics: fileset-wait-log names every IOService a kext waits on, and
+  # fileset-wait-cap-ms turns an unbounded wait into a 5 s one so the caller reports what it wanted
+  # instead of hanging silently. Both are inert unless this kernel carries fileset-wait-probe.patch.
+  "fileset-wait-log=1",
+  "fileset-wait-cap-ms=5000",
   # DEVELOPMENT kernels keep kprintf off unless this is set; uke has no UART,
   # so kprintf then falls back to the framebuffer video console. Graphics boot
   # suppresses text until -uketextconsole switches the console to text mode.
@@ -407,7 +412,10 @@ kernel_args = [
   # render server opens a native Metal device; iconservicesagent then keeps
   # CoreImage on that device instead of the null-GL crash loop.
   "sheng-gpu-addon=1",
-  "sheng-iconservices=1",
+  # Round B14 measures AppleImage4's waits, not the graphics stack: iconservices and the staged-app
+  # copy sit past root mount, and the kernel command line is capped at 1000 bytes (it was 987 before
+  # the two fileset-wait args below). Restore both once the kext stage is passed.
+  # "sheng-iconservices=1",
   "offline-mobile-graphics-client=1",
   "offline-mobile-graphics-load=1",
   "offline-apfs-load=1",
@@ -417,7 +425,7 @@ kernel_args = [
   "native-ufs-root=1",
   "native-ufs-allow-unverified=1",
   "sheng-data-persist=2",
-  "sheng-staged-apps=1",
+  # "sheng-staged-apps=1",   (see the note above: dropped for the 1000-byte command-line cap)
   "sheng-log=1",
   "sheng-pmgr=2",
   "sheng-lite=1",

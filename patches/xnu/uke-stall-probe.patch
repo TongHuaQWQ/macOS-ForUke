@@ -1,0 +1,368 @@
+diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
+--- a/osfmk/arm/rtclock.c
++++ b/osfmk/arm/rtclock.c
+@@ -58,6 +58,8 @@
+ #error Unsupported arch
+ #endif
+ #include <arm/rtclock.h>
++#include <arm/cpu_number.h>
++#include <pexpert/pexpert.h>
+ 
+ #include <IOKit/IOPlatformExpert.h>
+ #include <libkern/OSAtomic.h>
+@@ -316,6 +318,280 @@
+ 	*info = rtclock_timebase_const;
+ }
+ 
++#if DEVELOPMENT || DEBUG
++/*
++ * uke-stall-probe: a frozen panel here means one CPU stopped making progress — either a loop that
++ * never exits with interrupts enabled (a driver polling a register that never changes, a stub
++ * returning nonsense) or a spin with interrupts masked. Neither panics on a machine whose only
++ * console is the panel, so both look like silence. The timer interrupt is the only thing that still
++ * fires and the only place that knows the interrupted PC and LR, so it samples them and panics once
++ * they stop moving; the message names the address, and the pram staging prints it on the next boot.
++ *
++ * Two detectors ride on the samples:
++ *   * this CPU keeps interrupting the same few instructions for a whole window, and
++ *   * this CPU stops taking timer interrupts at all while another CPU still does,
++ * which are exactly the interrupt-enabled and interrupt-masked halves of the failure.
++ *
++ * Only the boot CPU is watched by default: the kext-start path that hangs runs there, while the
++ * secondary CPUs sit in their WFI idle loops whose PCs are too stable to be evidence of anything.
++ * An idle-pop interrupt clears the window for the same reason.
++ *
++ *   uke-stall-off=1      disable the sampler
++ *   uke-stall-window=N   samples that must agree (default 64, max 64)
++ *   uke-stall-span=N     how wide the "same place" window may be, bytes (default 0x1000)
++ *   uke-stall-hold-ms=N  how long a narrow window must persist (default 3000)
++ *   uke-stall-ms=N       silence before the cross-CPU detector fires (default 8000)
++ *   uke-stall-all=1      watch every CPU, not just the boot CPU
++ */
++#define UKE_DIAG_MAX_CPU   8
++#define UKE_DIAG_WINDOW    64
++
++struct uke_diag_lane {
++	uint64_t pcs[UKE_DIAG_WINDOW];
++	uint64_t head;          /* samples taken on this CPU since the window was last cleared */
++	uint64_t last_stamp;    /* absolute time of the newest sample */
++	uint64_t last_lr;
++	uint64_t stuck_start;   /* when the window first looked narrow, 0 when it does not */
++	boolean_t reported;     /* a panic already named this CPU */
++};
++
++static struct uke_diag_lane uke_diag_lanes[UKE_DIAG_MAX_CPU];
++static int      uke_diag_state;    /* 0 = not initialised, 1 = enabled, -1 = disabled */
++static uint64_t uke_diag_span;
++static uint64_t uke_diag_window;
++static uint64_t uke_diag_stall_ns;
++static uint64_t uke_diag_hold_abs;
++static boolean_t uke_diag_all_cpus;
++static uint32_t uke_diag_scan;
++
++static void
++uke_diag_init(void)
++{
++	uint64_t arg = 0;
++	uint32_t flag = 0;
++
++	uke_diag_span = 0x1000;
++	uke_diag_window = UKE_DIAG_WINDOW;
++	uke_diag_stall_ns = 8000000000ull;
++	uke_diag_hold_abs = 0;
++	nanoseconds_to_absolutetime(3000000000ull, &uke_diag_hold_abs);
++
++	if (PE_parse_boot_argn("uke-stall-off", &flag, sizeof(flag)) && (flag != 0)) {
++		uke_diag_state = -1;
++		return;
++	}
++	flag = 0;
++	if (PE_parse_boot_argn("uke-stall-all", &flag, sizeof(flag)) && (flag != 0)) {
++		uke_diag_all_cpus = TRUE;
++	}
++	if (PE_parse_boot_argn("uke-stall-span", &arg, sizeof(arg)) && (arg != 0)) {
++		uke_diag_span = arg;
++	}
++	arg = 0;
++	if (PE_parse_boot_argn("uke-stall-window", &arg, sizeof(arg)) && (arg != 0)) {
++		uke_diag_window = arg < UKE_DIAG_WINDOW ? arg : UKE_DIAG_WINDOW;
++	}
++	arg = 0;
++	if (PE_parse_boot_argn("uke-stall-ms", &arg, sizeof(arg)) && (arg != 0)) {
++		uke_diag_stall_ns = arg * 1000000ull;
++	}
++	arg = 0;
++	if (PE_parse_boot_argn("uke-stall-hold-ms", &arg, sizeof(arg)) && (arg != 0)) {
++		uke_diag_hold_abs = 0;
++		nanoseconds_to_absolutetime(arg * 1000000ull, &uke_diag_hold_abs);
++	}
++	uke_diag_state = 1;
++}
++
++/*
++ * The PC the newest window agrees on, and how many of the window's samples landed on it. Only
++ * reached once the window is known to be narrow, so the quadratic scan costs nothing in steady state.
++ */
++static uint64_t
++uke_diag_mode(struct uke_diag_lane *lane, uint64_t *hits_out)
++{
++	uint64_t n = uke_diag_window < UKE_DIAG_WINDOW ? uke_diag_window : UKE_DIAG_WINDOW;
++	uint64_t mode = 0, best = 0, i, j;
++
++	for (i = 0; i < n; i++) {
++		uint64_t hits = 0;
++
++		for (j = 0; j < n; j++) {
++			if (lane->pcs[(lane->head - 1 - j) % UKE_DIAG_WINDOW] ==
++			    lane->pcs[(lane->head - 1 - i) % UKE_DIAG_WINDOW]) {
++				hits++;
++			}
++		}
++		if (hits > best) {
++			best = hits;
++			mode = lane->pcs[(lane->head - 1 - i) % UKE_DIAG_WINDOW];
++		}
++	}
++	*hits_out = best;
++	return mode;
++}
++
++/*
++ * Every sample in the newest window fell inside uke_diag_span of the others: the CPU has been
++ * executing the same few instructions for the whole window. A zero PC means the interrupt had no
++ * frame of its own, which is not evidence of anything.
++ */
++static boolean_t
++uke_diag_stuck(struct uke_diag_lane *lane, uint64_t *low_out, uint64_t *high_out)
++{
++	uint64_t n = uke_diag_window < UKE_DIAG_WINDOW ? uke_diag_window : UKE_DIAG_WINDOW;
++	uint64_t low = ~0ull, high = 0, pc, i;
++
++	if (lane->head < UKE_DIAG_WINDOW) {
++		return FALSE;
++	}
++	for (i = 0; i < n; i++) {
++		pc = lane->pcs[(lane->head - 1 - i) % UKE_DIAG_WINDOW];
++		if (pc == 0) {
++			return FALSE;
++		}
++		if (pc < low) {
++			low = pc;
++		}
++		if (pc > high) {
++			high = pc;
++		}
++	}
++	if ((high - low) > uke_diag_span) {
++		return FALSE;
++	}
++	*low_out = low;
++	*high_out = high;
++	return TRUE;
++}
++
++static void
++uke_diag_sample(uint64_t pc, uint64_t lr, uint64_t abstime, boolean_t idle_pop)
++{
++	struct uke_diag_lane *lane, *other;
++	uint64_t low = 0, high = 0, mode, hits, delta_ns;
++	unsigned int cpu, ncpu, i;
++
++	if (uke_diag_state == 0) {
++		uke_diag_init();
++	}
++	if (uke_diag_state != 1) {
++		return;
++	}
++
++	cpu = (unsigned int)cpu_number();
++	if (cpu >= UKE_DIAG_MAX_CPU) {
++		return;
++	}
++	lane = &uke_diag_lanes[cpu];
++
++	/*
++	 * An idle CPU parks in a WFI loop whose PC never moves, so its samples are dropped and the
++	 * window is cleared: the idle timer pop is the interrupt that wakes it, and treating it as
++	 * fresh state keeps the idle loop from ever looking like a hang.
++	 */
++	if (idle_pop) {
++		lane->head = 0;
++		lane->last_stamp = abstime;
++		return;
++	}
++
++	lane->pcs[lane->head % UKE_DIAG_WINDOW] = pc;
++	lane->head++;
++	lane->last_stamp = abstime;
++	lane->last_lr = lr;
++
++	if (lane->reported || ((lane->head % 4) != 0)) {
++		return;
++	}
++
++	/* Detector 1: a watched CPU keeps executing the same instructions. */
++	if (((cpu == 0) || uke_diag_all_cpus) && uke_diag_stuck(lane, &low, &high)) {
++		/*
++		 * A delay loop or a long copy looks exactly like this for its duration, so a narrow
++		 * window only counts once it has persisted: uke-stall-hold-ms (3 s by default) is far
++		 * above any legitimate busy wait on this path and far below a hang.
++		 */
++		if (lane->stuck_start == 0) {
++			lane->stuck_start = abstime;
++			return;
++		}
++		if ((abstime - lane->stuck_start) < uke_diag_hold_abs) {
++			return;
++		}
++		mode = uke_diag_mode(lane, &hits);
++		lane->reported = TRUE;
++		panic("uke-stall: cpu%u stuck in one place: pc=%#llx lr=%#llx window=%llu samples=%llu "
++		    "range=%#llx-%#llx mode-pc=%#llx hits=%llu", cpu, (unsigned long long)pc,
++		    (unsigned long long)lr, (unsigned long long)uke_diag_window,
++		    (unsigned long long)lane->head, (unsigned long long)low,
++		    (unsigned long long)high, (unsigned long long)mode, (unsigned long long)hits);
++		return;
++	}
++
++	lane->stuck_start = 0;
++
++	/*
++	 * Detector 2: a watched CPU stopped taking timer interrupts (interrupts masked there). This
++	 * runs on whichever CPU took the interrupt, because the CPU that went quiet cannot report
++	 * itself; the boot CPU is always watched, secondaries only under uke-stall-all.
++	 */
++	if ((++uke_diag_scan % 32) != 0) {
++		return;
++	}
++	ncpu = uke_diag_all_cpus ? ml_get_cpu_count() : 1;
++	if (ncpu > UKE_DIAG_MAX_CPU) {
++		ncpu = UKE_DIAG_MAX_CPU;
++	}
++	for (i = 0; i < ncpu; i++) {
++		other = &uke_diag_lanes[i];
++		if ((i == cpu) || other->reported || (other->head < UKE_DIAG_WINDOW) ||
++		    (other->last_stamp == 0) || (abstime <= other->last_stamp)) {
++			continue;
++		}
++		absolutetime_to_nanoseconds(abstime - other->last_stamp, &delta_ns);
++		if (delta_ns < uke_diag_stall_ns) {
++			continue;
++		}
++		mode = uke_diag_mode(other, &hits);
++		other->reported = TRUE;
++		panic("uke-stall: cpu%u silent for %llu ms (seen from cpu%u): last pc=%#llx lr=%#llx "
++		    "samples=%llu mode-pc=%#llx hits=%llu", i,
++		    (unsigned long long)(delta_ns / 1000000ull), cpu,
++		    (unsigned long long)other->pcs[(other->head - 1) % UKE_DIAG_WINDOW],
++		    (unsigned long long)other->last_lr, (unsigned long long)other->head,
++		    (unsigned long long)mode, (unsigned long long)hits);
++		return;
++	}
++}
++
++uint64_t
++uke_diag_total_samples(void)
++{
++	uint64_t total = 0;
++	unsigned int i;
++
++	for (i = 0; i < UKE_DIAG_MAX_CPU; i++) {
++		total += uke_diag_lanes[i].head;
++	}
++	return total;
++}
++
++uint64_t
++uke_diag_last_pc(void)
++{
++	uint64_t pc = 0;
++	unsigned int i;
++
++	for (i = 0; i < UKE_DIAG_MAX_CPU; i++) {
++		if (uke_diag_lanes[i].head != 0) {
++			pc = uke_diag_lanes[i].pcs[(uke_diag_lanes[i].head - 1) % UKE_DIAG_WINDOW];
++		}
++	}
++	return pc;
++}
++#endif /* DEVELOPMENT || DEBUG */
++
+ /*
+  * Real-time clock device interrupt.
+  */
+@@ -327,6 +603,10 @@
+ 	struct arm_saved_state * regs;
+ 	unsigned int             user_mode;
+ 	uintptr_t                pc;
++	uintptr_t                lr;
++#if DEVELOPMENT || DEBUG
++	boolean_t                idle_pop;
++#endif
+ 
+ 	cdp = getCpuDatap();
+ 
+@@ -337,6 +617,11 @@
+ 
+ 	abstime = mach_absolute_time();
+ 
++#if DEVELOPMENT || DEBUG
++	/* uke-stall-probe: read this before the block below consumes it (see the sampler). */
++	idle_pop = (cdp->cpu_idle_pop != 0x0ULL) ? TRUE : FALSE;
++#endif
++
+ 	if (cdp->cpu_idle_pop != 0x0ULL) {
+ 		if ((cdp->rtcPop - abstime) < cdp->cpu_idle_latency) {
+ 			cdp->cpu_idle_pop = 0x0ULL;
+@@ -350,12 +635,14 @@
+ 
+ 	if ((regs = cdp->cpu_int_state)) {
+ 		pc = get_saved_state_pc(regs);
++		lr = (uintptr_t)get_saved_state_lr(regs);
+ 
+ #if __arm64__
+ 		user_mode = PSR64_IS_USER(get_saved_state_cpsr(regs));
+ #endif
+ 	} else {
+ 		pc = 0;
++		lr = 0;
+ 		user_mode = 0;
+ 	}
+ 	if (abstime >= cdp->rtcPop) {
+@@ -365,6 +652,11 @@
+ 		    user_mode ? pc : VM_KERNEL_UNSLIDE(pc), user_mode);
+ 	}
+ 
++#if DEVELOPMENT || DEBUG
++	/* uke-stall-probe: remember where this interrupt came from (see the block above). */
++	uke_diag_sample((uint64_t)pc, (uint64_t)lr, abstime, idle_pop);
++#endif /* DEVELOPMENT || DEBUG */
++
+ 	/* call the generic etimer */
+ 	timer_intr(user_mode, pc);
+ }
+diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
+--- a/osfmk/kern/locks.c
++++ b/osfmk/kern/locks.c
+@@ -3456,6 +3456,21 @@
+ 		printf("PREVIOUS XNU LOG (pram=%llx size=%u): %s\n",
+ 		    (unsigned long long)uke_panic_pram_base(), uke_panic_pram_size(),
+ 		    uke_last_panic_text());
++
++		/*
++		 * uke-stall-probe liveness: the timer interrupt samples the interrupted PC from early
++		 * boot on, so a non-zero count proves the sampler is armed and last_pc says where the
++		 * boot was at the moment of this call. A zero count is the one answer that would make a
++		 * later "still no panic" uninformative.
++		 */
++		{
++			extern uint64_t uke_diag_total_samples(void);
++			extern uint64_t uke_diag_last_pc(void);
++
++			printf("uke-stall-probe: samples=%llu last_pc=%#llx\n",
++			    (unsigned long long)uke_diag_total_samples(),
++			    (unsigned long long)uke_diag_last_pc());
++		}
+ 	}
+ 	printf("lck-gate: %s lock=%p gate=%p data=%llx\n", what, (void *)lock, (void *)gate,
+ 	    (unsigned long long)(gate ? gate->gt_data : 0));

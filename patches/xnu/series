@@ -89,3 +89,8 @@ uke-gate-last-panic.patch
 # The gate probe line also reports the pram region, because "(no previous panic captured)" only means
 # something if the staging area is real.
 uke-spin-watchdog.patch
+# The timer interrupt samples the interrupted PC, so a hang with interrupts enabled (a
+# driver polling a register that never changes, a stub returning nonsense) or one with them
+# masked (a spin, caught by another CPU going quiet) panics with the address instead of
+# freezing the panel. Every threshold is a boot arg, so tuning needs no rebuild.
+uke-stall-probe.patch
