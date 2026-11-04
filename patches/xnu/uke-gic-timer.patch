@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,359 @@
+@@ -1050,3 +1056,449 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -52,12 +52,23 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +#define UKE_GICR_WAKER_ASLEEP      0x4u
 +#define UKE_GICR_IGROUPR0          0x10080u
 +#define UKE_GICR_ISENABLER0        0x10100u
++#define UKE_GICR_ICENABLER0        0x10180u
 +#define UKE_GIC_CTLR_ENABLE_GRP0   (1u << 0)   /* also EnableGrp1NS in the non-secure view */
 +#define UKE_GIC_CTLR_ARE           (1u << 4)   /* ARE_NS in the non-secure view: required with GICRs */
 +#define UKE_GIC_CTLR_DS            (1u << 6)
 +#define UKE_MPIDR_AFF0             0x000000FFull
 +#define UKE_MPIDR_AFF1             0x0000FF00ull
 +#define UKE_GIC_SPURIOUS           1020u
++/*
++ * ICC_CTLR_EL1 bit 1 is EOImode (bit 0 is CBPR). Apple's VMAPPLE.h calls 0x1 EOImode, which only matches
++ * a GICv2-style layout; the architecture puts it in bit 1, so both are handled: the mode is cleared when
++ * the write takes effect and read back so the interrupt can be deactivated the way the hardware wants.
++ */
++#define UKE_ICC_CTLR_CBPR          (1u << 0)
++#define UKE_ICC_CTLR_EOIMODE       (1u << 1)
++/* An interrupt rate above this (20 us apart, 50 kHz) cannot be a timer tick; a storm is being taken. */
++#define UKE_GIC_STORM_GAP_NS       20000ull
++#define UKE_GIC_STORM_RUN          2000u
 +
 +/* -1 = off, unsupported or unreadable; 0 = not tried yet; 1 = mapped */
 +static int          uke_gic_mapped;
@@ -77,6 +88,13 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +static uint64_t     uke_gic_redistributor_size;
 +static uint64_t     uke_gic_redistributor_stride;
 +static uint32_t     uke_gic_dist_ctlr;
++static int          uke_gic_eoi_mode1;      /* EOImode was still 1 after trying to clear it */
++static vm_offset_t  uke_gic_this_redistributor;
++static uint64_t     uke_gic_irq_count;
++static uint64_t     uke_gic_last_stamp;
++static uint32_t     uke_gic_fast_run;
++static uint64_t     uke_gic_storm_gap;
++static int          uke_gic_storm_off;
 +
 +static uint32_t
 +uke_gic_read32(vm_offset_t address)
@@ -273,7 +291,18 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +
 +	__builtin_arm_wsr64("ICC_PMR_EL1", 0xFF);
 +	ctlr_el1 = (uint32_t)__builtin_arm_rsr64("ICC_CTLR_EL1");
-+	__builtin_arm_wsr64("ICC_CTLR_EL1", ctlr_el1 & ~1u);   /* EOImode 0: EOI drops and deactivates */
++	__builtin_arm_wsr64("ICC_CTLR_EL1", ctlr_el1 & ~(UKE_ICC_CTLR_EOIMODE | UKE_ICC_CTLR_CBPR));
++	__builtin_arm_isb(ISB_SY);
++	ctlr_el1 = (uint32_t)__builtin_arm_rsr64("ICC_CTLR_EL1");
++	/*
++	 * With EOImode 0 an EOI write both drops priority and deactivates; with EOImode 1 it only drops, and
++	 * the interrupt stays active forever - which for a timer whose condition is still asserted is an
++	 * endless storm of interrupts that never lets the CPU run anything else.
++	 */
++	uke_gic_eoi_mode1 = (ctlr_el1 & UKE_ICC_CTLR_EOIMODE) ? 1 : 0;
++	uke_gic_this_redistributor = redistributor;
++	uke_gic_storm_gap = 0;
++	nanoseconds_to_absolutetime(UKE_GIC_STORM_GAP_NS, &uke_gic_storm_gap);
 +	/* Affinity routing is mandatory once redistributors exist, and the group must be forwarded. */
 +	uke_gic_dist_ctlr |= (UKE_GIC_CTLR_ARE | UKE_GIC_CTLR_ENABLE_GRP0);
 +	uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, uke_gic_dist_ctlr);
@@ -287,9 +316,9 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	__builtin_arm_isb(ISB_SY);
 +
 +	uke_gic_group = group0 ? 0 : 1;
-+	printf("uke-gic: cpu mpidr=%#llx gicr=%#llx typer=%#llx group=%d ctlr=%#x igroupr=%#x "
++	printf("uke-gic: cpu mpidr=%#llx gicr=%#llx typer=%#llx group=%d eoimode=%d ctlr=%#x igroupr=%#x "
 +	    "isenabler=%#x %s\n", (unsigned long long)mpidr, (unsigned long long)redistributor,
-+	    (unsigned long long)typer, group0 ? 0 : 1,
++	    (unsigned long long)typer, group0 ? 0 : 1, uke_gic_eoi_mode1,
 +	    uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR),
 +	    uke_gic_read32(redistributor + UKE_GICR_IGROUPR0),
 +	    uke_gic_read32(redistributor + UKE_GICR_ISENABLER0), group0 ? "FIQ" : "IRQ");
@@ -346,26 +375,87 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +boolean_t
 +uke_gic_timer_irq(boolean_t pop_programmed)
 +{
-+	uint64_t iar;
++	uint64_t iar, now;
 +
 +	if ((uke_gic_mapped != 1) || (uke_gic_group != 1)) {
 +		return FALSE;
++	}
++	if (uke_gic_storm_off) {
++		/*
++		 * The PPI is masked; anything still pending is acknowledged and dropped, because returning
++		 * FALSE here would fall through to a registered handler this platform never installs.
++		 */
++		iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
++		if ((uint32_t)iar < UKE_GIC_SPURIOUS) {
++			__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++			if (uke_gic_eoi_mode1) {
++				__builtin_arm_wsr64("ICC_DIR_EL1", iar & 0xffffffu);
++			}
++		}
++		return TRUE;
 +	}
 +	iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
 +	if ((uint32_t)iar >= UKE_GIC_SPURIOUS) {
 +		/* Acknowledge a spurious read as consumed: falling through would run a NULL handler. */
 +		return TRUE;
 +	}
++
 +	/*
-+	 * Before the kernel programs its first decrementer pop the timer's condition is already asserted,
-+	 * so running the timer queue there would be work on state that does not exist yet. Acknowledge and
-+	 * drop it; the caller passes whether rtcPop has been programmed.
++	 * Storm brake. A timer tick is at most a few kHz; interrupts arriving closer together than
++	 * UKE_GIC_STORM_GAP_NS for UKE_GIC_STORM_RUN in a row mean the line is being re-asserted faster
++	 * than anything can run, which is what starves the console and hides the boot. Mask the PPI and
++	 * say so rather than wedging the machine: the boot then behaves as it does with the timer off.
 +	 */
-+	if (pop_programmed) {
-+		rtclock_intr(TRUE);
++	now = mach_absolute_time();
++	if ((uke_gic_last_stamp != 0) && ((now - uke_gic_last_stamp) < uke_gic_storm_gap)) {
++		if (uke_gic_fast_run < 0xffffffffu) {
++			uke_gic_fast_run++;
++		}
++	} else {
++		uke_gic_fast_run = 0;
 +	}
++	uke_gic_last_stamp = now;
++	uke_gic_irq_count++;
++
++	if (uke_gic_fast_run > UKE_GIC_STORM_RUN) {
++		uke_gic_storm_off = 1;
++		if (uke_gic_this_redistributor != 0) {
++			uke_gic_write32(uke_gic_this_redistributor + UKE_GICR_ICENABLER0,
++			    1u << UKE_GIC_TIMER_PPI);
++			__builtin_arm_isb(ISB_SY);
++		}
++		printf("uke-gic: interrupt storm (%llu interrupts, last gap %llu ticks); PPI %u masked\n",
++		    (unsigned long long)uke_gic_irq_count, (unsigned long long)uke_gic_storm_gap,
++		    UKE_GIC_TIMER_PPI);
++	} else {
++		/*
++		 * Before the kernel programs its first decrementer pop the timer's condition is already
++		 * asserted, so running the timer queue there would be work on state that does not exist yet.
++		 * Acknowledge and drop it; the caller passes whether rtcPop has been programmed.
++		 */
++		if (pop_programmed) {
++			rtclock_intr(TRUE);
++		}
++	}
++
 +	__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++	if (uke_gic_eoi_mode1) {
++		/* EOImode 1: the EOI above only dropped priority; this is what deactivates the interrupt. */
++		__builtin_arm_wsr64("ICC_DIR_EL1", iar & 0xffffffu);
++	}
 +	return TRUE;
++}
++
++uint64_t
++uke_gic_irq_total(void)
++{
++	return uke_gic_irq_count;
++}
++
++int
++uke_gic_stormed(void)
++{
++	return uke_gic_storm_off;
 +}
 +
 +int
@@ -508,7 +598,24 @@ diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
  static int      uke_diag_state;    /* 0 = not initialised, 1 = enabled, -1 = disabled */
  static uint64_t uke_diag_span;
  static uint64_t uke_diag_window;
-@@ -490,8 +518,9 @@
+@@ -363,6 +391,7 @@
+ static uint64_t uke_diag_hold_abs;
+ static boolean_t uke_diag_all_cpus;
+ static uint32_t uke_diag_scan;
++static uint64_t uke_diag_first_stamp;
+ 
+ static void
+ uke_diag_init(void)
+@@ -469,7 +498,7 @@
+ uke_diag_sample(uint64_t pc, uint64_t lr, uint64_t abstime, boolean_t idle_pop)
+ {
+ 	struct uke_diag_lane *lane, *other;
+-	uint64_t low = 0, high = 0, mode, hits, delta_ns;
++	uint64_t low = 0, high = 0, mode, hits, delta_ns, elapsed_ms = 0;
+ 	unsigned int cpu, ncpu, i;
+ 
+ 	if (uke_diag_state == 0) {
+@@ -490,12 +519,16 @@
  	 * window is cleared: the idle timer pop is the interrupt that wakes it, and treating it as
  	 * fresh state keeps the idle loop from ever looking like a hang.
  	 */
@@ -519,7 +626,14 @@ diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
  		lane->last_stamp = abstime;
  		return;
  	}
-@@ -506,6 +535,19 @@
+ 
++	if (uke_diag_first_stamp == 0) {
++		uke_diag_first_stamp = abstime;
++	}
+ 	lane->pcs[lane->head % UKE_DIAG_WINDOW] = pc;
+ 	lane->head++;
+ 	lane->last_stamp = abstime;
+@@ -506,6 +539,19 @@
  	}
  
  	/* Detector 1: a watched CPU keeps executing the same instructions. */
@@ -539,16 +653,40 @@ diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
  	if (((cpu == 0) || uke_diag_all_cpus) && uke_diag_stuck(lane, &low, &high)) {
  		/*
  		 * A delay loop or a long copy looks exactly like this for its duration, so a narrow
+@@ -521,10 +567,18 @@
+ 		}
+ 		mode = uke_diag_mode(lane, &hits);
+ 		lane->reported = TRUE;
++		{
++			uint64_t elapsed_ns = 0;
++
++			absolutetime_to_nanoseconds(abstime - uke_diag_first_stamp, &elapsed_ns);
++			elapsed_ns /= 1000000ull;
++			elapsed_ms = elapsed_ns;
++		}
+ 		panic("uke-stall: cpu%u stuck in one place: pc=%#llx lr=%#llx window=%llu samples=%llu "
+-		    "range=%#llx-%#llx mode-pc=%#llx hits=%llu", cpu, (unsigned long long)pc,
++		    "elapsed_ms=%llu range=%#llx-%#llx mode-pc=%#llx hits=%llu", cpu, (unsigned long long)pc,
+ 		    (unsigned long long)lr, (unsigned long long)uke_diag_window,
+-		    (unsigned long long)lane->head, (unsigned long long)low,
++		    (unsigned long long)lane->head, (unsigned long long)elapsed_ms,
++		    (unsigned long long)low,
+ 		    (unsigned long long)high, (unsigned long long)mode, (unsigned long long)hits);
+ 		return;
+ 	}
 diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
 --- a/osfmk/kern/locks.c
 +++ b/osfmk/kern/locks.c
-@@ -3466,6 +3466,17 @@
+@@ -3466,10 +3466,27 @@
  		{
  			extern uint64_t uke_diag_total_samples(void);
  			extern uint64_t uke_diag_last_pc(void);
 +			extern void uke_gic_arm_now(void);
 +			extern void uke_boot_stage_set(unsigned int);
-+
+ 
+-			printf("uke-stall-probe: samples=%llu last_pc=%#llx\n",
+-			    (unsigned long long)uke_diag_total_samples(),
+-			    (unsigned long long)uke_diag_last_pc());
 +			/*
 +			 * uke-gic=2 arms the timer's interrupt here rather than in arm_init(): kext startup is
 +			 * the earliest point that is both past console creation and before the wait that hangs
@@ -557,6 +695,16 @@ diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
 +			 */
 +			uke_boot_stage_set(1);
 +			uke_gic_arm_now();
- 
- 			printf("uke-stall-probe: samples=%llu last_pc=%#llx\n",
- 			    (unsigned long long)uke_diag_total_samples(),
++
++			{
++				extern uint64_t uke_gic_irq_total(void);
++				extern int uke_gic_stormed(void);
++
++				printf("uke-stall-probe: samples=%llu last_pc=%#llx gic_irqs=%llu storm=%d\n",
++				    (unsigned long long)uke_diag_total_samples(),
++				    (unsigned long long)uke_diag_last_pc(),
++				    (unsigned long long)uke_gic_irq_total(), uke_gic_stormed());
++			}
+ 		}
+ 	}
+ 	printf("lck-gate: %s lock=%p gate=%p data=%llx\n", what, (void *)lock, (void *)gate,
