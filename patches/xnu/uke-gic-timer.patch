@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,261 @@
+@@ -1050,3 +1056,262 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -53,6 +53,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +#define UKE_GICR_IGROUPR0          0x10080u
 +#define UKE_GICR_ISENABLER0        0x10100u
 +#define UKE_GIC_CTLR_ENABLE_GRP0   (1u << 0)   /* also EnableGrp1NS in the non-secure view */
++#define UKE_GIC_CTLR_ARE           (1u << 4)   /* ARE_NS in the non-secure view: required with GICRs */
 +#define UKE_GIC_CTLR_DS            (1u << 6)
 +#define UKE_MPIDR_AFF0             0x000000FFull
 +#define UKE_MPIDR_AFF1             0x0000FF00ull
@@ -98,6 +99,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	unsigned int     property_size;
 +	uint64_t const * regions;
 +	uint32_t         disabled = 1;
++	uint32_t         pidr2;
 +
 +	if (uke_gic_mapped != 0) {
 +		return uke_gic_mapped > 0;
@@ -162,7 +164,6 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	uint64_t         offset, typer, mpidr, deadline;
 +	uint32_t         waker, igroupr, sre, ctlr_el1;
 +	int              group0;
-+	uint32_t         pidr2;
 +
 +	if (!uke_gic_map()) {
 +		return;
@@ -226,25 +227,25 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	__builtin_arm_wsr64("ICC_PMR_EL1", 0xFF);
 +	ctlr_el1 = (uint32_t)__builtin_arm_rsr64("ICC_CTLR_EL1");
 +	__builtin_arm_wsr64("ICC_CTLR_EL1", ctlr_el1 & ~1u);   /* EOImode 0: EOI drops and deactivates */
++	/* Affinity routing is mandatory once redistributors exist, and the group must be forwarded. */
++	uke_gic_dist_ctlr |= (UKE_GIC_CTLR_ARE | UKE_GIC_CTLR_ENABLE_GRP0);
++	uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, uke_gic_dist_ctlr);
 +	if (group0) {
 +		__builtin_arm_wsr64("ICC_BPR0_EL1", 0);
-+		uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR,
-+		    uke_gic_dist_ctlr | UKE_GIC_CTLR_ENABLE_GRP0);
 +		__builtin_arm_wsr64("ICC_IGRPEN0_EL1", 1);
 +	} else {
-+		uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR,
-+		    uke_gic_dist_ctlr | UKE_GIC_CTLR_ENABLE_GRP0);
 +		__builtin_arm_wsr64("ICC_IGRPEN1_EL1", 1);
 +	}
 +	uke_gic_write32(redistributor + UKE_GICR_ISENABLER0, 1u << UKE_GIC_TIMER_PPI);
 +	__builtin_arm_isb(ISB_SY);
 +
 +	uke_gic_group = group0 ? 0 : 1;
-+	printf("uke-gic: cpu mpidr=%#llx gicr=%#llx typer=%#llx group=%d igroupr=%#x isenabler=%#x %s\n",
-+	    (unsigned long long)mpidr, (unsigned long long)redistributor, (unsigned long long)typer,
-+	    group0 ? 0 : 1, uke_gic_read32(redistributor + UKE_GICR_IGROUPR0),
-+	    uke_gic_read32(redistributor + UKE_GICR_ISENABLER0),
-+	    group0 ? "FIQ" : "IRQ");
++	printf("uke-gic: cpu mpidr=%#llx gicr=%#llx typer=%#llx group=%d ctlr=%#x igroupr=%#x "
++	    "isenabler=%#x %s\n", (unsigned long long)mpidr, (unsigned long long)redistributor,
++	    (unsigned long long)typer, group0 ? 0 : 1,
++	    uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR),
++	    uke_gic_read32(redistributor + UKE_GICR_IGROUPR0),
++	    uke_gic_read32(redistributor + UKE_GICR_ISENABLER0), group0 ? "FIQ" : "IRQ");
 +}
 +
 +/*
