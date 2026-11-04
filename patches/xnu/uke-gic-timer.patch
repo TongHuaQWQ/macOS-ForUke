@@ -437,10 +437,89 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
  #if USE_APPLEARMSMP
  	PE_handle_ext_interrupt();
  #else
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -375,10 +375,19 @@
+ void
+ machine_idle(void)
+ {
++#if DEVELOPMENT || DEBUG
++	extern void uke_idle_enter(void);
++	extern void uke_idle_exit(void);
++#endif /* DEVELOPMENT || DEBUG */
++
+ 	/* Interrupts are expected to be masked on entry or re-entry via
+ 	 * Idle_load_context()
+ 	 */
+ 	assert((__builtin_arm_rsr("DAIF") & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE);
++#if DEVELOPMENT || DEBUG
++	/* uke-idle-guard: tell the timer sampler that this CPU is parking, not spinning. */
++	uke_idle_enter();
++#endif /* DEVELOPMENT || DEBUG */
+ 	/* Check for, and act on, a WFE recommendation.
+ 	 * Bypasses context spill/fill for a minor perf. increment.
+ 	 * May unmask and restore IRQ+FIQ mask.
+@@ -390,6 +399,9 @@
+ 		 */
+ 		Idle_context();
+ 	}
++#if DEVELOPMENT || DEBUG
++	uke_idle_exit();
++#endif /* DEVELOPMENT || DEBUG */
+ 	__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
+ }
+ 
 diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
 --- a/osfmk/arm/rtclock.c
 +++ b/osfmk/arm/rtclock.c
-@@ -506,6 +506,19 @@
+@@ -356,6 +356,34 @@
+ };
+ 
+ static struct uke_diag_lane uke_diag_lanes[UKE_DIAG_MAX_CPU];
++
++/*
++ * uke-idle-guard: an idle CPU parks in machine_idle(), and with the timer live every one of its
++ * interrupts lands on the instruction just after the DAIF unmask there. To the sampler that looks like
++ * a perfect "same place" window, so an idle CPU would be reported as a hang. machine_idle() marks the
++ * CPU here; the sampler drops idle samples and clears the window.
++ */
++static volatile unsigned char uke_idle_cpu[UKE_DIAG_MAX_CPU];
++
++void
++uke_idle_enter(void)
++{
++	unsigned int cpu = (unsigned int)cpu_number();
++
++	if (cpu < UKE_DIAG_MAX_CPU) {
++		uke_idle_cpu[cpu] = 1;
++	}
++}
++
++void
++uke_idle_exit(void)
++{
++	unsigned int cpu = (unsigned int)cpu_number();
++
++	if (cpu < UKE_DIAG_MAX_CPU) {
++		uke_idle_cpu[cpu] = 0;
++	}
++}
+ static int      uke_diag_state;    /* 0 = not initialised, 1 = enabled, -1 = disabled */
+ static uint64_t uke_diag_span;
+ static uint64_t uke_diag_window;
+@@ -490,8 +518,9 @@
+ 	 * window is cleared: the idle timer pop is the interrupt that wakes it, and treating it as
+ 	 * fresh state keeps the idle loop from ever looking like a hang.
+ 	 */
+-	if (idle_pop) {
++	if (idle_pop || (uke_idle_cpu[cpu] != 0)) {
+ 		lane->head = 0;
++		lane->stuck_start = 0;
+ 		lane->last_stamp = abstime;
+ 		return;
+ 	}
+@@ -506,6 +535,19 @@
  	}
  
  	/* Detector 1: a watched CPU keeps executing the same instructions. */
