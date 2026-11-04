@@ -1,7 +1,18 @@
 diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -6754,6 +6754,15 @@
+@@ -6739,6 +6739,10 @@
+ }
+ 
+ IOService *
++#if DEVELOPMENT || DEBUG
++static uint64_t fileset_wait_probe(OSDictionary * matching, uint64_t timeout);
++#endif /* DEVELOPMENT || DEBUG */
++
+ IOService::waitForMatchingServiceWithToken( OSDictionary * matching,
+     uint64_t timeout,
+     IOUserServerCheckInToken * checkInToken)
+@@ -6754,6 +6758,15 @@
  		return NULL;
  	}
  
@@ -17,7 +28,7 @@ diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
  	result = NULL;
  	cancelArgs.ref = &result;
  	cancelArgs.canceled = false;
-@@ -6864,6 +6873,7 @@
+@@ -6864,6 +6877,7 @@
  static uint64_t gFilesetWaitCapNS;
  static bool     gFilesetWaitLog;
  static bool     gFilesetWaitProbed;
@@ -25,7 +36,7 @@ diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
  
  static void
  fileset_wait_probe_read_boot_args(void)
-@@ -6881,6 +6891,56 @@
+@@ -6881,6 +6895,52 @@
  	gFilesetWaitProbed = true;
  }
  
@@ -70,12 +81,8 @@ diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
 +		service->release();
 +		return;
 +	}
-+	if (!service->registerService()) {
-+		kprintf("uke-aes-stub: %s cannot be published\n", className);
-+		service->detachAll(gIOServicePlane);
-+		service->release();
-+		return;
-+	}
++	/* registerService() returns void here, so publication is reported rather than tested. */
++	service->registerService();
 +	kprintf("uke-aes-stub: published %s at %p\n", className, service);
 +}
 +
