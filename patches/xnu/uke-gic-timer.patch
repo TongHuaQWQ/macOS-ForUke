@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,449 @@
+@@ -1050,3 +1056,467 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -280,13 +280,16 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		return;
 +	}
 +
-+	group0 = (uke_gic_dist_ctlr & UKE_GIC_CTLR_DS) ? 1 : 0;
++	/*
++	 * Always group 1 (IRQ), never group 0 (FIQ). The group 0 path is sleh_fiq, and the only EOI in there
++	 * is compiled for APPLEVIRTUALPLATFORM, so on this platform an interrupt taken through it is never
++	 * deactivated: the line stays active and re-triggers immediately, which is the 800 kHz storm that
++	 * starved the console. Group 1 comes to sleh_irq, where uke_gic_timer_irq() acknowledges, handles and
++	 * deactivates it (and brakes a storm if one still happens).
++	 */
++	group0 = 0;
 +	igroupr = uke_gic_read32(redistributor + UKE_GICR_IGROUPR0);
-+	if (group0) {
-+		igroupr &= ~(1u << UKE_GIC_TIMER_PPI);
-+	} else {
-+		igroupr |= (1u << UKE_GIC_TIMER_PPI);
-+	}
++	igroupr |= (1u << UKE_GIC_TIMER_PPI);
 +	uke_gic_write32(redistributor + UKE_GICR_IGROUPR0, igroupr);
 +
 +	__builtin_arm_wsr64("ICC_PMR_EL1", 0xFF);
@@ -446,6 +449,21 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	return TRUE;
 +}
 +
++/*
++ * If the timer still reaches sleh_fiq the distributor ignored the group write; say so once, because from
++ * then on nothing deactivates the interrupt and the machine will storm.
++ */
++void
++uke_gic_fiq_seen(void)
++{
++	static int announced;
++
++	if (!announced) {
++		announced = 1;
++		printf("uke-gic: the timer arrived as FIQ (group 0); this path never deactivates it\n");
++	}
++}
++
 +uint64_t
 +uke_gic_irq_total(void)
 +{
@@ -527,6 +545,21 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
  #if USE_APPLEARMSMP
  	PE_handle_ext_interrupt();
  #else
+@@ -3117,6 +3136,14 @@
+ 		ml_interrupt_masked_debug_start(rtclock_intr, DBG_INTR_TYPE_TIMER);
+ 		rtclock_intr(TRUE);
+ 		ml_interrupt_masked_debug_end();
++#if DEVELOPMENT || DEBUG
++		{
++			extern void uke_gic_fiq_seen(void);
++
++			/* uke-gic forces PPI 27 to group 1; reaching here means it did not take. */
++			uke_gic_fiq_seen();
++		}
++#endif /* DEVELOPMENT || DEBUG */
+ 	}
+ 
+ #if APPLEVIRTUALPLATFORM
 diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
