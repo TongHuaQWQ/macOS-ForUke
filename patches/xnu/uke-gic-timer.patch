@@ -1,18 +1,20 @@
 diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 --- a/pexpert/arm/pe_init.c
 +++ b/pexpert/arm/pe_init.c
-@@ -17,6 +17,10 @@
+@@ -17,6 +17,12 @@
  #include <machine/machine_routines.h>
  #include <arm/caches_internal.h>
  #include <kern/debug.h>
 +#include <kern/clock.h>
 +#include <mach/mach_time.h>
-+#include <arm/rtclock.h>
 +#include <arm64/proc_reg.h>
++
++/* osfmk/arm/rtclock.h is not on this directory's include path; only the entry point is needed. */
++extern void rtclock_intr(unsigned int is_user_context);
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1054,261 @@
+@@ -1050,3 +1056,261 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
