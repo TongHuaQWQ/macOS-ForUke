@@ -100,4 +100,10 @@ uke-stall-probe.patch
 # only, so the timer counted down and no interrupt was ever forwarded. Group 0 (FIQ) when the
 # distributor is single-security-state, group 1 (IRQ) otherwise, in which case sleh_irq dispatches it.
 # uke-gic=0 turns the whole thing off.
-uke-gic-timer.patch
+# uke-gic-timer.patch is retired: ArmCpu (drivers/ArmCpu) is the component that arms the GIC
+# and the architectural timer and registers the CPU IRQ action, so the hand-rolled GIC bring-up
+# duplicated it and stole its interrupt. The probe below reports ArmCpu's own state instead.
+
+# Reports ArmCpu's own progress flags and GIC read-backs from the gate probe, so "the platform driver never
+# started" and "it started but the timer never arrived" are different lines on screen.
+uke-armcpu-probe.patch

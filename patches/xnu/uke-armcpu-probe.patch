@@ -1,0 +1,203 @@
+diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
+--- a/osfmk/arm/rtclock.c
++++ b/osfmk/arm/rtclock.c
+@@ -356,6 +356,51 @@
+ };
+ 
+ static struct uke_diag_lane uke_diag_lanes[UKE_DIAG_MAX_CPU];
++
++/*
++ * uke-idle-guard: an idle CPU parks in machine_idle(), and with the timer live every one of its
++ * interrupts lands on the instruction just after the DAIF unmask there. To the sampler that looks like
++ * a perfect "same place" window, so an idle CPU would be reported as a hang. machine_idle() marks the
++ * CPU here; the sampler drops idle samples and clears the window.
++ */
++static volatile unsigned char uke_idle_cpu[UKE_DIAG_MAX_CPU];
++
++void
++uke_idle_enter(void)
++{
++	unsigned int cpu = (unsigned int)cpu_number();
++
++	if (cpu < UKE_DIAG_MAX_CPU) {
++		uke_idle_cpu[cpu] = 1;
++	}
++}
++
++void
++uke_idle_exit(void)
++{
++	unsigned int cpu = (unsigned int)cpu_number();
++
++	if (cpu < UKE_DIAG_MAX_CPU) {
++		uke_idle_cpu[cpu] = 0;
++	}
++}
++
++/* The gate probe sets this once kext startup begins; before that an idle CPU is expected. */
++static unsigned int uke_boot_stage;
++
++void
++uke_boot_stage_set(unsigned int stage)
++{
++	if (stage > uke_boot_stage) {
++		uke_boot_stage = stage;
++	}
++}
++
++unsigned int
++uke_boot_stage_get(void)
++{
++	return uke_boot_stage;
++}
+ static int      uke_diag_state;    /* 0 = not initialised, 1 = enabled, -1 = disabled */
+ static uint64_t uke_diag_span;
+ static uint64_t uke_diag_window;
+@@ -363,6 +408,7 @@
+ static uint64_t uke_diag_hold_abs;
+ static boolean_t uke_diag_all_cpus;
+ static uint32_t uke_diag_scan;
++static uint64_t uke_diag_first_stamp;
+ 
+ static void
+ uke_diag_init(void)
+@@ -469,7 +515,7 @@
+ uke_diag_sample(uint64_t pc, uint64_t lr, uint64_t abstime, boolean_t idle_pop)
+ {
+ 	struct uke_diag_lane *lane, *other;
+-	uint64_t low = 0, high = 0, mode, hits, delta_ns;
++	uint64_t low = 0, high = 0, mode, hits, delta_ns, elapsed_ms = 0;
+ 	unsigned int cpu, ncpu, i;
+ 
+ 	if (uke_diag_state == 0) {
+@@ -490,12 +536,16 @@
+ 	 * window is cleared: the idle timer pop is the interrupt that wakes it, and treating it as
+ 	 * fresh state keeps the idle loop from ever looking like a hang.
+ 	 */
+-	if (idle_pop) {
++	if (idle_pop || (uke_idle_cpu[cpu] != 0)) {
+ 		lane->head = 0;
++		lane->stuck_start = 0;
+ 		lane->last_stamp = abstime;
+ 		return;
+ 	}
+ 
++	if (uke_diag_first_stamp == 0) {
++		uke_diag_first_stamp = abstime;
++	}
+ 	lane->pcs[lane->head % UKE_DIAG_WINDOW] = pc;
+ 	lane->head++;
+ 	lane->last_stamp = abstime;
+@@ -506,6 +556,17 @@
+ 	}
+ 
+ 	/* Detector 1: a watched CPU keeps executing the same instructions. */
++	{
++		/*
++		 * Before kext startup an idle boot CPU is the normal state, not a hang: with the timer live
++		 * from arm_init() every one of its interrupts lands on the same instruction of the idle
++		 * return path and the window looks "stuck". The stage marker is set by the gate probe.
++		 */
++		if (uke_boot_stage_get() == 0) {
++			lane->stuck_start = 0;
++			return;
++		}
++	}
+ 	if (((cpu == 0) || uke_diag_all_cpus) && uke_diag_stuck(lane, &low, &high)) {
+ 		/*
+ 		 * A delay loop or a long copy looks exactly like this for its duration, so a narrow
+@@ -521,10 +582,18 @@
+ 		}
+ 		mode = uke_diag_mode(lane, &hits);
+ 		lane->reported = TRUE;
++		{
++			uint64_t elapsed_ns = 0;
++
++			absolutetime_to_nanoseconds(abstime - uke_diag_first_stamp, &elapsed_ns);
++			elapsed_ns /= 1000000ull;
++			elapsed_ms = elapsed_ns;
++		}
+ 		panic("uke-stall: cpu%u stuck in one place: pc=%#llx lr=%#llx window=%llu samples=%llu "
+-		    "range=%#llx-%#llx mode-pc=%#llx hits=%llu", cpu, (unsigned long long)pc,
++		    "elapsed_ms=%llu range=%#llx-%#llx mode-pc=%#llx hits=%llu", cpu, (unsigned long long)pc,
+ 		    (unsigned long long)lr, (unsigned long long)uke_diag_window,
+-		    (unsigned long long)lane->head, (unsigned long long)low,
++		    (unsigned long long)lane->head, (unsigned long long)elapsed_ms,
++		    (unsigned long long)low,
+ 		    (unsigned long long)high, (unsigned long long)mode, (unsigned long long)hits);
+ 		return;
+ 	}
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -375,10 +375,19 @@
+ void
+ machine_idle(void)
+ {
++#if DEVELOPMENT || DEBUG
++	extern void uke_idle_enter(void);
++	extern void uke_idle_exit(void);
++#endif /* DEVELOPMENT || DEBUG */
++
+ 	/* Interrupts are expected to be masked on entry or re-entry via
+ 	 * Idle_load_context()
+ 	 */
+ 	assert((__builtin_arm_rsr("DAIF") & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE);
++#if DEVELOPMENT || DEBUG
++	/* uke-idle-guard: tell the timer sampler that this CPU is parking, not spinning. */
++	uke_idle_enter();
++#endif /* DEVELOPMENT || DEBUG */
+ 	/* Check for, and act on, a WFE recommendation.
+ 	 * Bypasses context spill/fill for a minor perf. increment.
+ 	 * May unmask and restore IRQ+FIQ mask.
+@@ -390,6 +399,9 @@
+ 		 */
+ 		Idle_context();
+ 	}
++#if DEVELOPMENT || DEBUG
++	uke_idle_exit();
++#endif /* DEVELOPMENT || DEBUG */
+ 	__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
+ }
+ 
+diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
+--- a/osfmk/kern/locks.c
++++ b/osfmk/kern/locks.c
+@@ -3466,10 +3466,34 @@
+ 		{
+ 			extern uint64_t uke_diag_total_samples(void);
+ 			extern uint64_t uke_diag_last_pc(void);
++			extern void uke_boot_stage_set(unsigned int);
+ 
+-			printf("uke-stall-probe: samples=%llu last_pc=%#llx\n",
+-			    (unsigned long long)uke_diag_total_samples(),
+-			    (unsigned long long)uke_diag_last_pc());
++			/*
++			 * uke-armcpu-probe: ArmCpu is the component that arms the GIC and the architectural timer and
++			 * registers the CPU IRQ action with the kernel, so its own state says whether the platform
++			 * path came up at all. registered/gic_ready are its two progress flags; gic_boot[] is what it
++			 * read back from the redistributor and distributor (IGROUPR0 0x80, ISENABLER0 0x100, GICD
++			 * CTLR, GICD TYPER, ICFGR0, PMR, IGRPEN1, SRE); timer_irqs counts the pops it actually took.
++			 * All zero means the driver never started (prepareGic failed silently - it returns false
++			 * without a message) or never matched its provider.
++			 */
++			uke_boot_stage_set(1);
++			{
++				extern volatile uint32_t armcpu_registered, armcpu_gic_ready, armcpu_irq_id;
++				extern volatile uint64_t armcpu_timer_interrupts;
++				extern volatile uint32_t armcpu_gic_boot[8], armcpu_core_timer[8];
++
++				printf("armcpu: registered=%u gic_ready=%u timer_irqs=%llu irq_id=%u "
++				    "samples=%llu\n", armcpu_registered, armcpu_gic_ready,
++				    (unsigned long long)armcpu_timer_interrupts, armcpu_irq_id,
++				    (unsigned long long)uke_diag_total_samples());
++				printf("armcpu: boot=[%#x %#x %#x %#x %#x %#x %#x %#x] core_timer=[%u %u %u %u]\n",
++				    armcpu_gic_boot[0], armcpu_gic_boot[1], armcpu_gic_boot[2],
++				    armcpu_gic_boot[3], armcpu_gic_boot[4], armcpu_gic_boot[5],
++				    armcpu_gic_boot[6], armcpu_gic_boot[7],
++				    armcpu_core_timer[0], armcpu_core_timer[1], armcpu_core_timer[2],
++				    armcpu_core_timer[3]);
++			}
+ 		}
+ 	}
+ 	printf("lck-gate: %s lock=%p gate=%p data=%llx\n", what, (void *)lock, (void *)gate,
