@@ -104,6 +104,8 @@ uke-stall-probe.patch
 # and the architectural timer and registers the CPU IRQ action, so the hand-rolled GIC bring-up
 # duplicated it and stole its interrupt. The probe below reports ArmCpu's own state instead.
 
-# Reports ArmCpu's own progress flags and GIC read-backs from the gate probe, so "the platform driver never
-# started" and "it started but the timer never arrived" are different lines on screen.
+# From the gate probe on, the sampler reports samples/last_pc/cpus and arms the stall detector. ArmCpu's own
+# flags cannot be printed from the kernel: ArmCpu is a kext the emitter links after the kernel, so its symbols
+# do not exist at kernel link time (that was a link error). Whether the platform layer came up is read from
+# behaviour instead - samples > 0 means the architectural timer is delivering.
 uke-armcpu-probe.patch
