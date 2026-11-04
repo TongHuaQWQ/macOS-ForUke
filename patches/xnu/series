@@ -80,3 +80,12 @@ uke-stage-last-panic.patch
 # carries the staged text on its first call, immediately before the point where the screen stops.
 # "(no previous panic captured)" means the last boot did not panic at all — a spin, not a panic.
 uke-gate-last-panic.patch
+
+# uke-spin-watchdog: B25's panel shows "PREVIOUS XNU LOG (no previous panic captured)" next to the
+# gate probe, so the freeze is not a panic at all — it is a wait that never ends, and it takes the
+# console with it. hw_spin_should_keep_spinning() is where a "no timeout" policy spins forever, so a
+# lock that stays contended for millions of passes now panics with the lock address and the caller,
+# and that panic text is staged in pram (uke-stage-last-panic) so the next boot prints it.
+# The gate probe line also reports the pram region, because "(no previous panic captured)" only means
+# something if the staging area is real.
+uke-spin-watchdog.patch
