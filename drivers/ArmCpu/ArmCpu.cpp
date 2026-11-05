@@ -524,6 +524,20 @@ bool ArmCpu::start (IOService *provider)
     kprintf ("ArmCpu: %llu timer interrupts, %llu IPIs in the first 10 ms after registration\n",
         (unsigned long long) armcpu_timer_interrupts, (unsigned long long) armcpu_ipi_interrupts);
     dumpIrqState ("after 10 ms");
+    //
+    // Everything above is printed in one burst while the kernel is still starting, and the kext banners
+    // that follow (AppleImage4's is the longest) scroll it off a screen that cannot be scrolled back.
+    // Holding here keeps the diagnostics still for long enough to photograph them, and the second
+    // snapshot says whether anything moved during the wait: a timer that starts late shows up as a
+    // non-zero count fifteen seconds later.
+    kprintf ("ArmCpu: holding 15 s so these lines can be photographed\n");
+    {
+      uint64_t start2, now2;
+      __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (start2));
+      do { __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now2)); } while ((now2 - start2) < 288000000ULL);
+    }
+    kprintf ("ArmCpu: after the hold %llu timer interrupts\n", (unsigned long long) armcpu_timer_interrupts);
+    dumpIrqState ("after 15 s");
   }
   registerService ();
   __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);
