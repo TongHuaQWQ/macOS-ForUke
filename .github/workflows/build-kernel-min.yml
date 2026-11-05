@@ -481,6 +481,18 @@ jobs:
             # map, stubbed[bundle][address] resolves to the kext that called and the pairing it wanted.
             cp "$OUT/kernel/kernel.map.json" artifacts/ 2>/dev/null || echo "no kernel.map.json" >> artifacts/MISSING.txt
             shasum -a 256 "$OUT/kernel/kernel.macho" | tee artifacts/kernel.macho.sha256
+            # The native (pre-emission) kernel with symbols is what the fileset matcher pairs the original
+            # collection against. Shipping it turns "write anchors -> wait 35 minutes -> see whether the
+            # stub count dropped" into a local loop: kits/XnuPrelink/fileset_match.py runs on the host with
+            # this file and the kernelcache. kernel.json records its path.
+            native=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("native") or "")' "$OUT/kernel/kernel.json" 2>/dev/null || true)
+            if [ -n "$native" ] && [ -f "$native" ]; then
+              mkdir -p artifacts/native
+              cp "$native" artifacts/native/native.macho
+              shasum -a 256 "$native" | tee artifacts/native/native.macho.sha256
+            else
+              echo "native kernel not collected (kernel.json native=${native:-<none>})" >> artifacts/MISSING.txt
+            fi
           else
             echo "kernel.macho was not produced" | tee artifacts/MISSING.txt
           fi
@@ -491,6 +503,15 @@ jobs:
           fi
           if [ -n "${UKE_BS_DIR:-}" ] && [ -d "$UKE_BS_DIR/logs" ]; then
             cp -R "$UKE_BS_DIR/logs" artifacts/bootstrap-logs
+          fi
+          # The AES interface audit (scripts/audit-aes-interface.py) needs the prelink candidate and its
+          # extent plan, which only exist inside the build: without them a SoftwareAES binding can only be
+          # the recorded iPadOS 17 one, and prelink addresses do not carry across kernelcaches.
+          if [ -n "$OUT" ] && [ -d "$OUT/build/xnu-prelink" ]; then
+            mkdir -p artifacts/xnu-prelink
+            cp "$OUT/build/xnu-prelink/native-defaults-candidate.macho" artifacts/xnu-prelink/ 2>/dev/null || true
+            cp "$OUT/build/xnu-prelink/native-defaults-candidate.json" artifacts/xnu-prelink/ 2>/dev/null || true
+            ls -l artifacts/xnu-prelink | head -5
           fi
           ls -lR artifacts | head -60
 
