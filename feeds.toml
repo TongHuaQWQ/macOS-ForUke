@@ -49,11 +49,18 @@ name = "ShengNovatekTouch"
 kind = "driver"
 local = "drivers/NativeNovatekTouch"
 
-# The instrumented ArmCpu fork. prepareGic() fails silently by design, so on a board where the timer never
-# ticks there is no way to tell "the driver never matched" from "mapGic/initDistributor/wakeRedistributor
-# returned false". This fork reports each step and prints IGROUPR0/ISENABLER0 for PPI 27 once the GIC is up.
+# The instrumented ArmCpu. prepareGic() fails silently by design, so on a board where the timer never ticks
+# there is no way to tell "the driver never matched" from "mapGic/initDistributor/wakeRedistributor returned
+# false". This copy reports each step and prints IGROUPR0/ISENABLER0 for PPI 27 once the GIC is up.
+#
+# A board copy rather than a git pin: feeds.py resolves sources first-wins and the core's drivers/ArmCpu
+# submodule is already registered by the time git entries are looked at (step 7), so a `git` entry for a
+# component the core carries as a submodule silently never takes effect -- two rounds built the submodule's
+# ArmCpu and shipped a kernel with no probes. A `local` entry resolves in step 4 and does win.
+# The same content is published as TongHuaQWQ/ArmCpu@6288238.
 [[source]]
 name = "ArmCpu"
 kind = "driver"
+local = "drivers/ArmCpu"
 git = "https://github.com/TongHuaQWQ/ArmCpu.git"
 commit = "6288238"
