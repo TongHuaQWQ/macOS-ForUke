@@ -127,3 +127,61 @@ cd workspace/uefi-uke && ./.venv-edk2/bin/python3 build_uefi.py -d uke -r DEBUG
    机制把"读失败"分支改成继续（注意：kext 在集合里，`text_fixups` 只覆盖 payload 卷里的文件，
    集合内文本补丁要另想办法）。
 5. **日志**：验证 `0x9FE7FF000` 是否真的跨复位；若是，把它当 `/chosen/pram` 的区域即可拿到上一轮完整日志。
+
+---
+
+## 8. 更正（2026-11-06，三方交叉验证之后）
+
+之前记录里有四条结论**站不住**，别再依据它们推理：
+
+1. **"板级组件没有 personality 所以从不启动"——错。**
+   它们由 `gIOKernelConfigTables`（`iokit/KernelConfigTables.cpp`）声明，由 `IOCatalogue` 消费，**不需要**在
+   `__PRELINK_INFO` 里出现。实测 b47 内核：`__DATA_CONST,__mod_init_func` 有 99 项，其中
+   `[97] = __GLOBAL__sub_I_ArmDTPlatform.cpp`、`[98] = __GLOBAL__sub_I_ArmCpu.cpp`，元类确实注册了。
+   `org.blu-sharky.ArmCpu` 在 `__PRELINK_INFO` 里出现 0 次是**正确的**。
+   （注意：`kernel.macho` 里还有一份**过期副本**的 `gIOKernelConfigTables`，在 fileoffset≈`0xe4c00` 的
+   `__PRELINK_TEXT` 里、不属于任何 fileset entry；只按字符串 grep 会被它骗。活的副本在 kernel entry 内。）
+
+2. **"`samples=0` 证明定时器不来"——是同义反复。**
+   `uke-stall-probe` 的采样点就在 `rtclock_intr()` 内部：它是被它要检测的中断驱动的，中断不来必然是 0。
+   同理 `uke-heartbeat` 用 `thread_call_enter_delayed(…, 2 s)`，没有定时器一次也不会触发。这两个仪器在
+   定时器修好之前**测不出任何东西**。
+
+3. **"ArmDTPlatform::configure 从未被调用"——那条证据不存在。**
+   b47（`247f5ed`）里**没有** ArmDTPlatform 的 panic：那个探针是 `700928d` 才加的，随后被 `4bf15ac` 替换、
+   在 `6070098` 里撤销。而且 `AppleImage4` 的 personality 是
+   `IOProviderClass=IOPlatformDevice, IONameMatch='defaults'`，而 `/defaults` 只由
+   `IODTPlatformExpert::configure` → `processTopLevel()` 发布 —— **Image4 能启动就说明平台专家跑到了那里**。
+
+4. **"`loadable: false` 说明构建不完整"——它是写死的常量。**
+   `kits/XnuPrelink/fileset_emit.py:737` 无条件写 `'loadable': False`。真正有意义的是 `missing`
+   （b47：170 个被 stub 的函数 / 109 个未解析引用，`--allow-missing` 下正常产出）。
+
+### 定时器的真正根因（已核实源码）
+
+`pexpert/arm/pe_fiq.c:15` 的整个函数体在 `#if HAS_GIC_V3` 内，而 `HAS_GIC_V3` **只由**
+`pexpert/pexpert/arm64/VMAPPLE.h:41` 定义。我们的板级头 `BCM2837.h` 没有它 → XNU 里唯一的 redistributor
+唤醒 + PPI 27 使能代码被编成空函数。又因为 `CONFIG_XNU_NATIVE_ARCH_TIMER=y` 关掉了内核自己的定时器路由，
+**唯一**的使能路径是 `ArmCpu::start()` → `enableCPUTimeBase()`。这就是"驱动不启动 ⇒ 定时器永远不来"
+的耦合机制（不是两个独立问题）。
+
+### 那次 800 kHz 风暴的真正原因（已定位到行）
+
+`uke-gic-timer.patch` 里 `if (uke_gic_timer_irq(cdp->rtcPop != (uint64_t)-1))` 这个闸门：
+`rtclock_init` 在编第一个截止时间之前把 `rtcPop` 设为 `EndOfAllTime`（全 1），闸门为 false →
+只 EOI 不重新编程 `CNTV_TVAL` → EOImode 0 下电平线仍有效 → 立刻重进。
+修复：默认模式改 2（在 gate 探针处、`rtclock_init` 之后使能）+ **无条件 pop**（`f9c74b5`）。
+
+### 当前待验证的断点（b50 就是测它）
+
+平台专家已经跑到 `processTopLevel`，所以断点在"CPU nub 发布"到 `ArmCpu::start()` 之间，两个候选：
+- **R1**：`IODTPlatformExpert::configure`/`processTopLevel` 内部卡住（无任何日志）
+- **R2**：`ArmCpu::probe` 静默拒绝了 nub —— 它的 personality **没有 `IONameMatch`**，`probe` 是唯一过滤器，
+  而 `probe` 有五条无输出的 return nullptr（`ArmCpu.cpp:209-228`），最可疑的是
+  `ml_get_cpu_number(reg)` 返回 -1（拓扑里没有该 `phys_id`）
+
+b50 用 XNU 自带的匹配日志判定：`io=0x10` + `iokit_print_verbose_match_logs=1`（`IOKitDebug.cpp:50`、
+`IOService.cpp:3845,4145-4170`）会为每个 nub 的每个候选打印 `matched <class>, probe score <n>`。
+- 完全没有这行 → ArmCpu 从未成为候选（R1）
+- 有 `matched ArmCpu, probe score 2000` 但没有驱动输出 → probe 拒绝了（R2）
+- 出现 `Couldn't alloc class "ArmCpu"` → 元类注册有问题（与第 1 条矛盾，需重查）
