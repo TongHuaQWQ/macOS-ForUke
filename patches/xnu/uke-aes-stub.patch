@@ -1,17 +1,17 @@
 diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -6739,6 +6739,10 @@
+@@ -6738,6 +6738,10 @@
+ 	return false;
  }
  
- IOService *
 +#if DEVELOPMENT || DEBUG
 +static uint64_t fileset_wait_probe(OSDictionary * matching, uint64_t timeout);
 +#endif /* DEVELOPMENT || DEBUG */
 +
+ IOService *
  IOService::waitForMatchingServiceWithToken( OSDictionary * matching,
      uint64_t timeout,
-     IOUserServerCheckInToken * checkInToken)
 @@ -6754,6 +6758,15 @@
  		return NULL;
  	}
