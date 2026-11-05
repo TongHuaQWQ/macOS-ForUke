@@ -470,3 +470,37 @@ python3 work/push/UniXNU/kits/XnuPrelink/fileset_match.py \
 ```
 
 复现 17868/23025 之后，就能在本地加 anchor、看 `stubbed functions` 是否下降。
+
+---
+
+## 15. 定名工具：调用图 + 字符串指纹（Round 6）
+
+形状相似度在跨编译差异下不可靠，但**函数调用了谁、引用了哪些字符串**通常不变。
+`work/analysis/fingerprint-missing.py` 的做法：解析每个缺失函数的全部 `bl` 目标（用已配对的名字解析）
+和 `adrp+add` 字符串引用，然后在 native 侧按共享程度排序。
+
+实测输出（前三条）：
+
+| 原始目标 | 调用点数 | 指纹 |
+|---|---|---|
+| `0xbf3decc` | 216 | 字符串 **`amcc_rorgn_common.c`**、**`overflow in rorgn_contains: %p + %zu @%s:%d`**；被调 `OSSymbolPool::{insert,find}Symbol`、`_panic`、`_strnlen` |
+| `0xbf72058` | 173 | 被调 `_IORWLockUnlock`、`IOStatistics::getKextNodeFromBacktrace`、`_kalloc_ext`；最佳 native 候选 `_IOMalloc_internal` / `_IOMallocAligned_internal` / `_IOKernelAllocateWithPhysicalRestrict`（各 3 个共享被调） |
+| `0xb9625f4` | 137 | 8 字节，无被调、无字符串（纯叶子，形状通用） |
+
+**解读**：
+- `0xbf3decc` 是 Apple **AMCC 受限区域**的检查函数（`rorgn_contains`，见字符串），被 216 处调用 ——
+  它一定是启动路径上的公共校验入口，优先处理。
+- `0xbf72058` 是 **IOMalloc 家族的统计包装**（`getKextNodeFromBacktrace` 只在 IOStatistics 打开时出现），
+  与源码顺序（`IOMallocData_external` → `IOMallocZeroData_external` → `IOMallocDataShareable_external`
+  → `IOMallocZeroDataShareable_external`）吻合，但**具体是哪一个还需要一步区分**
+  （零化版本应引用 `bzero`/`memset`，shareable 版本传 `KHEAP_DATA_SHARED`）。
+
+**注意**：`missing-calls.py` 给出的 `size` 是"到下一个已知函数的距离"，可能跨过多个函数，
+所以指纹里出现混合被调是正常的；写 anchor 前要按实际边界切分。
+
+### 下一步（拿到 native.macho 后）
+
+1. 用 `fingerprint-missing.py` 对全部 120 个缺失函数出指纹表；
+2. 对每个缺失函数，在 native 侧找出**共享被调 ≥2 且字符串命中**的**唯一**符号 → 写 `reviewed` anchor；
+3. 本地跑 `fileset_match.py` 验证 `stubbed functions` 从 170 下降；
+4. 剩下的（如纯叶子函数）单独处理。
