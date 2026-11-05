@@ -274,3 +274,55 @@ fileset: original component called an unmapped kernel function from 0xfffffff009
 - **QEMU + `-device ramfb` + 截图**：能读到台面上被顶掉的 panic 文本（第 9 节）。
 - `info registers`：PC 恒为 `_panic_spin_forever+0xc` = 已 panic；PC 变化但无输出 = 真卡住。
 - `io=0x10 iokit_print_verbose_match_logs=1`：每个 nub 的候选驱动匹配日志（b50/b51 已带）。
+
+---
+
+## 11. 当前 panic 的真正性质：kernel 在"未匹配即 panic"模式下运行（2026-11-06）
+
+b51 的 panic 来自 **UniXNU 自己的桩**，不是 XNU：`patches/xnu-12377/fileset-unmapped-call.patch` 定义的
+`unixnu_fileset_unmapped()`，而 `emit_prelink.py:362` 说明它的启用条件：
+
+```python
+stub_symbol = '_unixnu_fileset_unmapped' if args.allow_missing else None
+```
+
+注释原文："**binds every unmatched function start to the panic stub**, so an unknown call reports its
+site instead of jumping to a stale address"。
+
+也就是说：板子一直用 `--allow-missing` 出内核，**任何一次调用未匹配上的内核函数都会 panic**。
+b47 的记录：`stubbed functions: 170`，所以这个内核**结构上不可能走远**。
+
+调用方定位（已确认）：panic 的返回地址 `0xfffffff00979c38c` 在
+**`com.apple.driver.AppleMobileFileIntegrity`（AMFI）** 的 `__TEXT_EXEC`（`0xfffffff009788520 + 0x34964`）；
+`bl` 的目标 `0xfffffff00c09e690` 是桩本身（不是真函数）。AMFI 有 29 处这种桩，`x0=0x8 x1=0x2`。
+
+### 真正的修法：把这 120 个缺失函数绑上去
+
+`work/analysis/missing-calls.py`（旧工具，一直没用）已经把范围算出来了：
+
+```
+1203 code call sites to 120 distinct missing kernel functions
+  216 处  0xfffffe000bf3decc   ~ OSSymbol::withString+0xe4      [IOPCIFamily, IOGraphicsFamily, AppleARMPlatform]
+  173 处  0xfffffe000bf72058   ~ IOMallocData+0x90              [apfs, AppleM2ScalerCSCDriver, AppleARMPlatform]
+  137 处  0xfffffe000b9625f4   ~ lck_spin_assert+0xf8           [ApplePMGR, AppleARMPlatform, AppleImage4]
+   83 处  0xfffffe000bd44284   ~ cs_blob_get+0xf8               [AppleMobileFileIntegrity, apfs, sandbox]
+  …
+```
+
+完整清单：`work/analysis/ref/missing-calls-b47.txt`。
+
+绑定机制**已存在**：`kits/XnuPrelink/fileset_match.py` 的 reviewed anchors，
+fixture `fixtures/fileset-25F84-symbols.json`（正好是本系统版本）已绑 **60 个函数**，每条记录形如
+`{original, original_size, original_sha256, native_symbol, evidence}`，由
+`inputs.kernelcache_sha256` 精确匹配（我们的 kernelcache sha 与之一致：`697e01d6…`）。
+`reviewed data: 0` 表示**数据**锚定一个都没有（AMFI 的 4 条 `missing` 正是数据地址，无法桩）。
+
+### 下一轮的具体任务
+
+1. 从 `missing-calls-b47.txt` 里取 top-N 缺失函数，用「original 字节 + 原生符号」补进 reviewed anchors
+   （工具已支持，改的是 fixture JSON，不需要改 XnuPrelink 代码）。
+2. 优先处理 **AMFI 会调到的**那几个（当前 panic 就是它），以及 `cs_blob_get` / `lck_spin_assert` 这些
+   启动早期必经的路径。
+3. 每轮的判据：`stubbed functions` 数下降；设备上 panic 的调用点换到下一个缺失函数。
+4. 如果某些函数确实是源码分支差异（不是匹配失败），才考虑给它们写"安全返回"桩而不是 panic ——
+   但默认先绑，别放宽语义。
