@@ -112,7 +112,11 @@ uke-gic-timer.patch
 # flags cannot be printed from the kernel: ArmCpu is a kext the emitter links after the kernel, so its symbols
 # do not exist at kernel link time (that was a link error). Whether the platform layer came up is read from
 # behaviour instead - samples > 0 means the architectural timer is delivering.
-uke-armcpu-probe.patch
+# uke-armcpu-probe.patch is held back while uke-gic-timer.patch is enabled: both patch osfmk/arm/rtclock.c,
+# osfmk/arm64/machine_routines.c and osfmk/kern/locks.c, so whichever applies second fails on context. The
+# GIC patch carries the reporting this round needs (its own uke-gic: lines and the interrupt count), so it
+# goes first; the sampler returns once this question is answered.
+# uke-armcpu-probe.patch
 
 # AppleImage4's start waits without a timeout for a class IOAESAccelerator service; the class is prelinked but
 # no instance exists. uke-aes-stub=1 publishes an instance of the original class at the wait itself (no vtable
