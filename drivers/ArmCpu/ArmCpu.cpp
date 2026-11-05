@@ -538,6 +538,12 @@ bool ArmCpu::start (IOService *provider)
     }
     kprintf ("ArmCpu: after the hold %llu timer interrupts\n", (unsigned long long) armcpu_timer_interrupts);
     dumpIrqState ("after 15 s");
+    //
+    // The panel holds about fourteen lines and AppleImage4 prints more than that, so every line above is
+    // scrolled off before anybody can read it -- that is why four rounds of probes looked like "the driver
+    // never ran". A panic freezes the screen instead: no later output, so the diagnostics stay legible.
+    kprintf ("ArmCpu: panicking on purpose so these lines stay on the panel (uke diagnostics)\n");
+    panic ("ArmCpu: uke interrupt-path diagnostics -- read the lines above");
   }
   registerService ();
   __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);
