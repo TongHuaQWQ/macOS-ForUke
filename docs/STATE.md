@@ -504,3 +504,51 @@ python3 work/push/UniXNU/kits/XnuPrelink/fileset_match.py \
 2. 对每个缺失函数，在 native 侧找出**共享被调 ≥2 且字符串命中**的**唯一**符号 → 写 `reviewed` anchor；
 3. 本地跑 `fileset_match.py` 验证 `stubbed functions` 从 170 下降；
 4. 剩下的（如纯叶子函数）单独处理。
+
+---
+
+## 16. 分类与定名的实证结果（Round 7）
+
+### 工具
+
+- `work/analysis/fingerprint-missing.py` — 调用图 + 字符串指纹，对全部 120 个缺失函数出表
+  （结果：`work/analysis/ref/fingerprints-b47.txt`）
+- `work/analysis/classify-missing.py` — 用"函数自己字符串里的 `__func__` 名字"在 native 符号表里查，
+  把缺失函数分成"可 anchor"和"我们没编"
+  （结果：`work/analysis/ref/classify-b47.json`）
+
+### 结果一：只有少数能用字符串定名
+
+```
+0xb9fcb70  (10 calls) → _vnode_hold                          ✅ 可 anchor
+0xc034c3c  ( 8 calls) → _ml_set_interrupts_enabled_with_debug ✅ 可 anchor
+```
+
+调用量最大的六个（216 / 173 / 137 / 126 / 83 / 62）**完全没有字符串** —— 小函数没有 `__func__` 消息。
+
+### 结果二：`rorgn_contains` 是"我们根本没编"
+
+`0xbf3decc`（**216 个调用点，13 个 kext**）引用的字符串是 `amcc_rorgn_common.c` 和
+`"overflow in rorgn_contains: %p + %zu @%s:%d"`，而 native 符号表里 **`rorgn` 相关符号一个都没有**。
+它是 Apple AMCC 的受限区域检查，被我们的配置门控掉了 —— 这类只能补实现（或打开对应配置），
+anchor 无解。
+
+### 结果三：IOMalloc 家族可以用"立即数常量"区分
+
+`movz w2, #imm` 就是 flags：`4096` = `Z_VM_TAG_BT_BIT`（非零化）、`4100` = `Z_ZERO_VM_TAG_BT_BIT`（零化）。
+原生四个变体的常量已核对，而原始函数：
+
+```
+0xbf72058 (0x90, 173 calls): movz w2, #4100     → 是 IOMallocZeroData* 家族（零化）
+0xbf720e8 (0x120):           #4096 和 #4100     → 包装了两个变体
+```
+
+差一步：private 与 shareable 只差 `w0` 的常量（`KHEAP_DATA_PRIVATE` / `KHEAP_DATA_SHARED`），
+我的常量提取只抓了 `movz w2`，`w0` 用的是别名 `mov` 形式，需要补齐掩码。
+
+### 下一轮
+
+1. 补齐 `w0` 常量提取 → 定死 `IOMallocZeroData_external` vs `IOMallocZeroDataShareable_external`；
+2. 把已确认的两条（`vnode_hold`、`ml_set_interrupts_enabled_with_debug`）先写成 `reviewed` anchor，
+   验证工具链能接受；
+3. 对"我们没编"的那一堆（`rorgn_contains` 等）按调用量排序，逐个决定"补实现"还是"开配置"。
