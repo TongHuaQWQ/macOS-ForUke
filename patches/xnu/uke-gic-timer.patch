@@ -79,7 +79,12 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 + * probe, i.e. once kext startup has begun - after the console exists and before the wait that hangs
 + * without a timer. 0 disables the feature. uke-gic=<0|1|2>.
 + */
-+static int          uke_gic_mode = 1;
++/*
++ * Default 2, not 1. Mode 1 arms the PPI from arm_init() before fiq_context_init() turns the timer on and
++ * before rtclock_init() programmes the first deadline, so the first pop lands on timer state that does not
++ * exist yet. Mode 2 arms it at the gate probe, by which point rtclock has a deadline to reprogram.
++ */
++static int          uke_gic_mode = 2;
 +static unsigned int uke_boot_stage;
 +/* -1 = not chosen yet; 0 = group 0 (FIQ, sleh_fiq dispatches); 1 = group 1 (IRQ, sleh_irq does) */
 +static int          uke_gic_group = -1;
@@ -533,8 +538,14 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 +	{
 +		extern boolean_t uke_gic_timer_irq(boolean_t pop_programmed);
 +
-+		/* rtcPop is set to EndOfAllTime until setPop() programs the first decrementer deadline. */
-+		if (uke_gic_timer_irq(cdp->rtcPop != (uint64_t)-1)) {
++		/*
++		 * Always pop. The gate that used to be here (cdp->rtcPop != EndOfAllTime) acknowledged the
++		 * interrupt without reprogramming CNTV_TVAL, and because EOImode 0 only deactivates an
++		 * interrupt whose source has dropped, the still-expired timer re-asserted immediately: that is
++		 * the 800 kHz storm on record. rtclock_intr -> timer_intr -> setPop is what clears the
++		 * condition, so it has to run every time; arming late (mode 2) makes that safe.
++		 */
++		if (uke_gic_timer_irq(TRUE)) {
 +			entropy_collect();
 +			sleh_interrupt_handler_epilogue();
 +			return;
