@@ -100,9 +100,13 @@ uke-stall-probe.patch
 # only, so the timer counted down and no interrupt was ever forwarded. Group 0 (FIQ) when the
 # distributor is single-security-state, group 1 (IRQ) otherwise, in which case sleh_irq dispatches it.
 # uke-gic=0 turns the whole thing off.
-# uke-gic-timer.patch is retired: ArmCpu (drivers/ArmCpu) is the component that arms the GIC
-# and the architectural timer and registers the CPU IRQ action, so the hand-rolled GIC bring-up
-# duplicated it and stole its interrupt. The probe below reports ArmCpu's own state instead.
+# uke-gic-timer.patch is restored. ArmCpu is the component that is *meant* to arm the GIC and the
+# architectural timer, and four rounds of probes ended with the proof that its start() is never called at
+# all (b47: no panic, no output). Rather than keep bisecting the IOKit matching above it, this brings PPI 27
+# up from the kernel itself: it maps the GIC, wakes this core's redistributor, puts the timer PPI in group 1
+# (IRQ, where XNU's sleh_irq path ends the interrupt) and dispatches a taken PPI 27 to rtclock_intr.
+# The earlier 800 kHz storm came from the group 0/FIQ design this file no longer uses. uke-gic=0 disables it.
+uke-gic-timer.patch
 
 # From the gate probe on, the sampler reports samples/last_pc/cpus and arms the stall detector. ArmCpu's own
 # flags cannot be printed from the kernel: ArmCpu is a kext the emitter links after the kernel, so its symbols

@@ -65,9 +65,3 @@ local = "drivers/ArmCpu"
 git = "https://github.com/TongHuaQWQ/ArmCpu.git"
 commit = "6288238"
 
-# The instrumented platform expert, same reason as the ArmCpu entry above: a board copy resolves in the
-# local step and wins over the core's drivers/ArmDTPlatform submodule.
-[[source]]
-name = "ArmDTPlatform"
-kind = "driver"
-local = "drivers/ArmDTPlatform"
