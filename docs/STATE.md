@@ -418,3 +418,55 @@ python3 work/analysis/missing-calls.py                        # 重新排缺失�
 ```
 
 `native.macho` 到手后，把 `--native` 指向它即可（现在默认用 b47 集合里的内核文本当替身）。
+
+---
+
+## 14. 更正 Round 4：那些函数是**存在**的，只是没被配对（Round 5）
+
+### 我的错误
+
+`kernel.map.json` 里的 `functions` **只列出已配对的函数**。我在 Round 4 把它当成"native 全部函数"建索引，
+于是"找不到同形状匹配"是假象。
+
+用 **native 内核自己的符号表**（b47 集合里 `com.apple.kernel` entry 的 `LC_SYMTAB`，**64216 个地址**，
+而不是 map 里的 17868 个）按名字查，全都在：
+
+```
+_IOMallocData                        18446744005190144980
+_IOMallocData_external               （同一个地址，别名）
+_IOMallocDataShareable               18446744005190145028
+_IOMallocDataShareable_external      （同一个地址，别名）
+_IOMallocZeroData_external           18446744005190145004
+_IOMallocZeroDataShareable_external  18446744005190145052
+_IOFreeData / _IOFreeDataShareable   都在
+```
+
+### 但"同长度同形状"确实一个都没有
+
+`work/analysis/find-unmatched-shape.py`（已改为索引 native **符号表**）对 top 缺失函数仍然全部
+`no same-length masked match` —— 也就是说代码确实不同（编译差异），但函数**存在**。
+
+`work/analysis/name-by-shape.py`（按掩码形状相似度在 64k 符号里排序）给出的部分候选：
+- `0xbf3decc` (216 calls) → **0.58 `OSSymbol::withCString`**（与邻居 `withString`/`withCString` 一致）
+- `0xbd82a88` (62) → 0.75 `_proc_task`
+- 8 字节和 0xc 的那两个是通用形状，1.00 但无意义
+
+### 结论：`reviewed` anchor 仍可写，但**名字需要实证**
+
+anchor 只接受 `native_symbol` 名字，而 Apple 没有发布 macOS 26 的 KDK（workflow 注释：
+"Apple publishes no KDK for macOS 26, so the stripped kernelcache has no symbols"），
+所以名字只能靠源码顺序 + 形状相似度 + 调用目标推断，**不能瞎填**。
+
+### 本地 matcher 的限制（已实测）
+
+想用出厂集合当 native 跑 `fileset_match.py`：`functions: 0/23025` —— 集合的文本被 emitter
+合并/重排过，形状全对不上。**所以必须用 CI 产物里的 native 内核**（`artifacts/native/native.macho`，
+已在 `49a3e19` 加入上传）。拿到后：
+
+```sh
+python3 work/push/UniXNU/kits/XnuPrelink/fileset_match.py \
+    work/push/UniXNU/out/ipsw/25F84/kernelcache.decompressed \
+    work/ci-artifacts/<N>/native/native.macho --out /tmp/pair.json
+```
+
+复现 17868/23025 之后，就能在本地加 anchor、看 `stubbed functions` 是否下降。
