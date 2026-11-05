@@ -370,6 +370,37 @@ bool ArmCpu::prepareGic (void)
   return true;
 }
 
+// One snapshot of the interrupt plumbing, read on the calling core. A timer that never fires and a timer
+// that fires into a closed CPU interface look identical from the outside; these registers separate them:
+// DAIF.I says whether IRQs are masked, ICC_SRE/PMR/IGRPEN1 say whether the interface is open, ISR_EL1 says
+// whether an interrupt is already pending, and CNTV_CTL/CVAL say whether the virtual timer that PPI 27
+// reports has been enabled and given a deadline.
+static void dumpIrqState (const char *tag)
+{
+  uint64_t mpidr, daif, isr, sre, pmr = 0, igrp = 0, ctlr = 0, cntv, cval, tval, pct, freq;
+  __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (mpidr));
+  __asm__ volatile ("mrs %0, daif" : "=r" (daif));
+  __asm__ volatile ("mrs %0, isr_el1" : "=r" (isr));
+  __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (sre));
+  __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (freq));
+  __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (pct));
+  __asm__ volatile ("mrs %0, cntv_ctl_el0" : "=r" (cntv));
+  __asm__ volatile ("mrs %0, cntv_cval_el0" : "=r" (cval));
+  __asm__ volatile ("mrs %0, cntv_tval_el0" : "=r" (tval));
+  if ((sre & 1) != 0) {
+    __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (pmr));
+    __asm__ volatile ("mrs %0, icc_igrpen1_el1" : "=r" (igrp));
+    __asm__ volatile ("mrs %0, icc_ctlr_el1" : "=r" (ctlr));
+  }
+  kprintf ("ArmCpu: %s daif=%#llx I=%u F=%u isr=%#llx sre=%#llx pmr=%#llx igrpen1=%#llx ctlr=%#llx\n",
+      tag, (unsigned long long) daif, (unsigned) ((daif >> 7) & 1), (unsigned) ((daif >> 6) & 1),
+      (unsigned long long) isr, (unsigned long long) sre, (unsigned long long) pmr,
+      (unsigned long long) igrp, (unsigned long long) ctlr);
+  kprintf ("ArmCpu: %s cntv_ctl=%#llx cval=%llu tval=%llu pct=%llu freq=%llu mpidr=%#llx\n",
+      tag, (unsigned long long) cntv, (unsigned long long) cval, (unsigned long long) tval,
+      (unsigned long long) pct, (unsigned long long) freq, (unsigned long long) mpidr);
+}
+
 void ArmCpu::enableGic (void)
 {
   uint64_t value;
@@ -480,6 +511,20 @@ bool ArmCpu::start (IOService *provider)
   if (status != KERN_SUCCESS) { panic ("ArmCpu: CPU %u registration failed: %d", logicalId, status); }
   armcpu_registered = 1;
   if (!bootInitialized) { initCPU (true); }
+  //
+  // A bounded, self-contained test of the interrupt path, run here in the kext's own thread: spin 10 ms of
+  // the architectural counter with interrupts open and report how many PPI 27 interrupts the handler saw.
+  // The counter is the timebase the timer itself uses, so this needs nothing the kernel has not already set
+  // up, and zero after 10 ms places the failure in the interrupt path rather than in whoever waits on a
+  // deadline. If the timer does fire, the count is the proof; if it does not, dumpIrqState names the stage.
+  {
+    uint64_t start, now;
+    __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (start));
+    do { __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now)); } while ((now - start) < 200000U);
+    kprintf ("ArmCpu: %llu timer interrupts, %llu IPIs in the first 10 ms after registration\n",
+        (unsigned long long) armcpu_timer_interrupts, (unsigned long long) armcpu_ipi_interrupts);
+    dumpIrqState ("after 10 ms");
+  }
   registerService ();
   __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);
   drainPending ();
@@ -610,6 +655,7 @@ void ArmCpu::initCPU (bool boot)
   enableGic ();
   if (gSpiIpi) { spiIpiConfigure (gDist, logicalId, affinity); }
   enableCPUTimeBase (true);
+  dumpIrqState ("after enableGic");
   setCPUState (kIOCPUStateRunning);
   bootInitialized = true;
   if (gSelfIpi) { signalCPU (this); }
