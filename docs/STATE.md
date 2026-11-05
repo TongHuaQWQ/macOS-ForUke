@@ -229,3 +229,48 @@ Apple 的 nonce 路径读不到散列方法 → 判定"non-sensical"→ panic；
 - `info registers` 的 PC 在多个时间点不变 + `PSTATE` 的 DAIF 全屏蔽，就是"panic 自旋"的签名。
 - 台面上同样的 panic 屏幕被 Image4 的 14 行顶掉了，**QEMU 是唯一能稳定读到它的地方**。
   以后任何"设备上说不清"的问题，先在 QEMU 里跑一遍再刷机。
+
+---
+
+## 10. b51 结果：panic 换成了更深的一条（2026-11-06）
+
+`crypto-hash-method = "sha2-384"` 生效 —— **`non-sensical crypto hash method` 的 panic 消失了**，
+设备上出现新的 panic：
+
+```
+fileset: original component called an unmapped kernel function from 0xfffffff00979c38c (x0 0x8 x1 0x2)
+```
+
+反汇编定位（`symbolize-panic.py --artifact work/ci-artifacts/b47 --disasm`）：
+
+```
+0xfffffff00979c384:  mov  w0, #0x8
+0xfffffff00979c388:  bl   0xfffffff00c09e690        ← 目标
+0xfffffff00979c38c:  cbnz w0, …
+```
+
+- **调用方** `0xfffffff00979c38c`：`__TEXT_EXEC+0xe4838c`，**没有符号**（属于某个原版 Apple 组件）
+- **目标** `0xfffffff00c09e690`：`_set_awl_scratch_exists_flag_and_subscribe_for_pm + 0xc8` —— **是内核自己的函数**
+- prelink 记录里**这两个地址都没有 stub**：`stub_sites`（760 条）无匹配，`stubbed`/`missing`（各 22 个模块）也无匹配
+
+解读：XNU 的 fileset 校验认为"某个原版组件调用了一个未映射的内核函数"。目标明明是内核符号，所以真正
+可疑的是**调用方所在的 extent 归属**：prelink 重排后，那个组件登记的代码范围可能没有覆盖这个地址
+（`kernel.json` 里没有 `extents` 字段，`fileset_emit.py` 的记录不含它，所以从产物这一侧查不到）。
+
+### 下一步（顺序固定）
+
+1. 找到这条 panic 的判定代码：字符串是 `fileset: original component called an unmapped kernel function
+   from %p (x0 0x%llx x1 0x%llx)`，**不在 `out/feeds/xnu-3199e8bc` 里**（可能在 `libsa/`、某个 kext，或
+   `native_prelink` 的补丁层），先确认它校验的是"调用方"还是"目标"。
+2. 据此决定修在哪一侧：
+   - 若是调用方 extent 缺失 → **prelink 的 extent 记账问题**（`fileset_emit.py` / `native_prelink.py`）
+   - 若是目标需要 stub → 用 `stub_sites` 机制补上（工具已支持）
+   - 若是 reviewed data anchor 缺失 → `fileset_match.py:457-473` 的 reviewed data 路径（当前 `reviewed data: 0`）
+3. 定位调用方所属组件：`work/analysis/symbolize-panic.py` 查不到符号时，用 `kc_image.py` 遍历
+   `LC_FILESET_ENTRY` 各自的 `__TEXT_EXEC` 范围，找包含 `0xfffffff00979c38c` 的那个 entry。
+
+### 已知可用的判定手段
+
+- **QEMU + `-device ramfb` + 截图**：能读到台面上被顶掉的 panic 文本（第 9 节）。
+- `info registers`：PC 恒为 `_panic_spin_forever+0xc` = 已 panic；PC 变化但无输出 = 真卡住。
+- `io=0x10 iokit_print_verbose_match_logs=1`：每个 nub 的候选驱动匹配日志（b50/b51 已带）。
