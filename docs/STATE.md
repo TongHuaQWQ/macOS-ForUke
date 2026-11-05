@@ -326,3 +326,46 @@ fixture `fixtures/fileset-25F84-symbols.json`（正好是本系统版本）已�
 3. 每轮的判据：`stubbed functions` 数下降；设备上 panic 的调用点换到下一个缺失函数。
 4. 如果某些函数确实是源码分支差异（不是匹配失败），才考虑给它们写"安全返回"桩而不是 panic ——
    但默认先绑，别放宽语义。
+
+---
+
+## 12. 缺失函数的性质：被折叠掉的导出函数（2026-11-06，Round 2–3）
+
+### 已排除的假设
+
+**"关掉 LTO 就能让它们重新变独立"——不成立。** `configs/uke-macos_defconfig:63` 就是
+`CONFIG_XNU_BUILD_LTO=y`，参照内核也用 `build-fileset-release-reference.py --lto`，
+两边都是 LTO。`scripts/build-xnu-4k-baseline.sh:167-171` 的注释说明了原因：Apple 的
+`kernelcache.release.*` 是 LTO 构建，非 LTO 重建在"Apple 内联过的地方"必然形状不同。
+
+### 真实情况：邻居全在，只有中间那个不在
+
+以 `work/analysis/ref/missing-calls-b47.txt` 的头几条为例，对照我们的 `kernel.map.json`：
+
+| 缺失目标 | 邻居（都在 map 里 ✅） | map 里有没有 |
+|---|---|---|
+| `0xbf72058` (0x90) | `_IOMallocData` ✅ / `_IOFreeData` ✅ | `_IOMallocDataShareable` ✗ 不存在 |
+| `0xb9625f4` (8) | `_lck_spin_assert` ✅ / `_IOSimpleLockTryLock` ✅ | 该 8 字节函数 ✗ |
+| `0xbf72fa4` (0x48) | `_IORecursiveLockLock` ✅ | ✗ |
+| `0xbd44284` (0x2c) | `_cs_blob_get` ✅ | ✗ |
+| `0xbd82a88` (0x20) | `_proc_ucred_smr` ✅ / `_proc_ucred` ✅ | ✗ |
+
+源码顺序也印证了身份：`iokit/Kernel/IOLib.cpp` 的定义顺序是
+`IOMallocData_external`(1099) → **`IOMallocDataShareable_external`**(1117) → `IOFreeData`(1135)
+→ `IOFreeDataShareable`(1141)。第一条缺失目标正好夹在 `IOMallocData` 与 `IOFreeData` 之间，
+所以它就是 **`IOMallocDataShareable`**（我们这边被折叠成 IOMallocData 的别名，没有独立符号）。
+
+### 修法（两条，按优先级）
+
+1. **给这些名字补 out-of-line 实现**（设备补丁，最小改动）：在核心里为 top 缺失函数写同名包装，
+   例如 `IOMallocDataShareable(size)` 直接转调 `IOMallocData(size)`。matcher 的 `reference-symbol`
+   策略会按符号名绑定（b47 里已有 3561 个函数是这么配上的），于是调用落到真实实现而不是 panic 桩。
+   优先顺序按 `missing-calls-b47.txt` 的 calls 列（216 / 173 / 137 / 126 / 83 …）。
+2. 若某函数确实不该存在（语义上可以退化成失败），才考虑把它从 panic 桩改成"返回失败"，
+   但这会放宽语义，默认不做。
+
+### 下一步要用的工具链改动（已提交 `49a3e19`）
+
+CI 现在会把 **native 内核**（`artifacts/native/native.macho`）一并上传。拿到之后：
+`kits/XnuPrelink/fileset_match.py <kernelcache> <native> --out /tmp/pair.json` 可以在**本地**跑，
+从而秒级验证"补了这个符号之后 stub 数是否下降"，不必每轮 35 分钟。
