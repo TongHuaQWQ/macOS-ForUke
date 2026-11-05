@@ -135,10 +135,12 @@ bool ArmDTPlatform::configure (IOService *provider)
     IORegistryEntry *probeChosen = provider->childFromPath ("chosen", gIODTPlane);
     unsigned probeNvram = hasNVRAMProxy (provider) ? 1 : 0;
     IORegistryEntry *probeIntc = probeBus ? probeBus->childFromPath ("intc", gIODTPlane) : nullptr;
-    panic ("ArmDTPlatform: configure entered (uke probe) cpus=%u arm-io=%u intc=%u defaults=%u options=%u chosen=%u nvram=%u provider=%s",
-        probeCpus ? 1U : 0U, probeBus ? 1U : 0U, probeIntc ? 1U : 0U, probeDefaults ? 1U : 0U,
-        probeOptions ? 1U : 0U, probeChosen ? 1U : 0U, probeNvram,
-        (provider != nullptr) ? provider->getName () : "null");
+    if (!probeCpus || !probeBus || !probeDefaults || !probeOptions || !probeChosen || !probeNvram) {
+      panic ("ArmDTPlatform: configure entered, input missing (uke probe) cpus=%u arm-io=%u intc=%u defaults=%u options=%u chosen=%u nvram=%u provider=%s",
+          probeCpus ? 1U : 0U, probeBus ? 1U : 0U, probeIntc ? 1U : 0U, probeDefaults ? 1U : 0U,
+          probeOptions ? 1U : 0U, probeChosen ? 1U : 0U, probeNvram,
+          (provider != nullptr) ? provider->getName () : "null");
+    }
   }
   IORegistryEntry *cpus = provider->childFromPath ("cpus", gIODTPlane);
   IORegistryEntry *bus = provider->childFromPath ("arm-io", gIODTPlane);
@@ -220,6 +222,14 @@ bool ArmDTPlatform::configure (IOService *provider)
   if (platformProbe != 0 || platformStage == 4) {
     platformStageReset ();
   }
+  //
+  // The documented checkpoint for this stage is that the platform expert published the intended nubs, so
+  // the counts are reported as a panic here (the panel holds fourteen lines and the next stage's output
+  // would scroll them away). cpu_count is the number of CPU nubs ArmCpu has to match.
+  panic ("ArmDTPlatform: configure done (uke probe) cpu_nubs=%u io_nubs=%u children=%u bus=%u defaults=%u provider=%s",
+      armdt_platform_cpu_count, armdt_platform_device_count, armdt_platform_child_count,
+      armdt_platform_bus_count, armdt_platform_defaults_count,
+      (provider != nullptr) ? provider->getName () : "null");
   registerService ();
   if (platformStage == 5) {
     platformStageReset ();
