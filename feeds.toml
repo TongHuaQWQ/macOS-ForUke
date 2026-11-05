@@ -48,3 +48,12 @@ local = "drivers/NativeUfs"
 name = "ShengNovatekTouch"
 kind = "driver"
 local = "drivers/NativeNovatekTouch"
+
+# The instrumented ArmCpu fork. prepareGic() fails silently by design, so on a board where the timer never
+# ticks there is no way to tell "the driver never matched" from "mapGic/initDistributor/wakeRedistributor
+# returned false". This fork reports each step and prints IGROUPR0/ISENABLER0 for PPI 27 once the GIC is up.
+[[source]]
+name = "ArmCpu"
+kind = "driver"
+git = "https://github.com/TongHuaQWQ/ArmCpu.git"
+commit = "6288238"
