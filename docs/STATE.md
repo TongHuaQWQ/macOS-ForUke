@@ -369,3 +369,52 @@ fixture `fixtures/fileset-25F84-symbols.json`（正好是本系统版本）已�
 CI 现在会把 **native 内核**（`artifacts/native/native.macho`）一并上传。拿到之后：
 `kits/XnuPrelink/fileset_match.py <kernelcache> <native> --out /tmp/pair.json` 可以在**本地**跑，
 从而秒级验证"补了这个符号之后 stub 数是否下降"，不必每轮 35 分钟。
+
+---
+
+## 13. 结论：这些函数必须"补实现"，anchor 绑定走不通（Round 4）
+
+写了本地形状比对工具 `work/analysis/find-unmatched-shape.py`：把原始函数的字节与 native 内核里
+**同长度、同指令形状**（只有重定位会改写的指令——分支、adrp/adr、literal load——被掩码）的函数逐一比对。
+索引了 16689 个 native 形状（`kernel.map.json` 的键是原始地址，native 地址在 `value['native']`，且 pre-slide）。
+
+结果（`missing-calls-b47.txt` 的前几条）：
+
+| 原始目标 | 尺寸 | 结果 |
+|---|---|---|
+| `0xbf3decc` (216 calls) | 0x190 | **no same-length masked match** |
+| `0xbf72058` (173) | 0x90 | **no same-length masked match** |
+| `0xb9625f4` (137) | 8 | ambiguous（形状太通用） |
+| `0xbf72fa4` (126) | 0x48 | **no same-length masked match** |
+| `0xbd44284` (83) | 0x2c | **no same-length masked match** |
+| `0xbd82a88` (62) | 0x20 | **no same-length masked match** |
+
+**判定**：这些原版函数在我们构建的 native 内核里没有"同长度同形状"的对应物 —— 不是位置/名字不同，
+而是**根本没有独立的 out-of-line 版本**（被折叠）。所以 `anchor_reviewed` 没有可绑的目标。
+
+### 于是修法确定为：写 shim
+
+在设备补丁里给这些导出名补 out-of-line 实现（放进一个**已确定会被编译**的文件，例如
+`iokit/Kernel/IOLib.cpp` 里紧挨 `IOMallocData_external`，避免改 `conf/files.*` 引入新的构建风险），
+语义上直接转调非 shareable 版本：
+
+```c
+void *
+IOMallocDataShareable(vm_size_t size)      /* 0xbf72058, 173 个调用点 */
+{
+	return IOMallocData(size);             /* 本板不做 shareable 分配 */
+}
+```
+
+补上之后：native 与 reference 内核都有同名符号 → matcher 的 `anchor_reference`
+（`fileset_match.py:195-214`，先由 shape 配对、再按**名字**转译）就能绑上；调用落到真实实现，
+而不再是 panic 桩。每补一个，`kernel.json` 的 `stubbed functions` 计数应下降。
+
+### 复现命令
+
+```sh
+python3 work/analysis/find-unmatched-shape.py --limit 20      # 形状比对，看还有没有可绑的
+python3 work/analysis/missing-calls.py                        # 重新排缺失函数清单
+```
+
+`native.macho` 到手后，把 `--native` 指向它即可（现在默认用 b47 集合里的内核文本当替身）。
