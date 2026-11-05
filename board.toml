@@ -339,7 +339,7 @@ size_mib = 80
 compress_kernel = true
 loader = "firmware"
 title = "uke first boot: source 4K XNU to console"
-dram_size = "0x140000000"            # XNU VM DRAM: this unit's whole high run (0x8C0000000-0xA0000000, 5 GiB).
+dram_size = "0x13FE00000"            # XNU VM DRAM: this unit's whole high run (0x8C0000000-0xA0000000, 5 GiB).
                                      # 8 GB SKU (MemTotal 7492 MiB); the 12 GB reference has 0x240000000 here.
 dram_base = "0x8C0000000"            # high DRAM range 0x8C0000000-0xA0000000; the ADT writes /chosen/dram-base
 skip_setup_tool = "scripts/seed-data-skip-setup.py"   # used by --skip-setup
@@ -374,12 +374,10 @@ kernel_args = [
   "offline-legacy-validate=1",
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
-  "offline-legacy-default-surface=1",
   # own-present (the gpu-framepresent v2/v3 verified set): presentBase resolves
   # the swap record's overlay surface after each SwapEnd and copies it to the
   # GOP. Without this the path is silent and the screen stays on the boot frame
   # (the 2026-10-27/28 frozen-screen runs never set it).
-  "offline-legacy-base-present=1",
   # the screen console must not draw over presented frames; it is muted only
   # after the first successful copy, so logs survive until the UI takes over.
   "offline-legacy-noconsole=1",
@@ -431,11 +429,20 @@ kernel_args = [
   "sheng-pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",
-  "sheng-disable-watchdogd=1",
+  # Documented diagnostic switch (unixnu.com/zh/xnu/boot-arguments): the security stage was the next
+  # suspect after the nonce slot reads all failed, and this is the supported way to boot past it and see
+  # what the next stage does. sheng-disable-watchdogd is dropped to stay inside the 1000-byte command line.
+  "amfi_get_out_of_my_way=1",
   "sheng-smp=1",
   "armcpu-spi-ipi=1",
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",
+  # IOKit match diagnostics, the documented first test for a built-in driver: gIOKitDebug bit 0x10 makes
+  # probeCandidates log "matched <class>, probe score <n>" for every candidate of every nub, which is the
+  # only way to tell "ArmCpu was never a candidate" from "ArmCpu probed and rejected the nub silently".
+  # Two offline-legacy flags were dropped to stay inside the 1000-byte command line.
+  "io=0x10",
+  "iokit_print_verbose_match_logs=1",
 ]
 # Fixups of signed text, applied by the kernel after signature validation (patches/xnu/native-text-fixup.patch); they reach it as
 # /chosen/text-fixups, not on the command line. Each is <file name>,<file offset>,<original>,<replacement>, in hex. uke runs the
@@ -452,6 +459,10 @@ text_fixups = [
 ]
 
 [payload.adt]
+# The kernel console/panic region, carved out of the tail of the managed window so it is real RAM that
+# XNU itself never allocates, and handed over as /chosen/pram (see devicetree.py). This is what makes the
+# next boot print the previous boot's log instead of "pram=0 size=0".
+panic_region = "0x9FFE00000:0x200000"
 tool = "scripts/make-uke-adt.py"
 chip_id = "207"
 owned_memory_size = "0x100000000"     # 4 GiB of this unit's 5 GiB high run (0x8C0000000..0xA0000000).
@@ -503,12 +514,48 @@ include_dirs = ["soc:dts"]
 # baseline). The panic log and the GMU pool ride as top-level nodes.
 [adt.chosen.u32]
 embedded-panic-log-size = 0x380000
+# SecureBootModel=Disabled, in the only form XNU reads it. AppleImage4 asks the security state whether this
+# is a production device before it reads a nonce slot; on this board there is no such slot, so it reports
+# "failed to read nonce slot data: 2" for every magazine and then waits. Production status 0 with security
+# mode 1 is development/permissive: the same four values the community's working QEMU reference ADT sets
+# for --ipad-identity, and the same ones an OpenCore config expresses as SecureBootModel=Disabled.
+certificate-production-status = 0
+effective-production-status-ap = 0
+certificate-security-mode = 1
+effective-security-mode-sep = 1
+# Apple's own Mac17,2 device tree (decoded to work/analysis/ref/mac17g.adt) carries the rest of this set,
+# which Image4 consults before it reads a nonce slot: the AP-side security mode, downgradability and the
+# nonce-retrieval permission. uke declared four of them and no nonce at all, which is why every magazine
+# reports "failed to read nonce slot data".
+effective-security-mode-ap = 1
+security-downgradable = 1
+allow-ap-nonce-retrieval = 1
+image4-allow-magazine-updates = 1
+secure-boot = 0
+
+[adt.chosen.string]
+# Apple's own Mac17,2 device tree carries this in /chosen, next to the security-mode keys, and the value
+# is "sha2-384". Nothing on this board provided it, and the kernel panics with
+#   panic: non-sensical crypto hash method
+# from Apple's nonce path (the collection's strings put it next to
+# IOReturn AppleMobileApNonce::_retrieveNonce), which is also why every magazine reports that it cannot
+# read a nonce slot: without the hash method the slot contents cannot be interpreted at all.
+crypto-hash-method = "sha2-384"
 
 [adt.chosen.bytes]
+# The boot nonce itself. On Apple silicon iBoot writes it into /chosen and Image4 reads it back through
+# the magazine path; nothing on this board produces one, so the slot read fails for every magazine.
+boot-nonce = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 boot-manifest-hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5139ec7b580d63ca9319e218962a2236f23faca"
 
 [adt.defaults.u32]
 sleep-disabled = 1
+# AppleImage4 matches on /defaults, not /chosen (see the evb10 device record), so the security state it
+# consults before reading a nonce slot has to be here. Values as in the community's working QEMU reference.
+certificate-production-status = 0
+effective-production-status-ap = 0
+certificate-security-mode = 1
+effective-security-mode-sep = 1
 "kern.maxvnodes" = 0x13400
 
 [adt.product.string]

@@ -185,3 +185,47 @@ b50 用 XNU 自带的匹配日志判定：`io=0x10` + `iokit_print_verbose_match
 - 完全没有这行 → ArmCpu 从未成为候选（R1）
 - 有 `matched ArmCpu, probe score 2000` 但没有驱动输出 → probe 拒绝了（R2）
 - 出现 `Couldn't alloc class "ArmCpu"` → 元类注册有问题（与第 1 条矛盾，需重查）
+
+---
+
+## 9. QEMU 抓到的真实 panic（2026-11-06）
+
+在 QEMU 里跑同一个内核（`-device ramfb` + `io=0x10`），**启动线程的 PC 在 120/240/420/600 秒恒为
+`0xfffffff00b62d9b0`**，符号化结果：
+
+```
+_panic_spin_forever + 0xc
+fffffff00b62d9ac:  wfe
+fffffff00b62d9b0:  b 0xfffffff00b62d9ac     ← 死转
+```
+
+**内核不是卡住，是 panic 后停在自旋里。** panic 文本画在帧缓冲上（无锁 panic 屏，字符双写），
+解出来是 `Panic(cpu 0 caller 0x…): …`，而核心里对应的字符串是：
+
+```
+panic: non-sensical crypto hash method: %s
+"Invalid crypto hash method: %d" @%s:%d
+IOReturn AppleMobileApNonce::_retrieveNonce(uint64_t *)
+```
+
+### 原因：我们的 ADT 缺 `crypto-hash-method`
+
+Apple 真机 Mac17,2 的设备树里有：
+
+```
+/chosen:  … effective-security-mode-ap, crypto-hash-method = "sha2-384", secure-boot …
+```
+
+而我们的 ADT 里 **`crypto-hash-method` 出现 0 次、`sha2-384` 0 次**（生成器不产出、board.toml 也没写）。
+Apple 的 nonce 路径读不到散列方法 → 判定"non-sensical"→ panic；这也解释了每个 magazine 都报
+`failed to read nonce slot data`：没有散列方法，slot 内容根本无法解释。
+
+第 b51 轮补上了 `[adt.chosen.string] crypto-hash-method = "sha2-384"`（payload 侧，已验收 ADT 内含该键）。
+
+### 方法论教训（重要）
+
+- 在 QEMU 里"串口没有输出"**不等于内核没跑** —— 内核把 panic 画在帧缓冲上，只有截图才看得到。
+  之前几轮只看 `serial.log`，所以一直以为 QEMU 里内核"沉默"。
+- `info registers` 的 PC 在多个时间点不变 + `PSTATE` 的 DAIF 全屏蔽，就是"panic 自旋"的签名。
+- 台面上同样的 panic 屏幕被 Image4 的 14 行顶掉了，**QEMU 是唯一能稳定读到它的地方**。
+  以后任何"设备上说不清"的问题，先在 QEMU 里跑一遍再刷机。
