@@ -1,3 +1,9 @@
+# READ FIRST: docs/STATE.md
+#
+# It is the handoff record: what is proven (with evidence), what is open, what is in flight in CI, the
+# exact commands for artifacts/payload/firmware, the pitfalls already paid for, and the next steps in
+# order. Read it before changing anything; PROGRESS.md is the history behind it.
+
 # Agent instructions
 
 This is the uke (Xiaomi Pad 7, SM7675) device repository in format 2. Board
