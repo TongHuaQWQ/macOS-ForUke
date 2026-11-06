@@ -881,6 +881,19 @@ PY_BINDINGS
   # The archive builders run after the bootstrap pass, so the writer archive is
   # absent while the bootstrap links and present for the real kernel link. The
   # archive carries both the pram writer and the launchd watchdog policy.
+  # USB log console (QcomXnuUsbDebug). The six hook units take -DXNU_QCOM_USB_DEBUG and the module's
+  # include directory; the archive must be force-loaded or the hooks link against nothing.
+  if [ "${XNU_QCOM_USB_DEBUG:-0}" = 1 ]; then
+    QUD_MODULE="$ROOT/drivers/QcomXnuUsbDebug"
+    QUD_ARCHIVE="$ROOT/build/qcom-usb-debug/libQcomXnuUsbDebug.a"
+    test -d "$QUD_MODULE/include"
+    test -f "$QUD_ARCHIVE"
+    EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_QCOM_USB_DEBUG=1 -I$QUD_MODULE/include"
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$QUD_ARCHIVE"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $QUD_ARCHIVE"
+  else
+    EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_QCOM_USB_DEBUG=0"
+  fi
   if [ "$BOOT_LOG" = 1 ] || [ "$WATCHDOG_POLICY" = 1 ]; then
     LAST_LOG_ARCHIVE=$ROOT/build/uke-last-log/libUkeLastLog.a
     if [ -f "$LAST_LOG_ARCHIVE" ]; then

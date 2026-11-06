@@ -123,3 +123,11 @@ uke-gic-timer.patch
 # binding needed), and the wait probe moved onto waitForMatchingServiceWithToken, the implementation every path
 # funnels through, because the wrapper produced no output at all.
 uke-aes-stub.patch
+
+# USB log console (QcomXnuUsbDebug, drivers/QcomXnuUsbDebug). The two patches are the component's own
+# darwin23 set, already rebased onto xnu-10063.141.1 — this kernel's exact revision. They add the
+# console tee (pe_kprintf/debug/printf/serial_console/serial_general) and the worker thread that starts
+# after kminit; every hook is compiled only when XNU_QCOM_USB_DEBUG=1, so they stay inert without it.
+# Applied last: they touch files the panic/ramoops patches above also touch.
+zzzzzzzzzzzzzzz-uke-usb-console.patch
+zzzzzzzzzzzzzzz-uke-usb-worker.patch

@@ -166,6 +166,9 @@ archives = [
   # The CDC-ACM log console over DWC3 (package/uke_usb.c, ported from the sirius port). Its object
   # joins libUkeLastLog.a, so this must come after build-boot-log.py.
   "build-uke-usb.py",
+  # libQcomXnuUsbDebug.a, built against this tree's own compile records with soc/Uke.h. The kernel
+  # link force-loads it when CONFIG_XNU_QCOM_USB_DEBUG is on.
+  "build-qcom-usb-debug.py",
   # The comparison kernel the fileset prelink reads, last, as upstream's 26/27 archives do:
   #   "The 27 kernel archives end with build-fileset-release-reference.py --tree ., the comparison
   #    kernel the prelink step reads." (docs/devices/sheng.md)
