@@ -2312,3 +2312,24 @@ error: patch failed: osfmk/kern/printf.c:911
 把 xnu-10063.141.1 拉到 `work/analysis/xnu-src`，按 `patch_series = [arch, os, device]` 的
 真实顺序重放全部 170 个补丁，定位冲突点后重新生成这两份补丁（组件文档明确要求：
 **旧的按设备 USB 补丁和新的组件补丁不能叠**）。
+
+### 48b. 真正的原因：这棵树的内核是 xnu-12377.121.6，不是 10063.141.1
+
+`UniXNU/profiles/os/macos-26.5.2-25F84/profile.toml` 写着 `"xnu_version" = "12377.121.6"`
+（同一文件解释：24A446/25F84 跑的是 xnu-12377 内核），设备补丁序列里也全是
+`patches/xnu-12377/…`。而 `QcomXnuUsbDebug` 只带 **darwin22（8796）** 与 **darwin23（10063）** 两套补丁。
+CI 报的三处失败里，`pe_kprintf.c`、`printf.c`、`serial_*.c` 在前 169 个补丁里**没有任何人去动**，
+所以那不是"被前面的补丁改坏了"，而是**版本本身不对**。
+
+⇒ 结论：要用这个组件，得先把它的两份补丁移植到 12377（那是独立的一轮），而不是改一行路径。
+在那之前，板子自己的 `package/uke_usb.c`（读 msgbuf、不需要任何 XNU 补丁）就是 USB 控制台，
+而它正需要这次固件做好的"电源/时钟/PHY 已就绪"交接。
+
+已同步改动（提交 `7245b1e`，CI run `42265823188`）：
+
+```
+patches/xnu/series            <- 两份组件补丁注释掉，并写明原因与失败的三个文件
+configs/uke-macos_defconfig   <- CONFIG_XNU_QCOM_USB_DEBUG=n
+board.toml                    <- "build-qcom-usb-debug.py" 注释掉（配置关了就没人链接它）
+drivers/QcomXnuUsbDebug/、scripts/build-qcom-usb-debug.py、soc/Uke.h、build-xnu-4k-baseline.sh 的开关 保留
+```
