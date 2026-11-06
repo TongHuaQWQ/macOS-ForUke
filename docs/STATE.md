@@ -1712,3 +1712,45 @@ if (uke_stage_last_panic != nullptr) { uke_stage_last_panic (text); }
 2. `ArmCpu` 的 `ArmCpu: <N> timer interrupts, <M> IPIs in the first 10 ms after registration`
    这一行现在默认就会打（`armcpu-probe=0` 不再冻屏），是"架构定时器有没有进
    `rtclock_intr`"的直接判据。
+
+---
+
+## 40. **fileset 未匹配调用 = 0**（Round 26，emit 报告为证）
+
+`796b57a` 的 CI 绿灯（run `42229244579`），取回的 emit 报告：
+
+```
+b63 (197 anchors + csr_check provider):  stubbed pairs = 0   call sites = 0
+kernel.macho 里: UkeLastLog 2 处、uke_panic_pram 2 处、csr_check 3 处
+```
+
+即：
+
+- **没有任何 fileset 调用再落到 panic stub 上** —— 目标里"M1 越过 fileset 未匹配调用 panic"
+  这一步在**产物层面**已经成立（设备层面的确认要等下一次实机，见 §39 的 SError）；
+- `UkeLastLog`/`uke_panic_pram` 的字符串出现在内核里 ⇒ **pram 写手这次真的链接进去了**（§34 的修法生效）；
+- `csr_check` 也在 ⇒ 最后 87 个调用点的宿主函数有了（§38）。
+
+三个阶段的数据放在一起看：
+
+| 内核 | anchor | stub 调用点 |
+|---|---|---|
+| b56 | 62 | 964 |
+| b60 | 197 | 87 |
+| **b63** | **197 + csr_check 实现** | **0** |
+
+### 接下来就是 SError（§39）
+
+b61 的实拍已经证明：fileset 之后的下一个拦路虎是平台错误（SError），而当时没有
+`IOPlatformIO` 所以现场被丢掉。`ArmDTPlatformIO` 已经把这条补上，CI 里两次编译错误都是小问题
+（`++volatile` 被 `-Werror,-Wdeprecated-volatile` 拒、`snprintf` 需要 `<libkern/libkern.h>`），
+都已修（`67149e0`、`4ed407d`）。
+
+### 顺带记两个"配置差异"结论（以后再遇到同类调用点直接用）
+
+1. 我们的 arm64 配置（`config/MASTER.arm64`）和 Apple Mac 的
+   （`config/MASTER.arm64.MacOSX`）`SECURITY_BASE` 不同：前者没有 `config_csr`/`config_csr_from_dt`，
+   所以 `bsd/kern/kern_csr.c` 整个不编 —— 这类"Apple 有、我们没有"的符号，靠 anchor 是补不出来的，
+   只能自己提供实现（weak 定义最省事）；
+2. `kernel.json` 的 `loadable`/`mapping_complete`/`missing_address_space` 是写死的字面量，
+   别拿它们当证据（§35）。
