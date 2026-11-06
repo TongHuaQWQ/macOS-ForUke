@@ -1895,3 +1895,48 @@ Platforms/Xiaomi/ukePkg/{uke.dsc,uke.fdf,uke.dec,Include/*,Drivers/*,Tools/gen-v
 | `42242998639` | `aligned(PAGE_SIZE)` 不是整型常量 | 写 `4096` |
 | `42246401123` | `GSNPSID` 未声明 | 该文件里它是字面量 `0xc120` |
 | `42249199942`（`066eb74`） | — | 只读探测段（`uke_usb=1 uke_usb_power=11`） |
+
+---
+
+## 43. USB 串口驱动编译通过并入内核（Round 28，产物为证）
+
+run `42249199942`（commit `066eb74`）**绿灯**。取回的产物：
+
+```
+kernel.macho sha256 = 4a57ae88bbf9dc5ae66b3667473029626f9a22691b1d90a23a00d5bb6ab0239c
+kernel.macho 里: "UKE USB:" 124 处、uke_usb_power 1 处、UkeLastLog 2 处、csr_check 3 处
+emit 报告: stubbed pairs = 0   call sites = 0
+```
+
+124 处 `UKE USB:` 字符串 ⇒ 那份 1888 行的 DWC3 CDC-ACM 驱动**真的编进内核了**（不是只编了归档），
+同时 fileset 的 stub 仍然是 0。
+
+### b67 镜像（本轮设备判据）
+
+```
+work/flash/boot-round-b67-vendorfree.img   4c6725e1…  (1,122,304 B；无厂商固件)
+work/flash/vendor_boot_round-b67-usbprobe.img 3cb28fc3…  (85,782,528 B；b66 内核，含 USB 探测)
+内核参数（已烘进 payload）: uke_usb=1 uke_usb_power=11
+```
+
+`uke_usb_power=11` 是**只读**探测：`ml_io_map(0xa600000)` 后只做 `dwc_rd`，打印
+
+```
+UKE USB: DWC3 id=… gctl=… dctl=… dsts=…
+```
+
+外加 `uke_usb=1` 的 GCC 电源域（GDSCR@0x139004）与 SMMU stream 探测。**判据**：
+
+- `id` 高 16 位应为 `0x5533`（Synopsys DWC3）——说明 XNU 真的看见了控制器；
+- `gctl` 的 bit12..13 == 2 —— 说明控制器还在 device 模式（ABL/fastboot 留下的状态）；
+- 有这两条，才有资格往下走 `uke_usb=2`（CDC-ACM + `/dev/ttyACM0`）。
+
+这些打印都走 `printf` → msgbuf → `UkeLastLog` 写进 pram，所以**下一次开机拍面板也能再看到一次**
+（`UkeUsbLogDxe` 回显 pram 尾部 34 行）。
+
+### 顺带说明：为什么厂商那 6 个 `Usb*Dxe` 不是替代品
+
+它们是"**设备模式 + 大容量存储**"（给主机一块 U 盘），不是串口流；而且要满足 `UsbfnDwc3Dxe` 的
+16 条 DEPEX 就得连带 48 个厂商 DXE 一起编进 FV。实测（b56/b57/b59）那套栈一次都没让机器走到 XNU：
+先是栈被用穿，加到 1 MiB 后变成黑屏+重启。代码与 `.efi` 都在（`UKE_VENDOR_HW` 可切回），
+但它是备选，不是主路。
