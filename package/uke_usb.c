@@ -297,6 +297,10 @@ static struct {
 	uint32_t    rx_event;
 } ud;
 
+/* The TRB ring, event buffer and the CDC transmit staging area live here. Page aligned and a whole
+ * number of pages, because the DWC3 walks it by physical address. */
+static char uke_usb_dma[UD_SIZE] __attribute__((aligned(PAGE_SIZE)));
+
 static inline uint32_t
 usb_rd(vm_offset_t base, uint32_t off)
 {
@@ -1437,11 +1441,13 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 		printf("UKE USB: not in device mode; controller untouched\n");
 		return;
 	}
-	if (kmem_alloc_contig(kernel_map, &ud.dma, UD_SIZE, PAGE_MASK, 0, 0,
-	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-		printf("UKE USB: no DMA memory\n");
-		return;
-	}
+	/* Static, page-aligned DMA memory instead of kmem_alloc_contig(): the ring is a fixed few
+	 * pages, it is needed as early as this runs, and the page walk below already verifies that
+	 * the pages it gets really are physically contiguous. kmem_alloc_contig's prototype is not
+	 * visible in this configuration either (vm_kern.h declares it under MACH_KERNEL_PRIVATE, and
+	 * its signature differs between XNU trains). */
+	ud.dma = (vm_offset_t)(uintptr_t)uke_usb_dma;
+	memset((void *)ud.dma, 0, UD_SIZE);
 	/* pmap_find_phys can return 0 for freshly kmem-allocated pages on this
 	 * kernel; kvtophys is the canonical VA-to-PA walk. Fail loudly either way. */
 	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)ud.dma);
