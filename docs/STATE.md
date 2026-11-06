@@ -2967,3 +2967,26 @@ top marks the loader handoff before the kernel branch.` + `SecurityLock: […] L
 不等于驱动没跑。**正好用这次新加的分页来取**：再启动一次同一对镜像，
 ReadyToBoot 的 `--- boot log page N ---` 里就是**上一次启动的内核日志**（从 pram 读回来的），
 翻页找 `UKE USB:` 即可。
+
+### 60b. 主机侧 dmesg：我们的 payload 期间**没有任何 USB 设备枚举**
+
+```
+usb 3-1.2: New USB device found, idVendor=18d1, idProduct=d00d … Product: Android
+usb 3-1.2: USB disconnect, device number 34
+usb 3-1.2: new full-speed USB device number 35 … device descriptor read/64, error -32
+```
+
+`18d1:d00d` 是 **Android 自己的 adb gadget**（Google/Android），出现在 Android 启动/重启时。
+在跑我们 payload 的那段时间里**没有任何设备出现**，也就是说 `uke_usb.c` 的 DWC3 到这一轮
+**还没有把控制器拉到 device 模式**（没拉 D+ / 没使能 RUN_STOP）。
+
+### 关于"用 Android 读日志"：现在不行，两个硬阻塞
+
+| 通道 | 状态 | 原因 |
+|---|---|---|
+| 写 flash（`oops`/`logfs`）让 Android `dd` 出来 | ✗ | 固件没有 UFS 驱动；厂商 `UFSDxe` 卡在同一条 Clock/PMIC 链上（§57） |
+| 写 RAM 区域让 Android 读 | ✗ | 见下面两行 |
+| pstore / ramoops | ✗ | `ramoops_get_next_prz()` 只对 `PSTORE_TYPE_DMESG` 调 `persistent_ram_save_old()`；本机 DT 的 4 MiB 全给了 console+pmsg，`dump_mem_sz = 0`，所以 console 区的 `old_size` 恒为 0（源码已核，`fs/pstore/ram.c:130-137`、`:768-782`）|
+| `/dev/mem` | 大概 ✗ | arm64 默认 `CONFIG_STRICT_DEVMEM=y` |
+| `/proc/kcore` | 待测 | root 可读；pram 在 `0x9FFE00000` 落在 Android 的 `/memory` 高段里（线性映射），若能算出 ELF 段偏移就可以精确 `dd` 一小段 |
+| 小米的 `debug_kinfo`（4 KiB，`no-map`）| 待测 | 容量只有 4 KiB，够写日志尾部；要看它有没有被 Android 暴露成 proc/sysfs 节点 |
