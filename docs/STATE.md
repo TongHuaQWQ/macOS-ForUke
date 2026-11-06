@@ -1581,3 +1581,44 @@ UKE_VENDOR_STORAGE = 1    # 与上面独立，将来开厂商栈时再分 UFS/SD
 work/flash/vendor_boot_round-b61-anchors.img  dd69871d…  (85,782,528 B)
 work/flash/boot-round-b61-vendorfree.img      4c6725e1…  (1,122,304 B；48 个模块，无厂商驱动)
 ```
+
+---
+
+## 38. `_csr_check` 的真因：我们的 arm64 配置根本不编译 `kern_csr.c`（Round 25）
+
+上一轮以为 `_csr_check` 是"LTO 内联 + dead-strip 删掉了"，于是加了 `KeepOutOfLine.c` 去保活。
+CI 直接反驳了这个判断（run `42226020235`）：
+
+```
+Undefined symbols for architecture arm64e.kernel:
+  "_csr_check", referenced from:
+      _uke_keep_csr_check in lto.o
+```
+
+保活**引用**它，链接器却找不到定义 ⇒ 符号从来没被编译出来。查到根源是**配置差异**：
+
+```
+config/MASTER.arm64.MacOSX:  SECURITY_BASE = [ config_macf config_audit kernel_integrity \
+                                  config_csr config_csr_from_dt config_setuid ... ]   ← Apple 的 Mac
+config/MASTER.arm64:         SECURITY_BASE = [ config_macf kernel_integrity config_secure_bsd_root ]  ← 我们用这个
+bsd/conf/files:              bsd/kern/kern_csr.c   optional config_csr
+```
+
+所以 Apple 内核里有 `_csr_check`（AMFI/apfs/sandbox 调它 87 次），我们的内核里**连文件都没编**。
+
+### 修法（提交 `796b57a`）
+
+`package/KeepOutOfLine.c` 改名为 **`package/MissingKernelSymbols.c`**，职责改成
+"提供这个配置不编译、但 fileset 按名字调用的内核入口"：
+
+```c
+__attribute__((weak)) int csr_get_active_config(uint32_t *config) { *config = 0xffffffff; return 0; }
+__attribute__((weak)) int csr_check(uint32_t mask)               { /* (config & mask) == mask ? 0 : EPERM */ }
+```
+
+- **weak**：将来把 `config_csr` 加进 `config/MASTER.arm64`，XNU 自己的实现直接接管，不会重复符号；
+- 语义是"全部允许"，与这块板子的现状一致（`boot_args` 里没有 CSR active config、
+  payload 带 `amfi_get_out_of_my_way=1`）。
+
+这一条修好后，b60 里最后 87 个 stub 调用点应当归零 —— 也就是
+"fileset: original component called an unmapped kernel function" 这条 panic 的最后一个来源。
