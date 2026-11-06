@@ -1005,3 +1005,38 @@ Python: can't open file '.../tree/kits/NativePrelink/emit_prelink.py': [Errno 2]
 - run `42211461355`（`8eaacfb`，开 msgbuf 写 pram）—— 会照旧在 prelink 挂掉，拿不到内核；
 - run `42211693015`（`36d40d0`，含 prelink 修复）—— **这个才是关键**，只要它绿，
   `work/ci-artifacts/<run>/kernel.macho` 就会第一次带上 `UkeLastLog` 的 msgbuf 写盘。
+
+---
+
+## 26. 两个固件变体：先取日志，再谈 UFS（Round 17）
+
+上一轮的 b54 把整套厂商栈（含 `UFSDxe`/`SdccDxe`）都编进去了。问题是 UFS/SD 是真的去摸硬件控制器：
+如果时钟/电源树和驱动的预期不一致，它会直接把启动挂在那里，而**日志通道本身根本不需要存储**
+（`UKE-LOG` 是 RAM 盘）。所以这轮把存储做成独立开关：
+
+```
+uke.dsc
+  UKE_VENDOR_HW      = 1   # 厂商 DXE 全套（USB device 栈、PMIC、Clock、NPA、SMEM…）
+  UKE_VENDOR_STORAGE = 1   # 0：不装 UFSDxe/SdccDxe，只留日志通道
+```
+
+`APRIORI.inc`/`DXE.inc` 里 `UFSDxe`、`SdccDxe` 现在都挂在 `UKE_VENDOR_STORAGE` 上
+（注意 `SdccDxe` 原来在 `DXE.inc` 里还有第二处，只加在 APRIORI 会漏，实测第一版变体里它还在，
+已一并修掉）。
+
+### 两个镜像（固件全在 `boot.img` 里，`vendor_boot` 只带 payload，刷一次即可）
+
+| 镜像 | FV sha | 内容 |
+|---|---|---|
+| `boot-round-b55-usbonly.img` (1,667,072 B) | `1e158103…`（96 模块） | **先试这个**：厂商 USB device 栈 + `UkeUsbLogDxe`，不碰 UFS/SD |
+| `boot-round-b54-pramlog.img` (1,724,416 B) | `95d83175…`（98 模块） | 全量：再加 `UFSDxe`+`SdccDxe`，成功的话 UFS 各 LU 会作为 U 盘出现 |
+
+两次都用同一个 `vendor_boot_round-b55-usbonly.img`（`4aa9690e…`）。换固件只要换 `boot.img`，
+不用再刷 vendor_boot —— 这一点以后每轮都省一次 85 MB 传输。
+
+### 固件源码已提交到 `uefi-uke`（`ac9352b`）
+
+`Platforms/Xiaomi/ukePkg/{uke.dsc,uke.dec,uke.fdf,Include/{APRIORI,DXE}.inc}`、
+`Drivers/UkeUsbLogDxe/`、`Tools/gen-vendor-binaries.py`、`Resources/Configs/uke.toml`（FD 0x500000）
+全部纳入版本控制；`Binaries/uke/QcomPkg/**` 由 `Tools/gen-vendor-binaries.py` 从
+`work/analysis/ref/vendor-dxe/`（库存 `uefi_a.img` 的抽取结果）重新生成，不入库。
