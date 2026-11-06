@@ -859,3 +859,37 @@ magazine 名字第一次读清（之前照片太小）：`pdmg, cptx, dvdi, c1bt
    `UsbfnDwc3Dxe` 那 16 个 GUID 依赖要逐个对上（`fa5f306b…`/`f4e5c7d0…`/`157a5c45…` 等 Qcom 私有协议）。
 4. 若卡在 `start …` 之前/之后不动，是 DWC3/PHY 的问题（Type-C 角色、`UsbPwrCtrl`+`QcomCharger` 链路），
    面板会停在最后一行，照片可以定位。
+
+### §23 补充：把 USB 栈的 DEPEX 全部对上，发现 `AcpiTableDxe` 缺失（b53）
+
+把 `UsbfnDwc3Dxe`/`UsbConfigDxe`/`UsbDeviceDxe`/`UsbInitDxe` 的 DEPEX 逐个翻译成协议名
+（GUID→名字用树里 94 个 `.dec` 反查，MdePkg 的用 `Mu_Basecore`）：
+
+| 协议 | 提供者 | 在我们 FV 里 |
+|---|---|---|
+| DriverBinding / CPU / Metronome / Timer / RTC / Reset / Runtime / Security / MonotonicCounter / Variable(+Write) / Watchdog / BDS arch | MdeModulePkg/ArmPkg/EmbeddedPkg 开源件 | 有 |
+| `gEfiSMEMProtocolGuid` (`f4e5c7d0…`) | `SmemDxe` | 有 |
+| `gEfiPlatformInfoProtocolGuid` (`157a5c45…`) | `PlatformInfoDxe` | 有 |
+| `gEfiChipInfoProtocolGuid` (`b0760469…`) | `ChipInfoDxe` | 有 |
+| PMIC 协议 (`fa5f306b…`，只在 PmicDxe/SPMI/UsbConfigDxe 里出现) | `PmicDxeLa` | 有 |
+| NPA 协议 (`1c34f691…`，Clock/Rpmh/Vcs/ICB/PwrUtils/CmdDb/CPR 都在用) | `NpaDxe` | 有 |
+| USB config 协议 (`e722b03f…`，只在 Usb* 三个模块里) | `UsbConfigDxe` | 有 |
+| **`gEfiAcpiSdtProtocolGuid` (`eb97088e…`)** | **`AcpiTableDxe`** | **之前没有！** |
+
+`uke.fdf` 里 `AcpiTableDxe`/`AcpiPlatformDxe` 是被注释掉的（这个平台给 XNU 交 DT，不要 ACPI），
+但 `UsbConfigDxe` 的 DEPEX 要求 `gEfiAcpiSdtProtocolGuid` —— 生产者不存在 ⇒ **整条 USB device 栈
+永远不会 dispatch**，`StartDevice` 必然失败。已加回 `AcpiTableDxe`（只要协议，不要表，
+`AcpiPlatformDxe` 仍然注释）并放进 APRIORI 的 USB 块之前。
+
+配置地图也核对过：`ukePkg/Library/ConfigurationMapLib` 已经有 `UsbFnIoRevNum`/`USBHS1_Config`/
+`EnableUfsIOC`/`UfsSmmuConfigForOtherBootDev` 这些键（与其它机型一致），不需要补。
+
+重建后 FV 98 个模块，USB 链所需的 14 个提供者全部在位（`AcpiTableDxe/UFSDxe/UsbMsdDxe/UsbConfigDxe/
+UsbDeviceDxe/UsbInitDxe/UsbfnDwc3Dxe/PmicDxeLa/SmemDxe/NpaDxe/ChipInfoDxe/PlatformInfoDxe/ClockDxe/UkeUsbLogDxe`）。
+
+### b53 镜像（要刷的就是这个，b52 作废）
+
+```
+work/flash/vendor_boot_round-b53-ukelog.img   ed50aa6b…  (85,782,528 B)
+work/flash/boot-round-b53-ukelog.img          2d0e9915…  (1,724,416 B，内含 5 MiB FV，sha 已核对)
+```
