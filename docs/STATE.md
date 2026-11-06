@@ -1461,3 +1461,48 @@ CONFIG_XNU_BOOT_LOG=y      # → XNU_BOOT_LOG=1 → -force_load libUkeLastLog.a
 这也解释了为什么 `UkeUsbLogDxe` 从 pram 里读不到内核日志：**pram 里本来就没有内核写的东西**。
 修完之后 pram 才会有 msgbuf 尾部；在那之前，只有 XNU 自己 panic 时的
 `uke_stage_last_panic` 512 字节会落在 pram 里。
+
+---
+
+## 35. stub 调用点 964 → 363 → 87，只剩 `_csr_check`（Round 24，emit 报告为证）
+
+三个内核的 emit 报告（同一 matcher、同一 kernelcache）：
+
+| 内核 | run / commit | anchor | `stubbed` 对数 | stub 调用点 |
+|---|---|---|---|---|
+| b56 | `42211693015` / `36d40d0` | 62 | 177 | 964 |
+| b58 | `42212761913` / `a907ef7` | 182 | 31 | 363 |
+| b60 | `42218599309` / `295c481` | 197 | 4 | **87** |
+
+b60 剩下的 4 对全指向**同一个**目标：
+
+```
+ 87 次  0xfffffe000bd44284  _csr_check   ← 已经在 anchor 里，但绑不上
+   AMFI 63 / apfs 14 / sandbox 8 / IOGPUFamily 2
+```
+
+### 为什么绑不上
+
+`_csr_check` 在 kernelcache 里是 68 字节的独立函数（`bsd/kern/kern_csr.c`），但**我们的重建内核里
+根本没有这个符号**：
+
+- `kernel.map.json` 里没有任何名为 `_csr_check` 的条目；
+- `anchor_reviewed()` 对找不到的 native 符号是**静默跳过**（不报错），所以 anchor 写了也不生效。
+
+原因是 LTO + dead-strip：内核里所有 in-tree 调用点都被内联，`_csr_check` 的函数体没有外部引用，
+于是被 `-dead_strip` 删掉；而 fileset 里的 AMFI/apfs/sandbox 是**按符号名**调用它的。
+
+### 修法（提交 `7fdbe2c`）
+
+新增 `package/KeepOutOfLine.c`：把一个指向 `csr_check` 的函数指针放进一个活着的全局对象。
+地址被活对象引用 ⇒ LTO 必须保留函数体 ⇒ 符号存在 ⇒ anchor 能绑上。
+（原型必须与 `bsd/sys/csr.h` 完全一致 `int csr_check(uint32_t)`，否则 LTO 会以类型不匹配拒绝合并。）
+这个文件被加进 `build-boot-log.py` 的 `sources`，随 `libUkeLastLog.a` 一起 `-force_load`
+进内核 —— 也就是依赖 `CONFIG_XNU_BOOT_LOG=y`（§34）。
+
+### 顺带澄清两个"看起来像坏消息"的字段
+
+`kernel.json` 里的 `mapping_complete: False`、`loadable: False`、
+`missing_address_space: 'output collection'` **都是 `fileset_emit.py` 里写死的字面量**
+（第 736 行附近），不是这一版真的缺了什么。`personalities_dropped` 里的
+`IOGraphicsFamily`/`IOPCIFamily` 是这个移植本来就不要的（无 PCI、legacy display 路径）。
