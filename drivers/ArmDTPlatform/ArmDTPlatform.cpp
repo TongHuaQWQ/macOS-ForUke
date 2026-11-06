@@ -16,6 +16,7 @@
 #include <IOKit/platform/IOPlatformIO.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOLib.h>
+#include <libkern/libkern.h>   /* snprintf: the handler formats a line for the log and pram */
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSIterator.h>
 #include <pexpert/pexpert.h>
