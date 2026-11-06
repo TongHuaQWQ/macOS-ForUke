@@ -2333,3 +2333,61 @@ configs/uke-macos_defconfig   <- CONFIG_XNU_QCOM_USB_DEBUG=n
 board.toml                    <- "build-qcom-usb-debug.py" 注释掉（配置关了就没人链接它）
 drivers/QcomXnuUsbDebug/、scripts/build-qcom-usb-debug.py、soc/Uke.h、build-xnu-4k-baseline.sh 的开关 保留
 ```
+
+---
+
+## 49. b70 真机结果：厂商 fleet 走到 GlinkDxe 就死，原因是 SMP2P 没编进镜像
+
+用户实测 `boot-round-b70-usbsubset.img`（`fastboot boot`）后，面板上最后一次是主板厂商驱动**逐个
+被 dispatch**（这是从来没有过的进度：EnvDxe/ReportStatusCode/RuntimeDxe/ArmCpu/ArmGic/Metronome/
+ArmTimer/Smem/DALSys/HWIO/ChipInfo/PlatformInfo/ProjectInfo/HALIOMMU/ULog/IPCC 全部通过），
+然后：
+
+```
+Loading driver at 0x000C25B3000 EntryPoint=0x000C25B4000 GlinkDxe.efi
+→ 黑屏，自动重启，连 unixnu 都没出来
+```
+
+### 根因：DEPEX 分析漏掉了"消费者不是提供者"
+
+`GlinkDxe` 的 DEPEX 只有一个协议：`52858ad7-8b16-4137-9c64-dfe04d942e80`。用
+`work/analysis/guid-providers.py` 查谁带这个 GUID：
+
+```
+52858ad7-…: GlinkDxe, IPCCDxe, Smp2pDxe
+```
+
+`Smp2pDxe` 在 stock 镜像里，但**我们的 `gen-vendor-binaries.py` 模块表从来没列过它**，所以镜像里
+没有它。我原来的 `fw-subset.py` 把"GUID 出现在 PE32 里"当提供者，于是 IPCCDxe/GlinkDxe 自己也被
+算成提供者 → 报 `ok`，真实缺口被掩盖。**APRIORI 里的驱动不等 DEPEX 就被 dispatch**，所以
+GlinkDxe 的 entry 照跑，`LocateProtocol` 拿到 NULL，vendor 代码直接解引用 → data abort → 挂死 →
+看门狗复位。这就是"黑屏 + 重启 + 一行输出都没有"。
+
+修好的两条规则（都已写进工具）：
+
+1. `providers()` 排除"自己的 DEPEX 里也等这个 GUID"的模块（等它的人不是给它的人）；
+2. 只剩自己一个候选时报 `SELF-ONLY`（并列出 stock 镜像里但不在子集里的候选），不再默默算过。
+
+### 同时加了心跳，让下一轮不用再猜
+
+两个假设（a 某驱动挂死 / b Gunyah 看门狗 ~30 s 复位）在照片上长得一模一样，所以新增
+`Drivers/UkeProgressDxe`，并且**插在 APRIORI 里 ArmTimerDxe 之后、所有厂商驱动之前**：
+
+- 每 1 秒 `smc 0x86000007` 喂 Gunyah 看门狗（和 Android `gh_virt_wdt` 同一条）；
+- 每 1 秒在面板**同一行原地**改写 `UKE-BEAT <n>`（`\r` 不换行），所以 dispatcher 打印的
+  "Loading driver at …"（定位卡在哪一行的唯一证据）不会被滚掉；
+- 每 10 拍把计数写进 `0xA7000000`（MemoryMapLib 的 "FD Reserved"，本固件所有、FD 不用），
+  下次启动还能读到"上一轮走到第几拍"。
+
+判读方法：**数字在涨 = CPU 活着，某个驱动在等永远不来的东西（stall）；数字冻住 = CPU 卡死在
+最后那行驱动里**。
+
+### 产物
+
+```
+work/flash/boot-round-b71-beat.img   1556480 B  sha256 3b3188982db83ed322dbd3565a874bd9aea62fb2f01fe5f3a296e165cccda33d
+  FD sha256 0695ca676f76517c…（32 个厂商模块 + Smp2pDxe + UkeProgressDxe，55 images verified）
+```
+
+顺带一个 FDF 坑：**只把 INF 写进 `APRIORI.inc` 不会把 FFS 放进 FV**（GUID 只出现在 APRIORI 文件里），
+必须同时在 `DXE.inc` 里列一次，否则 APRIORI 指向一个不存在的 FFS。
