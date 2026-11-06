@@ -1419,3 +1419,45 @@ UkeScmCall (0x86000007, 0, 0, …)            // 喂狗
 
 配套的内核（`295c481`）里 ArmCpu 默认**不再故意 panic**，会继续 `registerService()`，
 所以 b60 是第一次"固件不挡、内核不挡"的组合，能真正看出启动链下一站停在哪。
+
+---
+
+## 34. 关键发现：pram 写手从来没被链接进内核（Round 23）
+
+上一轮我说"`UkeLastLog` 真的链接进去了"，那是**错的** —— 现在有反证：
+直接在这两个产物里搜字符串，一个都没有。
+
+```
+work/ci-artifacts/b56/kernel.macho: UkeLastLog 0  uke_panic_flush 0  BootWatchdogPolicy 0  CrashLogProbe 0
+work/ci-artifacts/b58/kernel.macho: UkeLastLog 0  uke_panic_flush 0  BootWatchdogPolicy 0  CrashLogProbe 0
+```
+
+原因在链路的后半段：
+
+1. `scripts/build-boot-log.py` 只负责**编译并打包** `build/uke-last-log/libUkeLastLog.a`
+   （它的 PASS 行只说明编译成功）；
+2. 真正把归档塞进链接的是 `scripts/build-xnu-4k-baseline.sh:884`：
+
+```sh
+if [ "$BOOT_LOG" = 1 ] || [ "$WATCHDOG_POLICY" = 1 ]; then
+  LAST_LOG_ARCHIVE=$ROOT/build/uke-last-log/libUkeLastLog.a
+  ... KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$LAST_LOG_ARCHIVE"
+fi
+```
+
+而 `BOOT_LOG=${XNU_BOOT_LOG:-0}`、`WATCHDOG_POLICY=${XNU_WATCHDOG_POLICY:-0}`，
+`configs/uke-macos_defconfig` 里两个**都是 0**（`CONFIG_XNU_BOOT_PROGRESS` 也没开），
+所以归档就算建好了也永远不会进 `LD_KERNEL_ARCHIVES`。
+
+### 修法（提交 `e01a101`）
+
+```toml
+CONFIG_XNU_BOOT_LOG=y      # → XNU_BOOT_LOG=1 → -force_load libUkeLastLog.a
+```
+
+`XNU_BOOT_LOG` 只管链接和 `-DXNU_BOOT_LOG=1`，源码里没有 `#if XNU_BOOT_LOG` 分支
+（`grep` 确认），所以这次改动只影响"归档有没有被链接"。
+
+这也解释了为什么 `UkeUsbLogDxe` 从 pram 里读不到内核日志：**pram 里本来就没有内核写的东西**。
+修完之后 pram 才会有 msgbuf 尾部；在那之前，只有 XNU 自己 panic 时的
+`uke_stage_last_panic` 512 字节会落在 pram 里。
