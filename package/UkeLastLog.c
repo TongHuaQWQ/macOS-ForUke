@@ -233,15 +233,28 @@ uke_last_log_write(void)
 //   [32] payload (the newest bytes of the kernel message buffer)
 //
 // A reader sorts by sequence and concatenates the contiguous run it finds.
+//
+// The userdata window needs NativeUfs (`CONFIG_XNU_NATIVE_UFS`), which the macOS
+// prelink configuration turns off. Defining UKE_LOG_USERDATA=1 in a configuration
+// that links it brings the second copy back; without it only the pram half is
+// built, which is the half the UEFI side reads back over USB.
+//
+#ifndef UKE_LOG_USERDATA
+#define UKE_LOG_USERDATA 0
+#endif
+
 #define UKE_UFS_RECORD_BYTES   (16 * 1024)
 #define UKE_UFS_RECORD_BLOCKS  (UKE_UFS_RECORD_BYTES / 4096)
 #define UKE_UFS_PAYLOAD_BYTES  (UKE_UFS_RECORD_BYTES - 32)
 #define UKE_UFS_INTERVAL_MS    2000
 
+#if UKE_LOG_USERDATA
 int native_ufs_log_open(uint64_t *firstLba, uint64_t *blocks, const char **why);
 int native_ufs_log_write(uint64_t rel, uint32_t blocks, const void *src);
 int native_ufs_log_sync(void);
+#endif
 
+#if UKE_LOG_USERDATA
 static uint32_t
 uke_crc32(const uint8_t *data, size_t length)
 {
@@ -261,7 +274,9 @@ static bool ukeUfsRefused;
 static uint64_t ukeUfsBlocks;
 static uint64_t ukeUfsSeq;
 static uint64_t ukeUfsCursor;
+#endif /* UKE_LOG_USERDATA */
 
+#if UKE_LOG_USERDATA
 // One record: the newest UKE_UFS_PAYLOAD_BYTES of the message buffer.
 static size_t
 uke_snapshot(uint8_t *out, size_t capacity)
@@ -342,6 +357,7 @@ uke_ufs_publish(void)
 	ukeUfsCursor = (ukeUfsCursor + UKE_UFS_RECORD_BLOCKS) % ukeUfsBlocks;
 	ukeUfsCursor -= ukeUfsCursor % UKE_UFS_RECORD_BLOCKS;
 }
+#endif /* UKE_LOG_USERDATA */
 
 /* Panic-time staging in the pram: [magic][length][text]. It is only a hand-off:
  * the next boot's writer copies the text into the userdata log window (disk). */
@@ -444,9 +460,12 @@ uke_last_log_writer(void *arg, wait_result_t result)
 		// seventeen minutes and discard the start of the boot, which is what
 		// this copy exists to keep. Two seconds stretches the ring to about an
 		// hour.
-		if ((tick++ % (UKE_UFS_INTERVAL_MS / UKE_LAST_LOG_INTERVAL_MS)) == 0) {
+#if UKE_LOG_USERDATA
+		if ((tick % (UKE_UFS_INTERVAL_MS / UKE_LAST_LOG_INTERVAL_MS)) == 0) {
 			uke_ufs_publish();
 		}
+#endif
+		tick++;
 		IOSleep(UKE_LAST_LOG_INTERVAL_MS);
 	}
 }
