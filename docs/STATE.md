@@ -595,3 +595,47 @@ QEMU 里同一个内核能跑，而且 QEMU 能**直接读 guest 内存**：
 - 若 `fastboot oem help` 有内存读能力 → 优先做"内核写固定地址 + fastboot 取回"。
 - 否则 USB 读日志需要先有 SoC 的 USB 驱动（UEFI 的 DWC3 host，或 XNU 的 DWC3），属于新项目；
   在此之前，**QEMU 是本地的日志通道**（已可用），设备上仍靠 panic 冻屏拍照。
+
+---
+
+## 18. USB 日志：厂商固件里有完整 USB 主栈（Round 10）
+
+### fastboot 路线关闭
+
+```
+fastboot oem help   → FAILED (remote: 'unknown command')
+```
+ABL **没有任何 OEM 命令**，所以"内存 dump 经 fastboot 取回"这条路不存在。
+
+`getvar all` 里值得记的事实：分区表完整（`boot_a/b`、`vendor_boot_a/b` 各 0x6000000、`userdata` f2fs、
+`super` 0x2A0000000、`logfs` 0x800000、`oops` 0x1000000、`rawdump` 0x12C00000），`kernel:uefi`、
+`is-userspace:no`、`max-download-size:805306368`（768 MiB）。
+
+### 但设备备份里有厂商 UEFI，而它带着 USB 驱动
+
+`work/tablet-backup-20261103/images/{uefi_a,imagefv_a}.img` 是 **ELF 包着 FV**（`_FVH` 在 0x1028，
+即 FV 起始 0x1000）。用 `uefi_firmware`（venv 在 `work/analysis/.venv-fw`）解析 `uefi_a.img`
+（968 个对象），发现：
+
+| 驱动 | 体积 | 作用 |
+|---|---|---|
+| **Dwc3** | 98,630 B | Qualcomm USB **主机控制器**驱动 |
+| **UsbConfig** | 53,322 / 90,258 / 28,726 B | USB 配置（角色切换、PHY） |
+| **FatDxe** | 61,456 B | FAT 文件系统驱动 |
+
+已抽出到 `work/analysis/ref/vendor-usb/`（含 `index.json`）。
+
+### 计划（下一轮）
+
+1. 把这 5 个 FFS 文件加进我们的 `uke.fdf`/`uke.dsc`（或用 VTF 方式追加到 FV）；
+2. 加 EDK2 通用的 `UsbBusDxe` + `UsbMassStorageDxe`（树里都有）+ `Fat` 的 library 依赖；
+3. 启动后看 UEFI 是否出现 `SimpleFileSystem` 句柄（DarwinBoot 里可以枚举并打印）；
+4. 若出现 → DarwinBoot 把日志写到 U 盘上的 `uke-log.txt`，**这台设备从此有了可回读的日志通道**；
+5. 若 Dwc3 依赖 QcomPkg 的协议/PCD 而我们的 FV 没有，就只加 `UsbBusDxe`+`UsbMassStorage`+`Fat`，
+   看是否能借厂商 Dwc3 的 `EFI_USB2_HC_PROTOCOL` 实现（它需要 `gQcomTokenSpaceGuid` 等，风险点在这里）。
+
+### 顺带：本地的"无拍照日志"已跑通一半
+
+`work/analysis/qemu-dump-log.sh`：QEMU 里 `pmemsave 0x48000000 0x20000000`（内核装在 pa 0x48004000）
+把 512 MB 内核数据拷出来再提取可打印串。实测 dump 已成功写出（536,870,912 字节），
+下一步只需在提取阶段按 XNU 的 msgbuf 布局切分（现在是无差别提取可打印 run）。
