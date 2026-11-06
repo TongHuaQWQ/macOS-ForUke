@@ -2891,3 +2891,52 @@ adb shell su -c 'dd if=/dev/mtd0 bs=1M count=1 2>/dev/null | strings | head -100
 
 顺带确认 `printk: console [ramoops-1] enabled` **不会**覆盖我们的记录：pstore 的 console
 只在 oops/panic 时才写（否则 `pstore.console=force`），正常开机不动这块。
+
+### 59c. pstore 在这台设备上本来就是死的；`mtd0` 是 oops 分区，不是那块 RAM
+
+两条都查实了：
+
+1. **`/dev/mtd0` 不是 ramoops**：`/proc/mtd` 写着
+   `mtd0: 01000000 00200000 "block2mtd: /dev/block/by-name/oops"` ——
+   它是 **oops 分区**（16 MiB，UFS 上）的 block2mtd 视图，读出来的是小米自己写的
+   `oops report start--- / ## REASON: Restart / LAST KMSG`，跟我们的 RAM 记录无关。
+2. **pstore 的 console 区在这套内核里根本不会出现在 `/sys/fs/pstore`**：
+   Linux `fs/pstore/ram.c` 的 `ramoops_get_next_prz()` 只对
+   `PSTORE_TYPE_DMESG` 调用 `persistent_ram_save_old()`：
+
+   ```c
+   /* Update old/shadowed buffer. */
+   if (prz->type == PSTORE_TYPE_DMESG)
+           persistent_ram_save_old(prz);
+   if (!persistent_ram_old_size(prz))
+           return NULL;
+   ```
+
+   而这块设备的 DT 只定义了 `console-size` 和 `pmsg-size`，**没有任何 dump/record 区**，
+   所以 `max_dump_cnt = 0`，console 区的 `old_size` 永远是 0 —— 不管我们写什么格式都不会出现。
+   （`pstore: Invalid compression size for deflate: 0` 只是压缩工作区在 init 时算不出来，
+   和我们的记录无关。）
+
+⇒ **pstore/ramoops 这条路在本机是死路**，别再花时间。要"不拍照"只剩两条：
+USB（内核侧 `uke_usb.c`，新内核已就绪）与 **面板分页**（本轮新增）。
+
+### 面板分页：把整份日志用拍照也能取全
+
+`UkeUsbLogDxe` 现在在原有的"首 12 行 + 末 24 行"之后进入分页：
+
+```
+--- boot log page N (vol-up next, vol-down continue) ---
+<22 行>
+```
+
+- **音量加** → 下一页（每页最多等 `PcdUkePageHoldSeconds=20` 秒，等待期间照常喂狗）；
+- **音量减** → 立即继续启动；
+- 不按键 → 20 秒后自动继续启动。
+
+于是"上一次 XNU 的整份内核日志（pram 里那 192 KiB 文本）"可以用多张照片取全，
+不需要 USB、也不需要 Android。
+
+```
+work/flash/boot-round-b81-paged.img       1122304 B  sha256 084cb2adc1ca0d9c0786c5e73cbfe4bca6b00b4981610bab7d83090ffa04a1a3
+work/flash/vendor_boot_round-b80-usbkernel.img  85782528 B  sha256 63d0cf66…（内核 e868737c，带 USB 探测线程）
+```
