@@ -151,10 +151,10 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="source"
 # UkeLastLog string at all), so the msgbuf -> pram path did not exist even though sheng-log=1
 # was in kernel_args.
 CONFIG_XNU_BOOT_LOG=y
-# The USB log console (drivers/QcomXnuUsbDebug): the six console/worker hooks compile with
-# -DXNU_QCOM_USB_DEBUG=1 and build/qcom-usb-debug/libQcomXnuUsbDebug.a is force-loaded. Runtime is
-# still opt-in through the qcom-usb-debug=1 boot argument.
-CONFIG_XNU_QCOM_USB_DEBUG=y
+# The USB log console (drivers/QcomXnuUsbDebug) stays off until its patch pair is ported to
+# xnu-12377.121.6; see the note in patches/xnu/series. Turning it on without that port fails the
+# patch step, and turning it on without build-qcom-usb-debug.py fails the link.
+CONFIG_XNU_QCOM_USB_DEBUG=n
 CONFIG_XNU_EXTRA_LD_ARCHIVES=""
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n
