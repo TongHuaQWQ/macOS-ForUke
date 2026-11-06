@@ -2391,3 +2391,33 @@ work/flash/boot-round-b71-beat.img   1556480 B  sha256 3b3188982db83ed322dbd3565
 
 顺带一个 FDF 坑：**只把 INF 写进 `APRIORI.inc` 不会把 FFS 放进 FV**（GUID 只出现在 APRIORI 文件里），
 必须同时在 `DXE.inc` 里列一次，否则 APRIORI 指向一个不存在的 FFS。
+
+---
+
+## 50. 内核侧其实已经连续红了三轮：`uke_usb.c` 根本没编过
+
+查 run 列表才发现：**最后一次成功的内核产物是 `066eb74`（16:06，b66）**。之后：
+
+| run | commit | 结果 | 原因 |
+|---|---|---|---|
+| 42257066165 | `3bed560` | failure | — |
+| 42259821603 | `538854f` | failure | — |
+| 42263483616 | `b1fecfe` | failure | 组件补丁版本不对（见 §48b） |
+| 42265823188 | `7245b1e` | failure | `uke_usb.c` 编译错误 |
+| 42269780292 | `33738cf` | 进行中 | 已修下面两处 |
+
+`42265823188` 的日志说得很清楚（archive-16-build-uke-usb.log）：
+
+```
+kits/uke/uke_usb.c:2009:2: error: call to undeclared function 'IOSleep'
+kits/uke/uke_usb.c:2030:6: error: call to undeclared function 'kernel_thread_start_priority'
+kits/uke/uke_usb.c:2030:57: error: use of undeclared identifier 'BASEPRI_KERNEL'
+```
+
+- `IOSleep` 在 `<IOKit/IOLib.h>`，而这个归档的编译行是**借用 `bsd_init.o` 的记录**，那行不带 IOKit 头
+  → 改成 80 次 `delay(100*1000)`（`<machine/machine_routines.h>` 本来就在 include 里）。
+- `kernel_thread_start_priority` + `BASEPRI_KERNEL`（`<kern/sched.h>`）在这棵树里不再公开
+  → 改用 `kernel_thread_start`（同一文件 1650 行早就在用）。
+
+也就是说 b68/b69 那两轮"探针没出来"，**不是设备上的结论，而是内核根本没编出来**。
+现在 b68 的 vendor_boot 用的仍是 b66 内核，所以 b70/b71 的固件轮次不受影响。
