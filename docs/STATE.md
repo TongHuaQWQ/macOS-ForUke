@@ -961,3 +961,47 @@ work/flash/boot-round-b54-pramlog.img         c76d3ff5…  (1,724,416 B，内含
 ```
 
 **要 boot 两次**：第一次让 XNU panic 把日志写进 pram，第二次 UEFI 就会把它搬进日志盘。
+
+---
+
+## 25. 真正的"推进受阻"根因：CI 的 prelink 一直是断的（Round 16）
+
+上一轮我以为是内核/固件问题在原地打转，其实**内核产物已经很多轮没有更新过**了。
+b47 之后的每一轮 payload 都还在用 `work/ci-artifacts/b47/kernel.macho`，原因是 CI 在
+pass 3 就挂：
+
+```
++ python3 .../tree/kits/NativePrelink/emit_prelink.py --kernel ...
+Python: can't open file '.../tree/kits/NativePrelink/emit_prelink.py': [Errno 2] No such file or directory
+```
+
+（run `42080292233`，commit `7efcc06`）
+
+### 原因
+
+- `feeds.toml` 里板级 kit 的名字是 **`XnuPrelink`**（`[[source]] name = "XnuPrelink", kind = "kit",
+  local = "kits/XnuPrelink"`），所以构建树里只会有 `kits/XnuPrelink`；
+- `components.toml` 的目录也是 `path = "kits/XnuPrelink"`（它只把 `NativePrelink` 放在
+  `runtime_identifiers` 里，那不是目录别名）；
+- 但 `board.toml [kernel.prelink] tool` 一直写着 `kits/NativePrelink/emit_prelink.py`。
+
+以前能用，是因为当时 `feeds.toml` 里还注册过一个 `NativePrelink` 的兼容 alias（后来因为
+"第二个 kit 条目会让树不再创建 kits/NativePrelink" 被删掉），删掉之后这条路径就没人创建了 ——
+于是 prelink 直接找不到工具，内核链接步骤整体失败。本地复现：`out/.../tree/kits/` 里只有
+`XnuPrelink`，没有 `NativePrelink`。
+
+### 修法
+
+1. `board.toml [kernel.prelink] tool = "kits/XnuPrelink/emit_prelink.py"`（改回 catalog 自己的路径）；
+2. 仓库里保留 `kits/NativePrelink -> XnuPrelink` 这个符号链接，给那些硬编码
+   `kits/NativePrelink` 的脚本（`audit-air-nir-ios.py`、`build-native-accelerator-abi.py`、
+   `build-native-legacy-display.py` 等）继续用。
+
+顺带：`scripts/build-boot-log.py` 也修了 —— 它按 `ROOT/'kits/uke'/name` 找 `UkeLastLog.c`，
+但直接跑脚本时 ROOT 是设备仓库（源在 `package/`），现在缺 `kits/uke/` 时回退到 `package/`。
+
+### 在跑/待观察
+
+- run `42211461355`（`8eaacfb`，开 msgbuf 写 pram）—— 会照旧在 prelink 挂掉，拿不到内核；
+- run `42211693015`（`36d40d0`，含 prelink 修复）—— **这个才是关键**，只要它绿，
+  `work/ci-artifacts/<run>/kernel.macho` 就会第一次带上 `UkeLastLog` 的 msgbuf 写盘。
