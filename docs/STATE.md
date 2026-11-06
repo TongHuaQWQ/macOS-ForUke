@@ -552,3 +552,46 @@ anchor 无解。
 2. 把已确认的两条（`vnode_hold`、`ml_set_interrupts_enabled_with_debug`）先写成 `reviewed` anchor，
    验证工具链能接受；
 3. 对"我们没编"的那一堆（`rorgn_contains` 等）按调用量排序，逐个决定"补实现"还是"开配置"。
+
+---
+
+## 17. "USB 读日志"的可行性：硬件层没有驱动（Round 9）
+
+用户把当前目标改成"先让日志能通过 USB 读回来"。核查结论：
+
+| 环节 | 现状 |
+|---|---|
+| **UEFI（我们控制）** | FV 里**没有任何 USB 主机驱动**。`uke.dsc`/`uke.fdf` 的 `[Components]` 里没有 UsbBus/UsbMassStorage/Fat；树里也没有 Qualcomm 的 `Dwc3`/`UsbConfig`/`Xhci` 驱动，更没有 `QcomPkg`。EDK2 的通用 USB 栈必须有 SoC 的 HC 驱动才能跑。 |
+| **XNU（我们移植的）** | 没有 USB 组件。AppleUSB 栈不支持 Qualcomm DWC3。 |
+| **ABL（bootloader）** | 只有 fastboot 协议：能写、能 boot，标准命令**不能读内存**。 |
+
+也就是说：**当前固件与内核都无法跟这个 USB 口通信**，唯一能通的是 bootloader 的 fastboot。
+
+### 但有一条便宜的实测路径（值得先试）
+
+Qualcomm ABL 常带 vendor 命令，**如果支持内存 dump，就是真正的 USB 读日志**。请在设备处于 fastboot 时跑：
+
+```
+fastboot oem help
+fastboot getvar all
+```
+
+把输出发我。若出现 `dump`/`readmem`/`oem read` 之类，我们就能：内核把控制台环形缓冲写到固定物理地址 →
+panic 后 `fastboot oem dump <addr> <len>` 取回。这条路成本最低、收益最大。
+
+### 同时：本地的"无拍照全量日志"其实已经可用
+
+QEMU 里同一个内核能跑，而且 QEMU 能**直接读 guest 内存**：
+
+```
+(qemu) pmemsave <addr> <size> file.bin        # 例如把 XNU 的 msgbuf/控制台环拷出来
+(qemu) screendump …                          # panic 文本（已在用，读到了 non-sensical crypto hash method）
+```
+
+所以"内核日志不靠拍照"这件事，**在本地已经成立**；缺的是把它变成常规流程（下一轮做成脚本）。
+
+### 结论
+
+- 若 `fastboot oem help` 有内存读能力 → 优先做"内核写固定地址 + fastboot 取回"。
+- 否则 USB 读日志需要先有 SoC 的 USB 驱动（UEFI 的 DWC3 host，或 XNU 的 DWC3），属于新项目；
+  在此之前，**QEMU 是本地的日志通道**（已可用），设备上仍靠 panic 冻屏拍照。

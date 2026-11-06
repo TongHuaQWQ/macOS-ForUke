@@ -75,9 +75,6 @@ name = "XnuPrelink"
 kind = "kit"
 local = "kits/XnuPrelink"
 
-# The catalog records kits/XnuPrelink as legacy_name = "NativePrelink", and board.toml's prelink tool
-# path uses that alias, so both names have to resolve to the copy.
-[[source]]
-name = "NativePrelink"
-kind = "kit"
-local = "kits/XnuPrelink"
+# The legacy alias is NOT registered here on purpose: a second kit entry made the tree stop creating
+# kits/NativePrelink, and the prelink tool path resolved to a file that did not exist. board.toml now
+# names the canonical path instead.
