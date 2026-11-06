@@ -1754,3 +1754,75 @@ b61 的实拍已经证明：fileset 之后的下一个拦路虎是平台错误�
    只能自己提供实现（weak 定义最省事）；
 2. `kernel.json` 的 `loadable`/`mapping_complete`/`missing_address_space` 是写死的字面量，
    别拿它们当证据（§35）。
+
+---
+
+## 41. USB 日志：照同类项目做（Round 27，用户指出的方向）
+
+用户的判断是对的：**面板打印本身不可靠**（会滚屏、会被覆盖），而且**同类 UniXNU 移植早就解决了
+这个问题**。查 UniXNU 文档里的设备记录：
+
+```
+sirius / sirius-huajifruit / sirius-yooglery:
+  "The panel and the serial console are the two evidence channels; since the DWC3 CDC console
+   works, the host captures the kernel log directly and photographs are only a fallback."
+  证据: 3813 bytes of kernel log read from /dev/ttyACM0 over the DWC3 CDC console
+```
+
+也就是说：**内核里做一个 DWC3 设备模式的 CDC-ACM 串口**，主机上就是一个 `/dev/ttyACM0`，
+内核日志直接流到主机 —— 不经过 UEFI、不需要厂商 UEFI 栈（正是我们卡住的地方）。
+
+### 它们的做法（sirius `board.toml`）
+
+```
+archives: "build-sirius-usb.py"      # 编译 kits/sirius/sirius_usb.c（65 KB）
+kernel_args: "sirius_usb=2"          # 1 = 只探测，2 = 开控制台
+patches/xnu/sirius-usb-console.patch # _cnputc / console_printbuf_putc 各插一行日志镜像
+patches/xnu/sirius-console-ring.patch# bsd_init 里启动 console
+```
+
+### 我们已经移植过来的部分（提交 `95af5c8`）
+
+`package/uke_usb.c` = sirius_usb.c + 本板自己的数字。**每个数字都对着
+`device/dt/live-runtime.dtb` 核过**，不是照抄：
+
+| 事实 | 本板 DT | 与 sirius(SM7250) 的差异 |
+|---|---|---|
+| DWC3 基址 | `ssusb@a600000 reg <0x0a600000 0x100000>` | 相同 |
+| GCC | `clock-controller@100000 reg <0x100000 0x1f4200>` | size 更大（0x1f4200） |
+| USB30 PRIM GDSC | `qcom,gdsc@139004` | **不同**（sirius 用 0xf004） |
+| APPS SMMU | `apps-smmu@15000000` | 相同 |
+| USB stream id | `iommus = <apps_smmu 0x40 0>` | **不同**（sirius 用 0x740） |
+| PHY | `qcom,use-eusb2-phy` | 相同结论（走 UTMI PIPE 时钟） |
+
+一处**刻意的不同**：`pur_ring` 不再由控制台补丁喂，而是**直接读内核 msgbuf**
+（`uke_usb_ring_from_msgbuf()`，逻辑与 `UkeLastLog` 相同）。这样：
+
+- 不需要任何 XNU 补丁（省掉 patch 应用失败的风险）；
+- `printf`/`kprintf` 写的东西全都在里面，panic 也在；
+- `bsd_init` 之后仍然继续喂 —— 这正是 sirius 第二个补丁要解决的问题。
+
+`board.toml` 里加了 archive `"build-uke-usb.py"`（对象并入 `libUkeLastLog.a`，
+因为本板 `CONFIG_XNU_SHENG_PMGR` 是关的，借不到 sirius 那个归档）和内核参数 **`uke_usb=1`**：
+**本轮只探测**，打印 GCC 电源域状态与 DWC3 的 `GSNPSID`/`DSTS` —— 这回答了"XNU 到底能不能
+看到这个控制器"，是后续 CDC-ACM 的前提。
+
+### 顺带：用户这批实拍的第一张"内核自己的输出"
+
+同一轮的照片里，**ArmCpu 的 GIC 探针真的在跑**（不是 UEFI，是内核里 kext 的代码）：
+
+```
+gic-probe: MPIDR_EL1 0x81000000  this core affinity 0x0
+gic-probe: gicr +0x00000 typer 0000000000000001 aff 0x0 vlpi 0 last 0 waker 00000002 asleep 0 psleep 1 <=
+gic-probe: … redistributor 网格 0x40000 步长，slot 0x0（0xfff = absent）
+gic-probe: GICD_CTLR after the hold 0x00000002 (Grp1 1 ARE 1 DS 1 RWP 0)
+```
+
+`waker=0x2 / psleep=1` 说明**本核的 redistributor 仍处于 ProcessorSleep**，
+`GICD_CTLR=0x2` 说明 Group1 已开、ARE=1。这是"ArmCpu 起来了、GIC 被摸到"的实拍证据。
+
+### 这一轮修掉的 CI 错误
+
+`ArmDTPlatformIO` 调 `uke_stage_last_panic`（weak）时，参考内核（RELEASE）里没有该符号，
+直接 `b` 到 0 → `branch out of range`（run `42235545609`）。改成**先取地址再判空**的间接调用
+（`void (*volatile stage)(const char *) = …`），提交 `ecf90ad`。
