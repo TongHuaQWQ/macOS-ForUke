@@ -144,6 +144,13 @@ CONFIG_XNU_NATIVE_PAN=y
 # __TEXT_EXEC,__text, and `prelinked` leaves no such section to reseal. The same switch is what the
 # iOS 26/27 boards set (UniXNU-sheng: CONFIG_XNU_CRYPTO_BOOTSTRAP="source").
 CONFIG_XNU_CRYPTO_BOOTSTRAP="source"
+# CONFIG_XNU_BOOT_LOG links build/uke-last-log/libUkeLastLog.a with -force_load, which is
+# what makes the pram writer exist in the kernel at all: build-boot-log.py only *builds* the
+# archive, and build-xnu-4k-baseline.sh adds it to LD_KERNEL_ARCHIVES on BOOT_LOG=1 or
+# WATCHDOG_POLICY=1. Without this switch the archive was never linked (b56/b58 carry no
+# UkeLastLog string at all), so the msgbuf -> pram path did not exist even though sheng-log=1
+# was in kernel_args.
+CONFIG_XNU_BOOT_LOG=y
 CONFIG_XNU_EXTRA_LD_ARCHIVES=""
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n
