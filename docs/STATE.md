@@ -2754,3 +2754,66 @@ UKE-GCC: gdsc_powered=? reset_deasserted=? usb_clocks_running=?/3
 
 `usb_clocks_running=3/3` + `gdsc_powered=1` ⇒ 时钟/电源已经是好的，内核只需拿下 DWC3；
 否则就说明我们得自己写那五个 CBCR 和 GDSC。
+
+---
+
+## 58. 老实回答："现在能用 USB 看日志了吗？" —— 还不行，但可以**用 root adb 看**
+
+USB 那条路目前是堵死的，原因就是 §57 那张表：USB 日志盘靠的是厂商 `UsbMsdDxe` +
+`UsbfnDwc3Dxe`，而这两个要的时钟/电源/PMIC 链路（`ClockDxe`/`SPMI`/`PmicDxe`/IPC）在这块板子上
+要么把启动卡死、要么触发外部中止。**所以 b78/b79 这两个镜像根本不会把日志盘挂到 USB 上**
+（`UkeUsbLogDxe` 在 `Uke-LOG: usb-msd not found` 之后就返回了）。
+
+但"不用拍照就能拿到日志"这件事现在有了一条**真实可用的路**：**Android 的 ramoops**。
+
+Android 自己的设备树写着：
+
+```
+ramoops_mem: ramoops_region {
+    reg = <0x00 0xa7000000 0x00 0x400000>;   /* 4 MiB */
+    console-size = <0x200000>;               /* 前 2 MiB 是 console 区 */
+    pmsg-size = <0x200000>;
+};
+```
+
+而我们的 FD 在 `0xA7100000`（5 MiB，到 0xA7600000），所以这块 console 区的**前 1 MiB
+（0xA7000000-0xA7100000）是空的、且复位不清**。pstore 在下次启动时会读取"上一次启动的 console 区"。
+
+于是 `UkeUsbLogDxe` 在 ReadyToBoot 末尾多了一步 `UkeRamoopsPublish()`：把 `mLog` 里的整份日志
+（**含上一次 XNU 的 pram 回显**）按 Linux `persistent_ram_buffer` 的格式写进去：
+
+```
+struct { u32 sig = 0x43474244 ("DBRG"); u32 start = 0; u32 size; u8 data[size]; }
+```
+
+写完 `WriteBackDataCacheRange()` 落盘，然后才交给 payload。**这套格式和内核侧
+`UkeLastLog.c` 写 ramoops 用的是同一个**（`UKE_RAMOOPS_MAGIC 0x43474244`）。
+
+### 用法（这就是"不用拍照取日志"）
+
+```
+fastboot boot work/flash/boot-round-b79-pstore.img
+# 让它跑完（黑屏/卡住都没关系），然后电源键长按重启进 Android
+
+adb shell su -c 'ls -l /sys/fs/pstore/'
+adb shell su -c 'cat /sys/fs/pstore/dmesg-ramoops-0'      # 名字可能是 console-ramoops-0
+```
+
+里面应该有：固件这一轮的全部 `Log()` 行（含 `UKE-GCC:`、`UKE-QUD:`、`--- pram … ---`）
+**加上** 上一次 XNU 的内核日志正文。这样内核侧的 `UKE USB:` 行也能通过 adb 取回，
+不必再靠拍照。
+
+```
+work/flash/boot-round-b79-pstore.img   1122304 B
+sha256 ca92dede043fd900a934fe57d52cc21caead3e3f78ab185a82249831056c1d7e
+  FD sha256 b2a4980cd293a414…（0 个厂商模块；新增 UkeRamoopsPublish + 两个 PCD）
+```
+
+风险与备选：若 pstore 里看不到文件名（不同 Android 内核注册的名字不同），退一步
+`adb shell su -c 'cat /proc/pstore* /sys/fs/pstore/* 2>/dev/null | head -50'`，
+或者直接把这块区域当普通内存读（本机 root 可用 `dd if=/dev/mem` 会被 STRICT_DEVMEM 拦，
+所以优先用 pstore）。
+
+USB 那一侧并没有被放弃：等内核产物出来（run `42269780292` 已到第 17 步链接），
+用 `uke_usb.c` 在 XNU 里自己冷启 DWC3 是当前唯一不被厂商链路卡住的路径，
+而它的日志现在可以通过上面这条 adb/pstore 通道取回。
