@@ -46,7 +46,11 @@ sources = [
 report = {}
 objects = []
 for name, record, obj_name in sources:
+    # The kit appears as kits/uke inside the build tree, but the archive scripts run
+    # with the device checkout as ROOT, where those sources are in package/.
     source = ROOT / 'kits/uke' / name
+    if not source.is_file():
+        source = ROOT / 'package' / name
     obj = OUT / obj_name
     source_sha, object_sha = compile_source(source, record, obj)
     report[name] = {'source_sha256': source_sha, 'object_sha256': object_sha}
