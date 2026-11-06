@@ -1683,3 +1683,32 @@ bool PE_handle_platform_error(vm_offset_t far) {
 - 默认**返回 true（已处理）**让被打断的代码继续跑 —— 一个本移植还没有驱动的模块发的 SError
   不值得停住整个启动；
 - `uke-platform-error-panic=1` 可恢复"交给机器层 panic"的旧行为。
+
+### §39 补充：把 SError 的现场留住（提交 `1883928`）
+
+`handlePlatformError()` 里那行 `IOLog` 会被后面 `-v` 的输出冲掉，而面板不能回滚。所以同一行文本
+另外**写进 pram 的 panic 记录**：
+
+```cpp
+extern "C" void uke_stage_last_panic (const char *text) __attribute__((weak));
+...
+snprintf (text, sizeof (text), "ArmDTPlatformIO: platform error #%lu far=0x%llx pc=0x%llx", …);
+IOLog ("%s%s\n", text, strict ? " (panicking as asked)" : " (ignored)");
+if (uke_stage_last_panic != nullptr) { uke_stage_last_panic (text); }
+```
+
+- `uke-stage-last-panic.patch` 提供的 `uke_stage_last_panic()` 正是"把文本写进 pram"的入口，
+  下一次启动 XNU 自己会打印它，`UkeUsbLogDxe` 也会把 pram 尾部回显到面板；
+- 声明用 **weak**，所以没有那个 patch 的配置照样能链接（只是这行只留在当次日志里）。
+
+于是下一轮无论 SError 是"被忽略后继续"还是"再次 panic"，`far=` 和 `pc=` 都会留下痕迹：
+继续跑 → 下一次启动的面板回显能看到；panic → 屏幕上直接就有。
+
+### 另外两个不需要 CI 的诊断手段（下轮可用）
+
+1. `ArmDTPlatform` 内置**阶段探针**：`sheng-platform-stage=1..5` 会在
+   `configure()` 的各个阶段做 PSCI 复位。设备在 stage N 复位 ⇒ 说明平台配置走到了 N，
+   不用日志也能定位；
+2. `ArmCpu` 的 `ArmCpu: <N> timer interrupts, <M> IPIs in the first 10 ms after registration`
+   这一行现在默认就会打（`armcpu-probe=0` 不再冻屏），是"架构定时器有没有进
+   `rtclock_intr`"的直接判据。
