@@ -163,6 +163,9 @@ archives = [
   # photograph. The other two are inert here (XNU_WATCHDOG_POLICY and CONFIG_XNU_BOOT_PROGRESS are
   # off) but they are what the device series calls into, so keep them compiling.
   "build-boot-log.py",
+  # The CDC-ACM log console over DWC3 (package/uke_usb.c, ported from the sirius port). Its object
+  # joins libUkeLastLog.a, so this must come after build-boot-log.py.
+  "build-uke-usb.py",
   # The comparison kernel the fileset prelink reads, last, as upstream's 26/27 archives do:
   #   "The 27 kernel archives end with build-fileset-release-reference.py --tree ., the comparison
   #    kernel the prelink step reads." (docs/devices/sheng.md)
@@ -431,6 +434,7 @@ kernel_args = [
   "sheng-data-persist=2",
   # "sheng-staged-apps=1",   (see the note above: dropped for the 1000-byte command-line cap)
   "sheng-log=1",
+  "uke_usb=1",
   "sheng-pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",
