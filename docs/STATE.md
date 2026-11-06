@@ -1295,3 +1295,64 @@ work/flash/vendor_boot_round-b57-pramlog.img  f9f9cffe…  (85,782,528 B；b56 �
 work/flash/boot-round-b57-usbonly.img         b4e0bcf3…  (1,667,072 B) 先试：USB 日志通道，无 UFS 探测
 work/flash/boot-round-b57-storage.img         83ec23f9…  (1,724,416 B) 再试：加 UFS LU
 ```
+
+---
+
+## 31. anchor 生效了：stub 调用点 964 → 363（Round 21，emit 报告为证）
+
+比较两个内核的 emit 报告（同一 matcher、同一 kernelcache，只差 fixture 里的 anchor 数）：
+
+| 内核 | anchor 数 | `stubbed` 对数 | stub 调用点 |
+|---|---|---|---|
+| b56（run `42211693015`） | 62 | 177 | **964** |
+| b58（run `42212761913`，`a907ef7`） | 182 | 31 | **363** |
+
+分 kext 看（stub 调用点，b56 → b58）：
+
+```
+apfs                    182 ->  31      AppleMobileFileIntegrity  147 ->  68
+ApplePMGR               144 -> 138      IOGPUFamily               110 ->  19
+AppleARMPlatform         68 ->  37      sandbox                    57 ->  24
+IODARTFamily             44 ->   0      AppleARMWatchdogTimer      40 ->  21
+IOPCIFamily              37 ->   9      IOSurface                  36 ->   7
+IOHIDFamily              36 ->   2      IOAVFamily                 19 ->   0
+IOGraphicsFamily         14 ->   0      IOMobileGraphicsFamily      8 ->   0
+```
+
+**ApplePMGR 几乎没动（144→138）**，剩下的 363 个调用点主要集中在它身上 —— 它正是我们启动链
+要过的 kext，所以下一批 anchor 优先级就按这个排。
+
+### 第二批：剩下 16 个函数，全部可 anchor（提交 `139c704`）
+
+`gen-fileset-anchors.py --report work/ci-artifacts/b58/kernel.json` 报"16 anchors from 363
+stubbed calls, 0 skipped"：
+
+```
+_ml_at_interrupt_context   _ml_set_interrupts_enabled   _sched_perfcontrol_ml_set_interrupts_without_measurement
+_task_suspend2   _task_resume2   _task_deallocate   _task_update_physical_writes
+_proc_is_rsr   _proc_is_translated   _proc_use_alternative_symlink_ea
+IOMemoryDescriptor::getDMAMapLength   IOMemoryDescriptor::setPurgeable
+IOMallocZeroDataShareable(_external)   IOMallocDataShareable(_external)   _vnode_hold
+```
+
+其中 5 个上一批被丢掉，原因是 **Apple 会在同一地址导出多个名字**（`_task_deallocate_external`
+和 `_task_deallocate` 之类），原来的"地址上只能有一个符号"过滤把它们排除了；现在取排序后的第一个
+别名。fixture 182 → **197** 条，全部通过 extent + sha256 自检，kit 测试 26 passed。
+
+### 顺手改正一条错的 anchor
+
+`0xfffffe000b9fcb70` 之前按形状证据标成 `_vnode_hold`，但 kernelcache 的 `LC_SYMTAB` 在这个地址上
+写的是 **`_vnode_getparent`**；而 b58 的 emit 报告显示真正的 `_vnode_hold` 在
+`0xfffffe000ba18610` 仍然处于 stub 状态。已把前者改名、并为后者单独加了一条 anchor。
+（这正是 §28 里记下的那个"待查"项，现在有结论了。）
+
+### b59 镜像（1 MiB 栈固件 + b58 内核）
+
+```
+work/flash/vendor_boot_round-b59-anchors.img  040bf127…  (85,782,528 B；含 b58 内核)
+work/flash/boot-round-b59-usbonly.img         b4e0bcf3…  (1,667,072 B；USB 日志通道，无 UFS)
+work/flash/boot-round-b59-storage.img         83ec23f9…  (1,724,416 B；加 UFS LU)
+```
+
+`139c704` 已推送，下一个内核（197 anchors）大概率把 stub 调用点压到接近 0 —— 那才是
+"越过 fileset 未匹配调用 panic"这一步的终点。
