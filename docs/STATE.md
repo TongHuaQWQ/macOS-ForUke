@@ -2464,3 +2464,36 @@ kits/uke/uke_usb.c:2030:57: error: use of undeclared identifier 'BASEPRI_KERNEL'
 work/flash/boot-round-b72-noipc.img   1536000 B  sha256 5d0d91e95d25ebded32a4f17af08b2dcf5409465b7836671c87c4dfdac0432a5
   FD sha256 23ae3ebca41ed67d…（55 images verified）
 ```
+
+---
+
+## 52. b72 卡住的是我自己的 ASSERT，不是硬件
+
+面板最后一行：
+
+```
+ASSERT [UkeProgressDxe] UefiLibPrint.c(201): Console != ((void *) 0)
+```
+
+`UkeProgressDxe` 在 APRIORI 里排在 `ArmTimerDxe` 之后，那时 **`gST->ConOut` 还不存在**
+（控制台是后面的 GraphicsConsole/ConSplitter 发布的），而 `AsciiPrint` 走的 `UefiLibPrint`
+第一件事就是 `ASSERT(Console != NULL)`，DEBUG 构建下直接 `CpuDeadLoop` → "卡住"。
+
+**结论：APRIORI 早期不能打印面板文本。** 但 dispatcher 自己的 `Loading driver at …` 行是有的，
+说明它走的是 **DebugLib**（`DEBUG((DEBUG_INFO,…))`）而不是 ConOut —— 所以心跳改成 DEBUG 输出，
+与 dispatcher 同一条路。
+
+顺带纠正我上一轮的判断：b71 里 `UKE-BEAT` 一次没出现，**不能**直接推出"中断没投递"——那一版
+`OutputString` 前有 `gST->ConOut != NULL` 的检查，所以它只是静默地什么都没打印。计时器到底通不通，
+b73 里由 `UKE-BEAT timer probe: N callbacks in 2 s` 直接量出来（arm 100 ms 周期事件 + 原地
+`Stall(2 s)`）。
+
+### b73
+
+```
+work/flash/boot-round-b73-beat2.img   1536000 B  sha256 48988d4429dafdf331d263318a700278a53d66aff9363e56618b628964f88b7b
+  FD sha256 771f77e0cfdca479…（模块里 3 条 "UKE-BEAT" 字符串，且不再引用 UefiLibPrint）
+```
+
+同时把 IPC 三件套移出 APRIORI/DXE（见 §51），所以这次应该越过 `Smp2pDxe` 那一格，往
+`CmdDbDxe → PwrUtilsDxe → NpaDxe → RpmhDxe → ClockDxe → … → PmicDxe → Usb*` 走。
