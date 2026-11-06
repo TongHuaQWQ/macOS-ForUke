@@ -1706,7 +1706,7 @@ uke_usb_console_start(void)
 			uke_usb_park(hold);
 			return;
 		}
-		uint32_t id = dwc_rd(GSNPSID);
+		uint32_t id = dwc_rd(0xc120);   /* GSNPSID */
 		uke_usb_dwc = id;
 		uke_usb_dsts = dwc_rd(DSTS);
 		uke_usb_clk = dwc_rd(GCTL);
