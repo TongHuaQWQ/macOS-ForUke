@@ -516,34 +516,37 @@ bool ArmCpu::start (IOService *provider)
   // the architectural counter with interrupts open and report how many PPI 27 interrupts the handler saw.
   // The counter is the timebase the timer itself uses, so this needs nothing the kernel has not already set
   // up, and zero after 10 ms places the failure in the interrupt path rather than in whoever waits on a
-  // deadline. If the timer does fire, the count is the proof; if it does not, dumpIrqState names the stage.
+  // deadline.
+  //
+  // One line, always: with the log retrieval channel (pram -> UKE-LOG disk over USB) this is machine
+  // readable, so it does not need the panel.
   {
     uint64_t start, now;
     __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (start));
     do { __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now)); } while ((now - start) < 200000U);
     kprintf ("ArmCpu: %llu timer interrupts, %llu IPIs in the first 10 ms after registration\n",
         (unsigned long long) armcpu_timer_interrupts, (unsigned long long) armcpu_ipi_interrupts);
-    dumpIrqState ("after 10 ms");
     //
-    // Everything above is printed in one burst while the kernel is still starting, and the kext banners
-    // that follow (AppleImage4's is the longest) scroll it off a screen that cannot be scrolled back.
-    // Holding here keeps the diagnostics still for long enough to photograph them, and the second
-    // snapshot says whether anything moved during the wait: a timer that starts late shows up as a
-    // non-zero count fifteen seconds later.
-    kprintf ("ArmCpu: holding 15 s so these lines can be photographed\n");
-    {
-      uint64_t start2, now2;
-      __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (start2));
-      do { __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now2)); } while ((now2 - start2) < 288000000ULL);
+    // armcpu-probe=1 restores the old photograph-first behaviour: dump the whole state, hold 15 s so it can
+    // be photographed, and panic so nothing else scrolls it away. That is only useful while the log cannot
+    // be retrieved -- it deliberately never reaches registerService(), so it stops the boot by design.
+    int probe = 0;
+    PE_parse_boot_argn ("armcpu-probe", &probe, sizeof (probe));
+    if (probe == 1) {
+      dumpIrqState ("after 10 ms");
+      kprintf ("ArmCpu: holding 15 s so these lines can be photographed\n");
+      {
+        uint64_t start2, now2;
+        __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (start2));
+        do { __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now2)); } while ((now2 - start2) < 288000000ULL);
+      }
+      kprintf ("ArmCpu: after the hold %llu timer interrupts\n", (unsigned long long) armcpu_timer_interrupts);
+      dumpIrqState ("after 15 s");
+      kprintf ("ArmCpu: panicking on purpose so these lines stay on the panel (uke diagnostics)\n");
+      panic ("ArmCpu: uke interrupt-path diagnostics -- read the lines above");
+    } else {
+      kprintf ("ArmCpu: armcpu-probe=0, continuing to registerService\n");
     }
-    kprintf ("ArmCpu: after the hold %llu timer interrupts\n", (unsigned long long) armcpu_timer_interrupts);
-    dumpIrqState ("after 15 s");
-    //
-    // The panel holds about fourteen lines and AppleImage4 prints more than that, so every line above is
-    // scrolled off before anybody can read it -- that is why four rounds of probes looked like "the driver
-    // never ran". A panic freezes the screen instead: no later output, so the diagnostics stay legible.
-    kprintf ("ArmCpu: panicking on purpose so these lines stay on the panel (uke diagnostics)\n");
-    panic ("ArmCpu: uke interrupt-path diagnostics -- read the lines above");
   }
   registerService ();
   __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);
