@@ -40,9 +40,9 @@ def compile_source(source, record_name, obj):
 
 sources = [
     ('UkeLastLog.c', STARTUP_RECORD, 'UkeLastLog.o'),
-    # Keeps csr_check (and anything else added there) out of LTO's inlining and
-    # dead-strip, so the prelinked fileset finds the symbol it calls by name.
-    ('KeepOutOfLine.c', STARTUP_RECORD, 'KeepOutOfLine.o'),
+    # Kernel entry points this configuration does not build but the prelinked
+    # fileset calls by name (csr_check and friends).
+    ('MissingKernelSymbols.c', STARTUP_RECORD, 'MissingKernelSymbols.o'),
     ('BootWatchdogPolicy.c', KERN_EXEC_RECORD, 'BootWatchdogPolicy.o'),
     ('CrashLogProbe.c', KERN_EXEC_RECORD, 'CrashLogProbe.o'),
 ]
