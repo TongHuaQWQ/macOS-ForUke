@@ -1356,3 +1356,28 @@ work/flash/boot-round-b59-storage.img         83ec23f9…  (1,724,416 B；加 UF
 
 `139c704` 已推送，下一个内核（197 anchors）大概率把 stub 调用点压到接近 0 —— 那才是
 "越过 fileset 未匹配调用 panic"这一步的终点。
+
+---
+
+## 32. 为"取不到日志"准备两条后路（Round 22）
+
+### 1. ArmCpu 不再故意 panic（提交 `295c481`）
+
+诊断块原本是"只有面板"时代写的：10 ms 计数 → dumpIrqState → 停 15 秒等拍照 → 故意 panic 冻屏。
+它**永远走不到 `registerService()`**，也就是设计上就卡住启动链。现在日志能取，改成：
+
+- 仍然做 10 ms 测量，并打一行
+  `ArmCpu: <N> timer interrupts, <M> IPIs in the first 10 ms after registration`（这行现在是机读的）；
+- 停 15 秒 + dumpIrqState + panic 移到 **`armcpu-probe=1`** 后面；
+- 默认打印 `ArmCpu: armcpu-probe=0, continuing to registerService` 然后继续。
+
+也就是说下一个内核会**真的走过 ArmCpu**，进入 IOKit 匹配之后的阶段。
+
+### 2. 即使 USB 不通，也能从照片读到内核日志尾部
+
+`UkeUsbLogDxe` 的 `DumpPreviousBootLog()` 现在除了把 pram 文本塞进 1 MiB 日志盘，还会**保留最后
+34 行并打到面板上**（`--- previous boot log, last N lines ---`）。40 秒窗口期间屏幕是静止的，
+而这块屏幕的照片能看清 55 行（b56 那个异常 dump 的照片就是证据），所以即使主机完全看不到 U 盘，
+**上一次内核日志的尾部仍然能拍下来**。
+
+两条后路互相独立：USB 通了拿全量 192 KiB；USB 不通拿尾部 34 行 × 照片。
