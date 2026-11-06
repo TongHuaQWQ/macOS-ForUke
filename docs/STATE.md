@@ -668,3 +668,36 @@ ABL **没有任何 OEM 命令**，所以"内存 dump 经 fastboot 取回"这条�
 
 USB 日志这条路是**可行的但需要一轮工程**（FV 解析 + DEPEX 判定 + 集成）。在它打通之前，
 `work/analysis/qemu-dump-log.sh`（QEMU + `pmemsave`）是本地的日志通道，实测 dump 已成功。
+
+---
+
+## 20. 厂商驱动已抽成 PE32（含 UFS 驱动）— Round 12
+
+用 `uefi-firmware-parser`（venv `work/analysis/.venv-fw`）先把 `uefi_a.img` 的 ELF 外壳剥掉
+（`_FVH - 0x28` 起 5,238,784 字节 → `work/analysis/ref/vendor-usb/uefi-fv.bin`），
+再 `-e -O` 递归导出（98 个 `.pe`），按内容筛出：
+
+| 驱动 | 体积 | 用途 |
+|---|---|---|
+| **`pe-Dwc3-98304.efi`** | 98,304 B | Qualcomm USB **主机控制器**驱动 |
+| `pe-UsbConfig-{28672,53248,90112}.efi` | 28/52/88 KB | USB 配置（角色/PHY） |
+| `pe-Fat-{57344,61440,131072}.efi` | 56/60/128 KB | FAT 文件系统 |
+| **`pe-Ufs-147456.efi`** | 147,456 B | **UFS 存储驱动**（意外收获） |
+
+`work/analysis/.venv-fw/bin/uefi-firmware-parser` 是可复现的抽取工具；导出目录是
+`work/analysis/ref/vendor-usb/uefi-fv.bin_output/`（保留完整 volume/file/section 层级）。
+
+### 为什么 UFS 驱动是意外收获
+
+如果厂商的 UFS DXE 能在我们的 FV 里 dispatch，那 **UEFI 阶段就能读分区**，于是：
+- 内核把日志写到某个分区（仍需内核侧存储驱动）**或**
+- 至少 UEFI 能读 `oops` / `logfs` / `rawdump` 这些已有日志分区（0x1000000 / 0x800000 / 0x12C00000）
+
+### 下一步（Round 13）
+
+1. 解出 `Dwc3` / `Ufs` / `Fat` 三个驱动的 **DEPEX**（导出目录里对应的 `section*.raw`），
+   列出它们要的协议 GUID —— 这是"能不能在我们 FV 里 dispatch"的判据；
+2. 用 EDK2 的 binary INF 流程把它们纳入 `uke.dsc`/`uke.fdf`
+   （`[Binaries] PE32|pe-Dwc3.efi|DEBUG` + 对应 `[Depex]`），FV 里再加通用 `UsbBusDxe`/`UsbMassStorageDxe`；
+3. DarwinBoot 枚举 `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` / `EFI_BLOCK_IO_PROTOCOL`，
+   打印句柄数量作为"U 盘 / 分区可见"的判据（不写文件也能验收）。
