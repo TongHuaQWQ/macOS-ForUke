@@ -1249,3 +1249,49 @@ work/flash/boot-round-b56-storage.img          c76d3ff5…  (1,724,416 B) 再试
 `boot-round-b56-storage.img` 的 sha 与 b54 的 `boot.img` 完全相同（`c76d3ff5…`）——
 同一 FV + 同一 BootShim + 同一 DTB 得到同一字节，说明这条固件打包链路是确定性的，
 以后可以用 sha 直接判断"固件没变，只换了内核"。
+
+---
+
+## 30. b56 实机：固件在派发厂商驱动时栈溢出（Round 20，有实拍）
+
+### 实拍内容（用户 2026-11-06 20:22，b56 那套镜像）
+
+```
+SSR : EC 0x25  IL 0x1  ISS 0x00000047      ← Data abort（写）、translation fault, third level
+SP  0x00000000A7600F20   ELR 0x00000000C2352524   FAR 0x00000000A7600F30
+Data abort: Translation fault, third level
+Stack dump:
+Recursive exception occurred while dumping the CPU state
+```
+
+三个地址一对上就清楚了：
+
+| 值 | 含义 |
+|---|---|
+| `ELR = 0xC2352524` | 落在 **DXE Heap**（`0xA80C0000..0xC3A00000` 附近）→ 出事的代码是一个从 FV 装进堆里的**厂商 DXE 驱动** |
+| `SP = 0xA7600F20` | 栈区是 `0xA760D000 + 0x40000`，SP 从顶部 `0xA764D000` 往下长；这个值比**栈底还低 0xC0E0** ⇒ 已经用了 ≈305 KiB，超过 256 KiB |
+| `FAR = 0xA7600F30` | 正好落在 `0xA7600000..0xA7601000` —— **唯一没有列进 MemoryMapLib 的 4 KiB 空洞**（FD 5 MiB 刚好结束在 0xA7600000，`Info Blk` 从 0xA7601000 开始） |
+
+所以：厂商栈把 256 KiB 的固件栈用穿，第一次写落到那个未映射的 4 KiB 洞里 → data abort；
+异常处理器本身也在这个已经用穿的栈上跑，于是 `Recursive exception occurred while dumping the CPU state`。
+
+### 修法（`Platforms/Xiaomi/ukePkg`）
+
+1. **栈 256 KiB → 1 MiB**：`PcdCPUCorePrimaryStackSize|0x00100000`，`MemoryMapLib` 的
+   `UEFI Stack` 同步改 1 MiB（顶部上移到 `0xA770D000`）；
+2. **把那 4 KiB 洞补上**（新条目 `FD Tail`），以后再溢出至少不会立刻成 translation fault；
+3. 顺移后面的堆区并保持 DXE Heap 末尾仍是 `0xC3A00000`：
+   `SEC Heap 0xA770D000`、`Sched Heap 0xA7799000`、`FV Region 0xA7B99000`、
+   `UEFI RESV 0xA7F99000`、`DXE Heap 0xA80C0000 + 0x1B940000`；
+4. 顺手修了一个**记账错误**：`UEFI FD` 条目还写着 3 MiB（`0x00300000`），而 FD 早就变成 5 MiB 了，
+   现在改成 `0x00500000`；
+5. `UkeUsbLogDxe` 在入口先写一行 `UKE-LOG: driver entry` —— 万一还是在派发阶段挂掉，
+   这行至少告诉我们"驱动入口跑过没有"。
+
+### b57 镜像（内核未变，**只需换 boot.img，不用再刷 vendor_boot**）
+
+```
+work/flash/vendor_boot_round-b57-pramlog.img  f9f9cffe…  (85,782,528 B；b56 内核，与已刷的是同一份 payload)
+work/flash/boot-round-b57-usbonly.img         b4e0bcf3…  (1,667,072 B) 先试：USB 日志通道，无 UFS 探测
+work/flash/boot-round-b57-storage.img         83ec23f9…  (1,724,416 B) 再试：加 UFS LU
+```
