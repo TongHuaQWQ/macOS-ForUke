@@ -1189,3 +1189,49 @@ mac17p，22,951 个函数、5,850 个具名符号）做了字节级交叉验证�
 `work/analysis/fetch-kernel-artifact.py <run-id>` 是新加的取件脚本（解析 run 的 artifact id/size →
 交给 `fetch-artifact.sh` 分块并发下载 → 解包 → 打印 kernel.macho 的 sha256），
 以后每轮取内核不再手搓。
+
+---
+
+## 29. CI 修好了：b47 之后第一个新内核到手（Round 19）
+
+### 两个 run 的归属（先澄清"失败了"那条）
+
+| run | commit | 结果 | 说明 |
+|---|---|---|---|
+| `42211461355` | `8eaacfb` | **failed** | 只含"开 msgbuf 写 pram"，**不含 prelink 路径修复** → 仍然死在 `tree/kits/NativePrelink/emit_prelink.py: No such file or directory`（日志已核对） |
+| `42211693015` | `36d40d0` | **success** | 含 prelink 路径修复 + msgbuf 写 pram；**这是 b47 之后第一个绿灯内核** |
+| `42212761913` | `a907ef7` | 进行中 | 再加 120 个 anchor（本轮 §28） |
+
+所以那条失败的 run 是**修复前**的提交；修复提交的 run 已经绿了。
+
+### b56 内核（run 42211693015）
+
+```
+kernel.macho  sha256 = dc726af08ed5e648ce2a5189cb528c36da21a81d10ae4d7a19468c3a00bf82c4
+artifact      id 13501470224, 45,252,399 bytes；解到 work/ci-artifacts/b56/
+logs/archive-15-build-boot-log.log 存在且 PASS:
+  "PASS: strict source-kernel ARM64 pram writer, watchdog policy and crash probe build"
+```
+
+也就是说 **`UkeLastLog` 真的链接进去了**，`sheng-log=1` 这次有消费者了：
+内核每 500 ms 把 msgbuf 尾部写进 `/chosen/pram`（`0x9FFE00000 + 0x200000`），
+而固件侧 `UkeUsbLogDxe` 会在下一次启动把它搬进 1 MiB 的 `UKE-LOG` RAM 盘供主机读取。
+
+**通道两头这一次都在同一套镜像里了。**
+
+emit 报告（b56）：`stubbed` 177 对 / `stub_sites` 964 条 —— 比 b47（170/760）略多，
+因为这次多链接了 UkeLastLog 等我们自己的代码；anchor 生效后应大幅下降，见 `a907ef7`。
+
+### b56 镜像（本轮要刷的）
+
+```
+work/flash/vendor_boot_round-b56-pramlog.img  740ab986…  (85,782,528 B；内含 b56 内核)
+work/flash/boot-round-b56-usbonly.img         280ca857…  (1,667,072 B；USB 日志通道，无 UFS 探测)
+```
+
+固件与内核这两轮是**同时变**的，所以这次 vendor_boot 也要刷（以后内核不变时可以只换 boot.img）。
+
+### 取件工具
+
+`work/analysis/fetch-kernel-artifact.py <run-id> [--label bNN]`：解析 run 的 artifact →
+`fetch-artifact.sh` 分块并发下载 → 解包 → 打印 `kernel.macho` 的 sha256。
