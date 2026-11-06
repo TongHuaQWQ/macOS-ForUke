@@ -2142,3 +2142,77 @@ GCC 探测会踩到总线异常——**那条路本来就不该由内核走**。
    `qcom-usb-debug=1`（双向控制再加 `qcom-usb-ctl=1`）；
 3. **主机侧**：组件自带 `scripts/collect-xnu-usb.py`（采集）、`xnu_usb_control.py`（status/reboot）、
    `screenshot.py`（**内核里抓屏出 PNG**）。
+
+---
+
+## 47. 有了 root adb：`logfs` 是真·可回读的启动日志通道（Round 28）
+
+用户给了关键能力：**Android 侧有 root adb**。按这个前提重新看，发现设备本来就有一条持久化日志通道。
+
+### `logfs` 是 FAT12，里面是 XBL/ABL/UEFI 的启动日志
+
+```
+adb shell su -c 'dd if=/dev/block/by-name/logfs of=/sdcard/logfs.img'   # 8 MiB
+```
+
+解析出来是 **FAT12**，含 `UEFILOG0..4.TXT` / `EFILOG0..4.TXT`（各 64 KiB，轮转）。内容开头：
+
+```
+S - QC_IMAGE_VERSION_STRING=BOOT.MXF.2.1-01919.2-LANAI-1.78639.7
+S - IMAGE_VARIANT_STRING=SocPalawanLAA
+S - Boot Interface: UFS
+S - Secure Boot: On
+```
+
+每条启动都记了**复位原因**，例如：
+
+```
+B - 551623 - PM: Reset by PWR key S2      /  PM: Reset Type: Hard Reset
+B - 551501 - PM: Reset by PSHOLD          /  PM: Reset Type: Shutdown
+D - 214    - boot_wdog_disable_check      ← ABL 每次都检查/关闭看门狗
+QcomChargerDxe:: ChargerPlatform_Init Enabled WDOG.   ← 厂商 UEFI 的充电驱动会“打开”看门狗
+```
+
+**两条新结论**：
+
+1. **ABL 自己会关看门狗**（`boot_wdog_disable_check`），但**厂商 UEFI 的 `QcomChargerDxeLA` 会再开一个**
+   —— 我们开 `UKE_VENDOR_HW=1` 的那几版（b53/b54/b56）正好把它编进去了，而没人喂它。
+   这与"黑屏后自己重启"高度吻合；厂商栈回归时必须排除 charger 组或喂狗。
+2. `logfs` 里的日志**没有我们 payload 的痕迹**（`grep -i 'darwinboot|unixnu'` = 0 行），
+   因为写日志的是 XBL/ABL 与厂商 UEFI 的 logging DXE，而我们的 Silicium FV 没有那个驱动。
+   → 若把 `BootloaderLogging`/`ULogDxe` 加进 FV（需要 UFS 写），**UEFI 阶段的日志就能持久化到
+   `logfs`，重启进 Android 后 `adb pull` 直接读** —— 比 USB CDC 更省事的一条后路。
+
+### `oops` 分区里只有 Android 自己的重启记录
+
+`oops.img`（16 MiB）解析出 7 条 `## REASON: Restart` + `LAST KMSG`，时间戳都是 11-03..11-06 的
+Android 重启；**没有**我们 payload 的崩溃记录（那些启动从未进 Android）。
+
+### 顺带用 dmesg 核对了 `soc/Uke.h`
+
+```
+msm-dwc3 a600000.ssusb            → DWC3 基址 0xa600000 ✓
+msm_eusb2_phy 88e3000.hsphy       → 只有 eUSB2 PHY（无 SuperSpeed）✓ → CBCR_REQUIRED=3 正确
+eusb2-repeater …pm7550ba@7…       → eUSB2 repeater 在 PMIC 上（SPMI）
+dwc3 a600000.dwc3: Adding to iommu group 47
+msm-dwc3: DWC3 in/out of low power mode   → Android 自己完整冷启控制器（固件并不留给它）
+```
+
+最后一条很重要：**Android 的 dwc3 驱动自己是冷启动的**（时钟 + PHY + repeater 全自己来）。
+所以 "固件已准备好 USB" 这个前提在 uke 上**默认不成立**，必须靠我们固件里的厂商 USB 子集去准备。
+
+### 组件接入的三步已全部落到代码里（提交 `b1fecfe`）
+
+```
+drivers/QcomXnuUsbDebug/soc/Uke.h          ← 新 SoC 配置（已通过组件静态断言）
+scripts/build-qcom-usb-debug.py            ← 用本树编译记录 + xcrun 的 llvm-ar/nm 构建归档
+patches/xnu/zzzzzzzzzzzzzzz-uke-usb-*.patch ← 组件自带 darwin23 补丁（已按 10063.141.1 重基）
+patches/xnu/series                          ← 追加在最末（与 panic/ramoops 补丁同文件）
+configs/uke-macos_defconfig                 ← CONFIG_XNU_QCOM_USB_DEBUG=y
+scripts/build-xnu-4k-baseline.sh            ← -DXNU_QCOM_USB_DEBUG=1 + include 目录 + -force_load 归档
+board.toml                                  ← archive: "build-qcom-usb-debug.py"
+```
+
+运行时仍是 opt-in（`qcom-usb-debug=1`）。**下一步**：固件侧只开 USB function 子集
+（`UsbConfig`/`UsbDevice`/`UsbfnDwc3`/`UsbInit`/`UsbPwrCtrl`，**排除 charger 组**——见上面第 1 条），
+让 qualify 阶段能通过。
