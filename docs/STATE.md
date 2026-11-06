@@ -1235,3 +1235,17 @@ work/flash/boot-round-b56-usbonly.img         280ca857…  (1,667,072 B；USB �
 
 `work/analysis/fetch-kernel-artifact.py <run-id> [--label bNN]`：解析 run 的 artifact →
 `fetch-artifact.sh` 分块并发下载 → 解包 → 打印 `kernel.macho` 的 sha256。
+
+### §29 补充：b56 的两个固件变体（同一份 vendor_boot）
+
+内核在 `vendor_boot` 里、固件在 `boot.img` 里，所以同一份 b56 内核可以配两种固件：
+
+```
+work/flash/vendor_boot_round-b56-pramlog.img   740ab986…  (85,782,528 B)  ← 刷一次
+work/flash/boot-round-b56-usbonly.img          280ca857…  (1,667,072 B) 先试：USB 日志通道，不碰 UFS
+work/flash/boot-round-b56-storage.img          c76d3ff5…  (1,724,416 B) 再试：加 UFS LU 暴露
+```
+
+`boot-round-b56-storage.img` 的 sha 与 b54 的 `boot.img` 完全相同（`c76d3ff5…`）——
+同一 FV + 同一 BootShim + 同一 DTB 得到同一字节，说明这条固件打包链路是确定性的，
+以后可以用 sha 直接判断"固件没变，只换了内核"。
