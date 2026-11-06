@@ -1622,3 +1622,64 @@ __attribute__((weak)) int csr_check(uint32_t mask)               { /* (config & 
 
 这一条修好后，b60 里最后 87 个 stub 调用点应当归零 —— 也就是
 "fileset: original component called an unmapped kernel function" 这条 panic 的最后一个来源。
+
+---
+
+## 39. b61 实机：过了 fileset，撞上"没有 IOPlatformIO"的平台错误（Round 25，有实拍）
+
+### 实拍（2026-11-06 21:56，b61 = 无厂商固件 + 197 anchor 内核）
+
+屏幕上是 DarwinBoot 的绿色进度条 + 两行字：
+
+```
+Unhandled implementation specific error
+```
+
+### 这条字符串的出处（不是猜的）
+
+```
+osfmk/arm64/sleh.c:554:  panic_plain("Unhandled implementation specific error\n");
+```
+
+它属于 `arm64_implementation_specific_error()`，唯一调用者是
+`arm64_platform_error()`（sleh.c:610）：
+
+```c
+if (PE_handle_platform_error(far)) {
+        return;
+} else if (cdp->platform_error_handler != NULL) {
+        cdp->platform_error_handler(cdp->cpu_id, far);
+} else {
+        arm64_implementation_specific_error(state, esr, far);   /* ← 我们看到的 */
+}
+```
+
+而 `PE_handle_platform_error()` 在 XNU 自己的 `iokit/Kernel/IOPlatformIO.cpp` 里：
+
+```c
+bool PE_handle_platform_error(vm_offset_t far) {
+        if (platformIOProvider == NULL) { return false; }        /* ← 我们这里是 NULL */
+        else { return platformIOProvider->handlePlatformError(far); }
+}
+```
+
+`platformIOProvider` 只有在**某个 `IOPlatformIO` 子类被 start 过**之后才非空。`IOPlatformIO` 是
+一个 abstract IOService（Apple 上由 `AppleARMIO` 之类实现），这个移植没有任何驱动去实现它，
+于是**任何平台错误（SError / 异步 abort）都会变成这条不带 ESR、不带 FAR 的 panic**。
+
+### 两个结论
+
+1. **fileset 那条 panic 没了** —— 内核已经跑到自己的控制台、kext 在起来，这是 b51 之后第一次
+   越过"M1"。这一轮真正要解决的问题换了：某个 SError。
+2. SError 的现场被 XNU 丢掉了（panic 文本里没有 ESR/FAR），所以必须先把 handler 接上，
+   否则下一轮也只能看到同一句话。
+
+### 修法（提交 `64f6fdd`）
+
+把 `ArmDTPlatform` 复制成本仓库的板级副本（`drivers/ArmDTPlatform`，feeds.toml 里 `local` 注册，
+和 ArmCpu 同样的 first-wins 理由），并新增 `ArmDTPlatformIO : IOPlatformIO`：
+
+- `handlePlatformError(far)` 打印 `ArmDTPlatformIO: platform error #N far=0x… pc=0x…`，
+- 默认**返回 true（已处理）**让被打断的代码继续跑 —— 一个本移植还没有驱动的模块发的 SError
+  不值得停住整个启动；
+- `uke-platform-error-panic=1` 可恢复"交给机器层 panic"的旧行为。
