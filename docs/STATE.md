@@ -1543,3 +1543,41 @@ Undefined symbols for architecture arm64e.kernel:
 | `42218599309` | `295c481` | 197 anchor + ArmCpu 继续（无 pram 写手） | ✅ 已成功，`stubbed` 87 |
 
 固件侧 b60/b61 已建好（1 MiB 栈 + Gunyah 喂狗 + 面板回显 pram 尾部），等内核到位即可打包。
+
+---
+
+## 37. 优先级纠正：先把启动链拿回来，USB 通道可后置（Round 24）
+
+用户指出（正确）：为了 USB 读日志，结果连"走到 XNU"这一步都丢了。回顾这一串：
+
+| 固件 | 结果 |
+|---|---|
+| b51（`UKE_VENDOR_HW=0`） | ✅ 走到 XNU，fileset panic 有画面 |
+| b53/b54/b56（厂商栈开） | ❌ 派发厂商驱动时 256 KiB 栈溢出（有异常屏） |
+| b57/b59（1 MiB 栈） | ❌ 黑屏后自己重启，什么都没走到 |
+
+也就是说：**厂商驱动栈是启动链的障碍，而 USB 日志通道依赖它**。所以两者必须解耦，
+启动链优先。
+
+### 现在的默认配置
+
+```
+UKE_VENDOR_HW      = 0    # 默认关闭厂商栈（这一版能走到 XNU）
+UKE_VENDOR_STORAGE = 1    # 与上面独立，将来开厂商栈时再分 UFS/SD 与否
+```
+
+`UkeUsbLogDxe` **保留在 FV 里**，因为它在没有 USB MSD 时会先
+
+1. `DumpPreviousBootLog()` —— 把 pram 里上一次内核的日志搬进日志盘，
+2. **并把最后 34 行打到面板上**（`--- previous boot log, last N lines ---`），
+3. 然后 `LocateProtocol(usb-msd)` 失败 → 直接返回（不会再有 20 秒等待）。
+
+于是即便没有厂商栈、没有 USB，**上一次内核日志的尾部仍然能拍照读到** ——
+这正是当下最需要的能力。
+
+### b61 镜像（厂商栈关闭 + 197 anchor 内核）
+
+```
+work/flash/vendor_boot_round-b61-anchors.img  dd69871d…  (85,782,528 B)
+work/flash/boot-round-b61-vendorfree.img      4c6725e1…  (1,122,304 B；48 个模块，无厂商驱动)
+```
