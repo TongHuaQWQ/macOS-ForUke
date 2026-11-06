@@ -2009,3 +2009,79 @@ work/flash/vendor_boot_round-b68-usbprobe.img 0621b532…  (85,782,528 B；b66 �
 用法：**开机两次**。第二次启动时，`ReadyToBoot` 会把上一次内核日志的开头 12 行与最后 24 行
 打在面板上并停住 15 秒 —— 那 12 行里应该有 `UKE USB: DWC3 id=…`、`UKE USB: GCC power=…`、
 `UKE USB: SMMU …`。这正是"XNU 能不能看见 USB 控制器"的判据。
+
+---
+
+## 45. 别的 UniXNU 移植到底怎么接 USB（Round 28 用户提问，已核对源码）
+
+生态里是**两代做法**，我这边一直做的是第一代。
+
+### A. 老一代（在用）：每设备一份 kit 源码 + 两份 XNU 补丁
+
+代表：`sirius` / `sirius-huajifruit` / `sirius-yooglery`（SDM710 / 骁龙 710）
+
+```
+board.toml  archives: "build-sirius-usb.py"      → 编译 package/sirius_usb.c（65 KB 自包含驱动）
+            kernel_args: "sirius_usb=2"
+patches/xnu/sirius-usb-console.patch             → _cnputc / console_printbuf_putc 各插一行 tee
+patches/xnu/sirius-console-ring.patch            → bsd_init 里启动 console
+```
+主机读 `/dev/ttyACM0`，他们的证据日志是 3813 字节内核日志。
+**这就是我移植进 `package/uke_usb.c` 的那条路。**
+
+### B. 新一代（正在推广）：核心组件 `QcomXnuUsbDebug` + SoC профиль
+
+代表：`alioth`（K40）、`munch-erodenine`（K40S），板级 `board.toml` 里：
+`components = [… "QcomXnuUsbDebug"]`、`archives = [… "component:QcomXnuUsbDebug"]`、
+`kernel_args = "qcom-usb-debug=1"`（双向控制再加 `qcom-usb-ctl=1`）。
+
+组件源码在 `WQSQW/UniXNU-dby_w09/package/QcomXnuUsbDebug/`（110 处引用），结构：
+
+```
+kernel/QcomXnuUsbDebug.c    XNU 侧：映射、缓存、计时、CPU 约束；对外 qcom_usb_debug_init/write/poll
+usb/Dwc3.c                  EP0、TRB、CDC 描述符与收发队列
+soc/QcomUsbQualify.c        检查"固件是否已经准备好 USB"（电源/5 个时钟/复位/DEVICE role/PHY）
+soc/QcomUsbDmaDomain.c      SMMU stream/context bank/页表/恢复
+soc/<SoC>.h                 唯一的平台参数文件（见下）
+patches/darwin22/           0001 console tee（PE 初始化/kprintf/printf/中央控制台/panic）
+                            0002 worker（kminit 后启动轮询线程、可选正常重启线程）
+scripts/                    capture.py / xnu_usb_control.py / screenshot.py（主机侧采集、status/reboot、PNG 截图）
+```
+
+**接入方式**：defconfig `XNU_QCOM_USB_DEBUG=1`，内核参数 `qcom-usb-debug=1`，
+主机看到 `1209:316d "QcomXnuUsbDebug"` 即成了。munch 的记录：
+
+> "`qcom-usb-debug=1` starts the CDC-ACM console over the board's DWC3 controller. It tees
+> `printf`, `IOLog`, `kprintf` and the **panic drain** onto a USB serial port …
+> **The firmware already brings the controller up (uefi-munch DXE) and this kernel has no other
+> USB driver, so nothing competes.**"
+
+**关键前提**：这条路的假设是"**固件已经把 DWC3 举起来**（DEVICE 模式、电源、时钟、复位、PHY）"，
+内核只做 DMA/TRB/CDC 和日志 tee。soC 适配页明确列出要记录的项，其中一条正是我们踩过的坑：
+
+> "对不可访问总线的读操作，软件预检查也可能遇到异步异常。"
+
+—— 这就是 b61/b67 那个 `Unhandled implementation specific error`（SError）的来源：
+我在内核里直接 `ml_io_map` + 读 GCC/DWC3 寄存器，而没有先确认固件是否把它们上电/开时钟。
+
+### 对 uke 的结论（下一步）
+
+1. **改走 B**。`soc/Uke.h` 需要的值我已经从 `device/dt/live-runtime.dtb` 核出 6 项：
+
+   | 项 | 值 | 来源 |
+   |---|---|---|
+   | `QUD_DWC3_BASE/BYTES` | `0x0a600000 / 0x100000` | `ssusb@a600000 reg` |
+   | `QUD_GCC_BASE/BYTES` | `0x00100000 / 0x1f4200` | `clock-controller@100000 reg` |
+   | `QUD_SMMU_BASE/BYTES` | `0x15000000 / 0x100000` | `apps-smmu@15000000 reg` |
+   | `QUD_STREAM_ID` | `0x40` | `usb0 dwc3 iommus = <apps_smmu 0x40 0>` |
+   | `QUD_DMA_IOVA` | `0x90000000` | `qcom,iommu-dma-addr-pool = <0x90000000 0x60000000>` |
+   | `QUD_PSCI_SMC_RESET` | 1（待正式确认） | `ArmDTPlatform::platformStageReset` 用过 SMC `0x84000009` |
+
+   **还缺的**：cliffs(SM7675) 的 `GCC_CBCR_OFFSETS{5}`、`BCR`、`GDSCR`、`CFG_GDSCR` 与
+   `QSCRATCH_HS_PHY_CTRL_OFFSET`。DT 只给出 `gcc_usb30_prim_gdsc = qcom,gdsc@139004`
+   （对 SM8550 是 0x39004，**布局不同，不能照抄**）。
+2. **固件必须先准备 USB**：在 uke 的 FV 里只开 **USB function 子集**
+   （`UsbConfigDxe`/`UsbDeviceDxe`/`UsbfnDwc3Dxe`/`UsbInitDxe`/`UsbPwrCtrlDxe`），
+   不带 UFS/charger/MSD —— 这也回避了 b56 那次整套 48 驱动把栈用穿的问题。
+3. **补丁版本**：组件自带的是 `patches/darwin22`（XNU 8796.141.3）；我们是
+   `10063.141.1 / Darwin 23.6.0`，需要在 `patches/darwin23` 增一份 profile（`scripts/xnu_patches.py` 里加版本配置）。
