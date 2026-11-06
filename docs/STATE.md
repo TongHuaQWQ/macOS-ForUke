@@ -1096,3 +1096,68 @@ fffffff00979c3b8: bl   0xfffffff00c02dd84
 下一步的顺序：先用 USB 日志通道确认启动链到底走到哪，再按"实际被调用到的"顺序补实现
 （0x8/0xc/0x20 这些一两条指令的大概率是 getter/谓词，风险低；`IORWLockUnlock` 那个明显有副作用，
 不能直接空返回）。
+
+---
+
+## 28. fileset 缺口真相：不是"我们没有这些函数"，是 matcher 没配上（Round 18）
+
+### 数据来源：emit 报告把每一处 stub 都记下来了
+
+`kernel.json`（emit 报告，CI 产物里就有）里有两个字段：
+
+```
+stubbed   : { owner_kext: { target_address: call_count } }     # 22 个 kext、170 对、760 次调用
+stub_sites: { site: target }                                    # 760 条
+```
+
+`target` 是**原始内核**（Apple kernelcache）地址 + slide，所以可以直接用 kernelcache 自己的
+`LC_SYMTAB` 命名。命名结果（`work/analysis/ref/stubbed-worklist.txt`，127 个函数）：
+
+```
+ 132  _IORecursiveLockUnlock          [IODARTFamily, apfs, IOGPUFamily]
+  87  _csr_check                      [AppleMobileFileIntegrity, apfs, IOGPUFamily]
+  50  _vm_kernel_addrhide             [IOGPUFamily, IOSurface]
+  38  _kauth_cred_getuid              [apfs, sandbox]
+  22  _kernel_thread_start            [AppleARMWatchdogTimer, apfs, …]
+  22  _task_deallocate_external
+  16  _OSSynchronizeIO
+  15  IOReporter::updateAllReports    [AppleARMPlatform, AppleIISController, ApplePMGR]
+  12  _vnode_getparent / IOUserClient::copyObjectForPortNameInTask / …
+   9  _vm_map_page_mask, _upl_page_present, _cpu_number, _panic_with_options …
+```
+
+**这些全是我们内核里就有的标准 XNU 符号** —— 所以 §27 里"absent：只能自己实现"的结论是错的：
+`classify-missing.py` 只会用 `__func__` 字符串去认名字，而这些小函数根本不把函数名放进数据表，
+于是被误判成"源码没编进来"。
+
+### 修法：按 kernelcache 自己的符号表生成 reviewed anchor
+
+`work/analysis/gen-fileset-anchors.py`：
+
+1. 用 kit 自己的 `kc_image.Image` 打开 kernelcache 的 `com.apple.kernel` 入口；
+2. **完全照 matcher 的规则**算函数 extent（`LC_FUNCTION_STARTS` 的 start → 下一个 start，
+   夹在 exec 段的 backed 范围内），得到 `original_size`；
+3. `original_sha256` = 该 extent 的字节；
+4. `native_symbol` = kernelcache `LC_SYMTAB` 里**恰好落在该地址**且唯一的符号名
+   （不做"最近符号"猜测）；
+5. 写进 `kits/XnuPrelink/fixtures/fileset-25F84-symbols.json`。
+
+结果：**122 个函数 / 727 个调用点**（760 中的 95%），fixture 从 62 条涨到 **182 条**，
+并且 182 条全部通过"重新按 matcher 规则校验 extent + sha256"的自检。
+kit 自带测试 `pytest test_emit_prelink.py test_fileset_match.py` → 26 passed。
+
+剩下的 5 个地址（22+4+3+2+2 次调用）在该地址上没有唯一符号，留待后续。
+
+### 这一步为什么直接对着目标
+
+下一个内核（`a907ef7` 触发的 CI）如果 anchor 生效，`stubbed functions` 应当从 170 掉到 ~48，
+`fileset: original component called an unmapped kernel function` 这条 panic 大概率消失 ——
+也就是目标里的"越过 fileset 未匹配调用 panic → kext 启动"。等 USB 日志通道通了，这一步的验证
+（kext 有没有真的 start、IOKit 有没有匹配到）就有日志可读，不再靠照片。
+
+### 顺带修正上一轮的两个结论
+
+- §27 说的"stub 落在已匹配函数中段（`set_awl_scratch…+0xc8`）"是**误读**：
+  `_unixnu_fileset_unmapped` 是我们内核新增的符号，symbolize 工具用的是 Apple kernelcache 的
+  符号表，自然对不上位置。stub 只有一个，所有未匹配调用都指向它。
+- §27 说的"22 个 absent 只能实现"作废，见上。
