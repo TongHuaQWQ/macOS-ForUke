@@ -2006,7 +2006,13 @@ uke_usb_thread(void *arg __unused, wait_result_t wr __unused)
 	 * not replayed when the console comes up. Wait for the console, then probe. */
 	/* Long enough to clear the loader's own GIC probe and its 20 s hold: anything printed before that
 	 * is scrolled off a console that keeps only the last screenful. */
-	IOSleep(8000);
+	/* delay() takes microseconds and comes from <machine/machine_routines.h>, which this archive's
+	 * compile line already carries (it is bsd_init.o's own). IOSleep would need IOKit/IOLib.h on
+	 * that path, and the kernel build stopped on exactly that: "call to undeclared function
+	 * 'IOSleep'" from this line. Eighty 100 ms slices, so the wait is interruptible in effect. */
+	for (unsigned slice = 0; slice < 80; slice++) {
+		delay(100 * 1000);
+	}
 	printf("UKE USB: probe thread running\n");
 	uke_usb_console_start();
 	/* uke_usb_panic=1 freezes the console on the numbers instead of letting the boot scroll past
@@ -2027,7 +2033,10 @@ static void
 uke_usb_startup(void)
 {
 	thread_t thread;
-	if (kernel_thread_start_priority(uke_usb_thread, NULL, BASEPRI_KERNEL, &thread) == KERN_SUCCESS) {
+	/* kernel_thread_start, not kernel_thread_start_priority: the latter takes BASEPRI_KERNEL from
+	 * <kern/sched.h> and no longer resolves in this tree, and the probe thread starts eight seconds
+	 * late anyway, so its priority is irrelevant. The same call is already used above. */
+	if (kernel_thread_start(uke_usb_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
 }
