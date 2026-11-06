@@ -2545,3 +2545,57 @@ work/flash/boot-round-b74-safe.img   1536000 B  sha256 bff2f3091925aa8b2d3e4dde2
 
 判读：b74 若又停在同一个 Sec 异常，则**心跳不是原因**，剩下的唯一差异是"IPC 三件套被移出"（下一轮恢复）；
 若 b74 正常往下走，则原因是心跳的两个开关之一，用 b75 逐个打开。
+
+---
+
+## 54. b74 正常往下走 → 黑屏；于是给固件加了一条"跨复位进度链"
+
+用户实测 `boot-round-b74-safe.img`：**不再出 Sec 异常，一路往下走，没有卡住，然后黑屏。**
+这是这套固件第一次把厂商 fleet 走完还没有当场死掉。黑屏有两种截然不同的解释：
+
+1. 厂商 `ClockDxe`/`DALSYS` 按 BSP 数据重配时钟树，**把 DPU/panel 的时钟或电源关掉** → 屏幕黑、CPU 还活着、
+   启动继续（可能一路到 XNU）；
+2. 真的死在某个驱动/BDS/payload，只是异常向量已被接管、又没打到屏幕上。
+
+两者在照片上完全一样，所以这次不再猜：`Include/UkePersist.h` 在 **`0xA7000000`（MemoryMapLib 的
+"FD Reserved"，1 MiB，本固件所有、FD 从 0xA7100000 起、不可被 DXE 分配）** 里放了一个跨复位的小型
+阶段日志：
+
+```
+struct UKE_PERSIST_BLOCK { magic "UEK1"; version; boot; count; last_stage; last_detail;
+                           records[32] = {stage, detail, tick} }
+```
+
+写入点（都是我们自己的驱动，没有任何钩子）：
+
+```
+1 UkeProgressDxe 入口              (APRIORI 里，厂商 fleet 之前)
+2 UkeProgressDxe 入口完成
+3 UkeUsbLogDxe  入口
+4 UkeUsbLogDxe  ReadyToBoot
+5 UkeUsbLogDxe  USB 探针之前
+6 UkeUsbLogDxe  结束
+```
+
+读回点在 **`UkeProgressDxe` 入口**，也就是整个启动里**最早、屏幕一定还活着**的时刻：
+
+```
+UKE-PREV: boot N reached stage 4 detail 8 after K records
+UKE-PREV: 0 stage 1 detail 00000000 tick 0
+UKE-PREV: 1 stage 2 detail 00000000 tick 0
+UKE-PREV: 2 stage 3 detail 00000000 tick 0
+...
+```
+
+于是**只要刷两次同一个镜像**就能知道上一次死在哪：第一次黑屏，第二次开机的头几行就把上次的阶段打出来。
+（`stage >= 4` ⇒ 固件已经走到 ReadyToBoot/payload，黑屏是内核侧；只有 1–2 ⇒ 死在厂商 fleet 里。）
+
+本轮仍然保留上一轮的取舍：`PcdUkeHeartbeatStallHook=0`、`PcdUkeHeartbeatMarker=0`，
+即包裹 `gBS->Stall` 和写 0xA7000000 计数这两个风险动作继续保持关闭；持久日志是纯数据写入，
+不带任何钩子。
+
+```
+work/flash/boot-round-b75-prevlog.img   1536000 B
+sha256 0356dd77fbde307bb7907e601ad73ad36eccd94f9c24ec2c93c870d04641cbf6
+  FD sha256 d84e64b3dd4757b2…（55 images verified）
+```
