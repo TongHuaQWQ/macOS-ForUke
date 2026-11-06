@@ -1826,3 +1826,29 @@ gic-probe: GICD_CTLR after the hold 0x00000002 (Grp1 1 ARE 1 DS 1 RWP 0)
 `ArmDTPlatformIO` 调 `uke_stage_last_panic`（weak）时，参考内核（RELEASE）里没有该符号，
 直接 `b` 到 0 → `branch out of range`（run `42235545609`）。改成**先取地址再判空**的间接调用
 （`void (*volatile stage)(const char *) = …`），提交 `ecf90ad`。
+
+### §41 补充：入口与主机侧步骤（提交 `9a65ca3`）
+
+移植过来的驱动一开始**没有入口**——sirius 是靠在 `bsd_init()` 里插一行调用（补丁）启动的，
+而本移植刻意不带 XNU 补丁。改用 XNU 自带的启动项：
+
+```c
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, uke_usb_startup);
+```
+
+`EARLY_BOOT/STARTUP_RANK_LAST` 正是 `UkeLastLog` 的写手在本核上启动的位置（已验证会跑），
+而且比磁盘驱动更早 —— 于是控制台环形缓冲在 `bsd_init` 之前就已经在镜像 msgbuf。
+
+驱动里所有 `printf` 都进 msgbuf，`UkeLastLog` 又会把 msgbuf 尾部搬进 pram，所以**探测打印的数字
+即便主机没接上，也会留到下一次启动的面板回显里**。
+
+### 主机侧（下一轮 `uke_usb=2` 成立后用）
+
+```bash
+# 设备用 USB 线连着（fastboot 本来就要连着），开机后：
+ls /dev/ttyACM*                 # 应出现 /dev/ttyACM0
+cat /dev/ttyACM0 > uke-kernel.log    # 环形缓冲每秒回绕重放一次，晚接也能拿到整段日志
+```
+
+驱动的 TX 线程每秒把读指针回绕一次，所以**迟到的连接也能拿到完整日志**（这是 sirius 那轮
+debug 出来的、被记录为"load-bearing"的行为）。
