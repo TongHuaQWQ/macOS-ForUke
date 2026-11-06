@@ -2990,3 +2990,25 @@ usb 3-1.2: new full-speed USB device number 35 … device descriptor read/64, er
 | `/dev/mem` | 大概 ✗ | arm64 默认 `CONFIG_STRICT_DEVMEM=y` |
 | `/proc/kcore` | 待测 | root 可读；pram 在 `0x9FFE00000` 落在 Android 的 `/memory` 高段里（线性映射），若能算出 ELF 段偏移就可以精确 `dd` 一小段 |
 | 小米的 `debug_kinfo`（4 KiB，`no-map`）| 待测 | 容量只有 4 KiB，够写日志尾部；要看它有没有被 Android 暴露成 proc/sysfs 节点 |
+
+### 60c. Android 侧读 RAM 这条路彻底关闭（三条都实测）
+
+```
+$ adb shell su -c 'ls -l /proc/kcore /dev/mem /proc/kallsyms'
+ls: /proc/kcore: No such file or directory
+ls: /dev/mem: No such file or directory
+-r--r--r-- ... /proc/kallsyms
+
+$ zcat /proc/config.gz | grep -E "STRICT_DEVMEM|DEVKMEM"
+# CONFIG_STRICT_DEVMEM is not set        ← 但 /dev/mem 压根不存在（CONFIG_DEVMEM 没开）
+```
+
+- `/proc/kcore` 不存在；
+- `/dev/mem` 不存在（`CONFIG_STRICT_DEVMEM` 关了也没用，因为 `CONFIG_DEVMEM` 本身没编）；
+- 小米的 `debug_kinfo` 没有被暴露成 proc/sysfs 节点（`ls /proc | grep -i boot|kinfo` 只匹配到 `bootconfig`）。
+
+加上 §60b 里那条 pstore 的源码结论，**"固件写 → Android 读"这条路在本机不可行**，
+除非固件自己有 UFS 驱动（那又回到 Clock/PMIC 那条死链）。
+
+⇒ 结论：**不拍照的日志只有 USB 一条路**（XNU 侧 `uke_usb.c`，或将来固件自写 DWC3 device 栈）。
+在那之前，面板分页是唯一能把整份日志带出来的手段。
