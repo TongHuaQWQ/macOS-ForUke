@@ -2497,3 +2497,51 @@ work/flash/boot-round-b73-beat2.img   1536000 B  sha256 48988d4429dafdf331d26331
 
 同时把 IPC 三件套移出 APRIORI/DXE（见 §51），所以这次应该越过 `Smp2pDxe` 那一格，往
 `CmdDbDxe → PwrUtilsDxe → NpaDxe → RpmhDxe → ClockDxe → … → PmicDxe → Usb*` 走。
+
+---
+
+## 53. b73 的异常其实是 **Sec 阶段** 的，而且我上一轮的归因错了
+
+面板：
+
+```
+Project Silicium for Xiaomi Pad 7
+Firmware Version 4.0 Build at 12:28:05 on Nov 6 2026
+Synchronous Exception at 0xA700DFAC
+```
+
+这行 banner 来自 **`Silicon/Silicium/SiliciumPkg/Sec/Sec.c:50`**（`PrintFirmwareVersion`，它会先
+`ClearFrameBuffer`），而那行异常来自 **`Silicon/Silicium/SiliciumPkg/Sec/AArch64/ArchSec.c:22`**
+（Sec 自己的早期异常向量，只打印 LR 就 `CpuDeadLoop`）。所以：
+
+- 这是**最早的固件阶段**（DxeCore 起来之前，`CpuDxe` 还没接管异常向量，所以没有寄存器dump）；
+- 屏幕上只有 3 行正是因为 banner 前刚刚清过屏 —— 前面 b70/b71/b72 的满屏 driver 行是被 banner 清掉的，不是"进度丢失"；
+- `0xA700DFAC` 落在 **"FD Reserved"（0xA7000000, 1 MiB）** 里，是**跳到了没有代码的地方执行**（野指针），
+  和 USB、和厂商驱动都没有关系。
+
+已核对不是镜像损坏：boot.img 解出来的 FD 与本地构建逐字节相同；FV 头校验（含 checksum 字段求和 = 0）
+通过；BootShim 里的 `FD_BASE` 字面量确实是 `0xA7100000`（= 设备配置 `[uefi_fd] base`），所以 FD 不在
+0xA7000000。
+
+### 取舍：不再猜，改成一次只动一个变量
+
+`UkeProgressDxe` 里两个有风险的行为改成 PCD 开关（默认全关）：
+
+| PCD | 作用 | b74 |
+|---|---|---|
+| `PcdUkeHeartbeatStallHook` | 包裹 `gBS->Stall`（计数+喂狗） | 0 |
+| `PcdUkeHeartbeatMarker` | 往 `0xA7000000` 写计数（持久） | 0 |
+
+另外包裹层加了**重入保护**（`mInWrapper`）：控制台/调试路径也可能调用 `Stall`，在"打印→Stall→打印"
+里递归是会爆栈的，这类崩溃同样表现为野指针跳转。
+
+保留的只有只读部分：入口三行 DEBUG（`UKE-BEAT entry: marker=… stallhook=…` → `pet + mark done`）、
+以及 `UKE-BEAT timer probe: N callbacks in 2 s`（只读+一次 `Stall(2 s)` 测量）。
+
+```
+work/flash/boot-round-b74-safe.img   1536000 B  sha256 bff2f3091925aa8b2d3e4dde28ed16612c249b6f027a1a6cccb1ba7d11595601
+  FD sha256 e7e2f8ff89040229…（模块里 "UKE-BEAT entry"×2、"stall hook disabled"×1、无 UefiLibPrint）
+```
+
+判读：b74 若又停在同一个 Sec 异常，则**心跳不是原因**，剩下的唯一差异是"IPC 三件套被移出"（下一轮恢复）；
+若 b74 正常往下走，则原因是心跳的两个开关之一，用 b75 逐个打开。
