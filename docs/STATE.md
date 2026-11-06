@@ -2421,3 +2421,46 @@ kits/uke/uke_usb.c:2030:57: error: use of undeclared identifier 'BASEPRI_KERNEL'
 
 也就是说 b68/b69 那两轮"探针没出来"，**不是设备上的结论，而是内核根本没编出来**。
 现在 b68 的 vendor_boot 用的仍是 b66 内核，所以 b70/b71 的固件轮次不受影响。
+
+---
+
+## 51. b71 结果：进度+10 个驱动，但**心跳一声都没响** —— 中断根本没在跑
+
+用户实拍（`boot-round-b71-beat.img`）：`UkeProgressDxe` 确实在 APRIORI 里被 dispatch 了
+（ArmTimerDxe 之后那一行），`Smp2pDxe` 也进来了，然后**比 b70 多走了 10 个驱动**：
+
+```
+… ArmCpuDxe / ArmGicDxe / MetronomeDxe / ArmTimerDxe /
+  UkeProgressDxe / SmemDxe / DALSys / HWIODxeDriver / ChipInfo /
+  PlatformInfoDxeDriver / ProjectInfoDxe / HALIOMMU / ULogDxe / IPCCDxe / Smp2pDxe ← 最后一行
+```
+
+三条结论：
+
+1. **依赖修对了**：GlinkDxe 之前缺的那一环补上后，IPCC/Smp2p 都能过（b70 是 IPCC 之后直接死）。
+2. **但终点只前进了一格**：现在死在 `Smp2pDxe` 或它之后（GlinkDxe 没打印出来）。
+3. **屏幕上一个 `UKE-BEAT` 都没有** ⇒ 我那个 1 秒定时器事件**从未 fire**。这不是心跳写错，
+   而是**这个 UEFI 里 timer event（= 中断）根本没投递**。这个事实比崩溃点更重要：所有依赖时间
+   的诊断（包括喂看门狗）都跟着失效。
+
+（旁证：`gBS->Stall` 用的是 TimerDxe 的计数器轮询，不需要中断，所以面板停留、`delay` 都还正常
+—— 这就是为什么"喂狗"必须改成挂在 Stall 上。）
+
+### b72 的两处改动
+
+1. `UkeProgressDxe` 不再依赖中断：
+   - **包裹 `gBS->Stall`**：厂商驱动所有的超时等待都是 Stall，于是每次等待都（a）喂一次 Gunyah
+     看门狗、（b）计数、（c）每累计 10 秒 Stall 打一行 `UKE-BEAT stalls=… time=…ms timer=…`；
+   - 启动时先做一次**测量**：arm 一个 100 ms 周期 timer，然后原地 `Stall(2 s)`，打印
+     `UKE-BEAT timer probe: N callbacks in 2 s` —— 直接把"中断通不通"写在面板上；
+   - 计数同时写进 `0xA7000000`（下次启动还能读）。
+2. **把 IPC 三件套整个拿掉**（`IPCCDxe`/`Smp2pDxe`/`GlinkDxe`）：它们是 RPM/PMIC-glink 通道，
+   本镜像不需要（USB 只要 SPMI/PMIC、GCC 时钟、DWC3 function）。拿掉后 `fw-subset.py` 仍报
+   `unsatisfied: 0`（唯一那条是 ACPI_SDT，由核心 `AcpiTableDxe` 提供，是工具看不到 stock 里的
+   该模块）。而且**APRIORI 里的驱动不等 DEPEX 就被 dispatch**，所以少列一个只会让后面真的需要它的
+   驱动按正常 DEPEX 排队等（安全失败），不会再出现"拿 NULL 就解引用"的崩溃。
+
+```
+work/flash/boot-round-b72-noipc.img   1536000 B  sha256 5d0d91e95d25ebded32a4f17af08b2dcf5409465b7836671c87c4dfdac0432a5
+  FD sha256 23ae3ebca41ed67d…（55 images verified）
+```
