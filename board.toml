@@ -244,10 +244,14 @@ bytes = 12088
 sha256 = "78530c380db9506149703db508ad960a966ec449b02fc8d2de90972e66bc9301"
 
 [kernel.prelink]
-# kits/NativePrelink is the compatibility name of the XnuPrelink kit (components.toml legacy_name);
-# the tree links it to the pinned fork. Do not "modernise" this path to kits/XnuPrelink: the alias is
-# resolved from the catalog's recorded repository, and both names point at the same checkout anyway.
-tool = "kits/NativePrelink/emit_prelink.py"
+# kits/XnuPrelink is the catalog's own path for this kit (components.toml: path = "kits/XnuPrelink").
+# The tree materialises the kits/<feed name> symlinks from feeds.toml, and the board copy is the
+# `XnuPrelink` entry there, so the alias name kits/NativePrelink does not exist in the tree: naming it
+# here made pass 3 die with
+#   can't open file '.../tree/kits/NativePrelink/emit_prelink.py': [Errno 2] No such file or directory
+# (CI runs 42080292233 and the one after it). The compatibility alias is provided in this repository
+# as a symlink for the audit scripts that hardcode it, which is all it was ever needed for.
+tool = "kits/XnuPrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
 # kernelcache.release.mac17g — the KernelCache entry of the j704ap identity declared in [ipsw], read
 # through the same pipeline the driver uses (IM4P payload, LZFSE decode, keep the single 0x0100000c
