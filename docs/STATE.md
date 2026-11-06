@@ -701,3 +701,33 @@ USB 日志这条路是**可行的但需要一轮工程**（FV 解析 + DEPEX 判
    （`[Binaries] PE32|pe-Dwc3.efi|DEBUG` + 对应 `[Depex]`），FV 里再加通用 `UsbBusDxe`/`UsbMassStorageDxe`；
 3. DarwinBoot 枚举 `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` / `EFI_BLOCK_IO_PROTOCOL`，
    打印句柄数量作为"U 盘 / 分区可见"的判据（不写文件也能验收）。
+
+---
+
+## 21. DEPEX 判定：厂商 USB 驱动依赖私有协议（Round 13）
+
+从导出目录里解出各驱动的 DEPEX（`section0.dxe.depex`）：
+
+**Dwc3（16 个依赖）** 里能认出的都是 EDK2 通用协议：
+`665e3ff6…`(ComponentName)、`26baccb1/b2/b3…`(DevicePath 家族)、`27cfac87/88…`(DriverConfiguration/Diagnostics)、
+`1e5668e2…` 等；但**另有约 6 个认不出的 GUID**，
+其中 `fa5f306b-f47d-4ac4-a47d-882f8204ec30` 和 `f4e5c7d0-d239-47cb-aacd-7f66ef763238`
+**同时出现在 Dwc3 与 UsbConfig 的 DEPEX 里** —— 这是 QcomPkg 的私有契约（时钟/PMIC/USB 配置），
+我们的 FV 里没有对应 provider。
+
+**UsbConfig** 各自的 DEPEX 也包含同样的两个私有 GUID（外加 `e722b03f…`、`b0760469…`、`1c34f691…` 等）。
+
+**Fat**(131072) 只有 `ae37b942-457f-4c91-a196-d9669fd347a3`；**Ufs**(147456) 未找到 DEPEX 段。
+
+### 判定
+
+- **单把 Dwc3 放进我们的 FV 不会 dispatch** —— 缺私有 provider。
+- 要让它在我们的 FV 里跑，得把依赖链一起搬（clock/PMIC/USB-config 的 provider），
+  工作量在"多个 DXE + 它们的 PCD/协议契约"，不确定性高。
+- **UFS 驱动**没有可见 DEPEX，反而是最可能"直接能用"的一个（但同样可能依赖私有协议，需实测）。
+
+### 建议的排序（给决策用）
+
+1. **先把 QEMU 日志通道收尾**（确定收益、当天可见）：`pmemsave` 已成功，只差按 XNU msgbuf 布局切片；
+2. USB 路线保留为独立项目：先只把 `pe-Ufs-*.efi` 加进 FV 实测（它的依赖最少），
+   能 dispatch 就顺势拿到分区读取能力；再决定是否搬 Dwc3 的整条依赖链。
