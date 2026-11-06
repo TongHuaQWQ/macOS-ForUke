@@ -2004,9 +2004,23 @@ uke_usb_thread(void *arg __unused, wait_result_t wr __unused)
 	 * probe before that puts the lines in msgbuf only, which is why the first b67 run showed a GIC
 	 * probe screen with no UKE USB lines at all: they had been printed into the ring and the ring is
 	 * not replayed when the console comes up. Wait for the console, then probe. */
-	IOSleep(3000);
+	/* Long enough to clear the loader's own GIC probe and its 20 s hold: anything printed before that
+	 * is scrolled off a console that keeps only the last screenful. */
+	IOSleep(8000);
 	printf("UKE USB: probe thread running\n");
 	uke_usb_console_start();
+	/* uke_usb_panic=1 freezes the console on the numbers instead of letting the boot scroll past
+	 * them: the SError that ends this boot arrives later, and by then an eight-second-old line is
+	 * gone. Values also go into pram through the panic record, so the next boot prints them again. */
+	{
+		unsigned freeze = 0;
+		PE_parse_boot_argn("uke_usb_panic", &freeze, sizeof(freeze));
+		if (freeze != 0) {
+			panic("UKE USB PROBE: step=%u gcc=%08x dwc=%08x dsts=%08x clk=%08x smmu=%08x pll=%08x",
+			    uke_usb_step, uke_usb_gcc, uke_usb_dwc, uke_usb_dsts, uke_usb_clk, uke_usb_smmu,
+			    uke_usb_pll);
+		}
+	}
 }
 
 static void
