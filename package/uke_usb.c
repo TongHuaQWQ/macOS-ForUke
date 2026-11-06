@@ -299,7 +299,8 @@ static struct {
 
 /* The TRB ring, event buffer and the CDC transmit staging area live here. Page aligned and a whole
  * number of pages, because the DWC3 walks it by physical address. */
-static char uke_usb_dma[UD_SIZE] __attribute__((aligned(PAGE_SIZE)));
+static char uke_usb_dma[UD_SIZE] __attribute__((aligned(4096))); /* PAGE_SIZE is not an
+                                                                 * integer constant here */
 
 static inline uint32_t
 usb_rd(vm_offset_t base, uint32_t off)
