@@ -2216,3 +2216,99 @@ board.toml                                  ← archive: "build-qcom-usb-debug.p
 运行时仍是 opt-in（`qcom-usb-debug=1`）。**下一步**：固件侧只开 USB function 子集
 （`UsbConfig`/`UsbDevice`/`UsbfnDwc3`/`UsbInit`/`UsbPwrCtrl`，**排除 charger 组**——见上面第 1 条），
 让 qualify 阶段能通过。
+
+---
+
+## 48. 固件侧 USB 子集 + 继承状态探针（Round 28，b70）
+
+### `UKE_VENDOR_USB`：只带 USB 需要的厂商驱动
+
+先回答"要哪些驱动"这个问题，机制而不是猜测：`work/analysis/fw-subset.py` 把候选子集里每个
+驱动自己的 DEPEX 求一遍，再检查每个协议 GUID 在子集内有没有生产者（GUID 出现在某个模块的
+PE32 里才算提供者），最后报 `unsatisfied`。
+
+结论：**31 个厂商模块 + 6 个 USB 模块 = 依赖闭合，unsatisfied: 0**。
+
+```
+UsbfnDwc3Dxe 的 DEPEX 一共 16 项，其中只有 4 项不是核心 UEFI 协议：
+  fa5f306b-…（PmicDxe 提供）     157a5c45-…（UsbPwrCtrlDxe 提供）
+  f4e5c7d0-…（EFI_SMEM_PROTOCOL，SmemDxe 提供）   18a031ab-…（DxeCore）
+UsbDeviceDxe  -> fa5f306b + SMEM
+UsbConfigDxe  -> PmicDxe 的协议 + SMEM + ClockDxe 的时钟协议 + ACPI SDT + b0760469 + 157a5c45
+UsbInitDxe    -> e722b03f-…（UsbConfigDxe 提供）
+UsbMsdDxe / UsbPwrCtrlDxe -> DEPEX TRUE
+```
+
+所以 `uke.dsc` 现在有三个开关（都只影响 `Include/{DXE,APRIORI}.inc` 里的块）：
+
+| 开关 | 含义 |
+|---|---|
+| `UKE_VENDOR_HW=1` | 整套厂商 fleet（不含 storage） |
+| `UKE_VENDOR_USB=1` | 时钟/电源/PMIC 底座 + USB function 栈 |
+| `UKE_VENDOR_STORAGE=1` | 再加上 UFS/Sdcc |
+
+`UKE_VENDOR_USB=1` 编出来的镜像里，厂商模块 **31 进 / 18 出**，被排除的正是
+`QcomChargerDxeLA`（logfs 证明它 `ChargerPlatform_Init Enabled WDOG.`）、`ChargerExDxe`、
+`PmicGlinkDxe`、`UsbMsdDxe`、`UFSDxe`、`SdccDxe`、`PILDxe/PILProxyDxe/SPSSDxe`、`GpiDxe`、
+`SPIDxe`、`TsensDxe`、`LimitsDxe`、`DDRInfoDxe`、`ButtonsDxe`、`FeatureEnablerDxe`、`RngDxe`、
+`RscDxe`。保留的 USB 侧是 `UsbfnDwc3Dxe`、`UsbPwrCtrlDxe`、`UsbDeviceDxe`、`UsbConfigDxe`、
+`UsbInitDxe`、`UCDxe`。
+
+### 为什么不再需要"猜"内核能不能接管：固件自己把状态打出来
+
+`drivers/QcomXnuUsbDebug/soc/QcomUsbQualify.c` 的内核侧检查是：GDSC 上电、BCR 复位已释放、
+五个 CBCR 里前三个没有 CLK_OFF、`GSNPSID` 可读且是 0x5533/0x3331、**DCTL.RUN_STOP=0 且
+DSTS.DEVCTRLHLT=1**（`halt_inherited()`）。最后一条是关键：厂商 USB 栈不会在
+ExitBootServices 里停控制器，所以固件必须自己停。
+
+`UkeUsbLogDxe` 因此新增两件事，全部在 ReadyToBoot（面板上看得见）：
+
+```
+UKE-QUD: gcc bcr=… gdscr=… cfg_gdscr=…        <- 先只读 GCC（常开时钟域）
+UKE-QUD: cbcr … … … … …
+UKE-QUD: NOT INHERITABLE pwr=0 rst_deasserted=1 clocks=1/3 (DWC3 not touched)
+   或  UKE-QUD: dwc3 gsnpsid=5533xxxx gctl=… phycfg=…
+UKE-QUD: dwc3 dcfg=… dctl=… dsts=… run_stop=1 halted=0
+UKE-QUD: halt 3 ms dctl=… dsts=… halted=1
+```
+
+读数顺序照抄 qualifier：**没证明电源/时钟之前绝不去读 DWC3 窗口**（不可访问总线的读是
+异步异常，以前的黑屏就是这么来的）。另外注册了 ExitBootServices 事件再清一次 RUN_STOP，
+因为厂商栈自己的定时器在 ReadyToBoot 之后还可能把它设回去。
+
+两个面板窗口的停留都加了 `UkeWatchdogPet`：Gunyah 的虚拟看门狗在 ~30 s 会复位没人喂的启动，
+而这两段停留（8 s + 10 s）正好在窗口里。
+
+### 顺手补上的一个真 bug
+
+`MemoryMapLib` 里 **没有 GCC（0x00100000）这一段**，而 `ClockDxe` 和这次的探针都要读它。
+补上 `{"GCC", 0x00100000, 0x00200000, AddDev, MMIO, UNCACHEABLE, MmIO}`。
+（live.dts `gcc: clock-controller@100000 reg <0x100000 0x1f4200>` 与 `soc/Uke.h` 完全一致。）
+
+### 产物与证据
+
+```
+work/flash/boot-round-b70-usbsubset.img   1548288 B  sha256 69b597cba8d3cb391c606f11a64edbfd02ad4db513079f43a280e047dde63947
+  内含 FD sha256 a82407bf7cf5eae3e1547b02dbdb97ea655a3305a581ab2eb87ac63242eefe10（= 本地新编的 FV）
+  boot.img 头：v4 / kernel_size 1538652 / ramdisk 0 / 末尾 DTB d00dfeed
+  与 b51（真机启动过）的 boot.img 头结构完全一致；`unixnu bootimg` 打印的
+  "header does not match" 是它 verify() 按 v2/v3 布局解析 v4 头的老问题，不是镜像坏了
+```
+
+`vendor_boot` 不换：`work/flash/vendor_boot_round-b68-usbprobe.img`（b66 内核），本轮只动固件。
+
+### 内核侧那个失败（不修就没法进下一轮）
+
+CI `build-uke-kernel-min`（run 42263483616, `b1fecfe`）在 **Pass 1** 就挂了：
+
+```
+== kernel: patch zzzzzzzzzzzzzzz-uke-usb-console.patch
+error: patch failed: pexpert/arm/pe_kprintf.c:13
+error: patch failed: osfmk/kern/debug.c:1133
+error: patch failed: osfmk/kern/printf.c:911
+```
+
+170 个补丁里它是**最后一个**，所以是前面某个补丁把上下文改了。本地取证已经开始：
+把 xnu-10063.141.1 拉到 `work/analysis/xnu-src`，按 `patch_series = [arch, os, device]` 的
+真实顺序重放全部 170 个补丁，定位冲突点后重新生成这两份补丁（组件文档明确要求：
+**旧的按设备 USB 补丁和新的组件补丁不能叠**）。
