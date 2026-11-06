@@ -1940,3 +1940,72 @@ UKE USB: DWC3 id=… gctl=… dctl=… dsts=…
 16 条 DEPEX 就得连带 48 个厂商 DXE 一起编进 FV。实测（b56/b57/b59）那套栈一次都没让机器走到 XNU：
 先是栈被用穿，加到 1 MiB 后变成黑屏+重启。代码与 `.efi` 都在（`UKE_VENDOR_HW` 可切回），
 但它是备选，不是主路。
+
+---
+
+## 44. b67 实机：ArmCpu/GIC 探头全绿，但 USB 探测行没上屏（Round 28 收尾）
+
+### 实拍拿到的新事实（三段视频截图）
+
+UniXNU 启动屏那一帧信息量最大：
+
+```
+DARWINBOOT: hand-off to the kernel
+kernel:  va 0xFFFFFFF007004000  …
+video:   pa 0xE2DA0000  vbar 0x100000000  pages 32 bpp
+gic-probe: ID_AA64PFR0_EL1 … (AArch64 4 KiB granule supported)
+gic-probe: GICv3 present …
+gic-probe: GICD_CTLR 0x00000002 (Grp1 1 ARE 1 DS 1 RWP 0) host entry, Exc: stop timer
+gic-probe: wrote 0x00000003, read back 0x00000003 after 0 polls: GICD_CTLR accepts writes
+gic-probe: restored 0x00000002, read back 0x00000002 after 0 polls: ok ack 0
+```
+
+以及 redistributor 网格：
+
+```
+gic-probe: MPIDR_EL1 0x81000000  this core affinity 0x0
+gic-probe: gicr +0x00000 … waker 00000002 asleep 0 psleep 1 <= this core
+gic-probe: gicr +0x40000/0x80000/…/0x1C0000   aff 0x100…0x700
+gic-probe: this core's frame is slot 0x0 of the 0x40000 grid (0xfff = absent)
+gic-probe: holding this screen for 20 s so it can be photographed
+```
+
+结论（有实拍）：
+
+1. **ArmDTPlatform/ArmCpu 真的在内核里跑起来了**，GICv3 被识别、`GICD_CTLR` 可写、8 个
+   redistributor 全在网格里；
+2. **本核 redistributor 仍是 `psleep 1 / waker 0x2`** —— 唤醒那一步没做/没生效，这就是
+   "架构定时器进不了 `rtclock_intr`"最可能的直接原因（下面要查）；
+3. 之后仍然是 `Unhandled implementation specific error`（平台错误/SError）；
+4. 主机 `ls /dev/ttyACM*` **无匹配** —— 符合预期：本轮是只读探测（`uke_usb=1`），
+   CDC 串口要 `uke_usb=2` 才有。
+
+### 为什么没看到 `UKE USB:` 那几行
+
+`uke_usb.c` 的入口是 `STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, …)` —— 比视频控制台**早**，
+所以它的 `printf` 只进 msgbuf，不上屏；要读到得靠"**下一次启动**的空间回显 pram"。
+而我们的回显原来只打**最后 34 行**：上一次启动的最后 34 行正好是 panic，早期探测行早被挤掉了。
+
+### 修法（b68）
+
+`UkeUsbLogDxe` 的面板回显改成**两段**：
+
+```
+--- previous boot log: first 12 of N kept lines ---     ← 早期探测（UKE USB:、ArmCpu…）在这里
+--- and the last 24 ---                                  ← panic 在这里
+```
+
+并且回显后**停 15 秒**（新 PCD `PcdUkePanelHoldSeconds=15`，音量上键可提前结束），
+因为 ReadyToBoot 之后紧接着就是 loader 自己的输出，不停一下这屏会被立刻冲掉。
+
+### b68 镜像
+
+```
+work/flash/boot-round-b68-panelecho.img      6a62af9e…  (1,122,304 B)
+work/flash/vendor_boot_round-b68-usbprobe.img 0621b532…  (85,782,528 B；b66 内核)
+内核参数仍是: uke_usb=1 uke_usb_power=11（只读探测）
+```
+
+用法：**开机两次**。第二次启动时，`ReadyToBoot` 会把上一次内核日志的开头 12 行与最后 24 行
+打在面板上并停住 15 秒 —— 那 12 行里应该有 `UKE USB: DWC3 id=…`、`UKE USB: GCC power=…`、
+`UKE USB: SMMU …`。这正是"XNU 能不能看见 USB 控制器"的判据。
