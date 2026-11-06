@@ -1852,3 +1852,46 @@ cat /dev/ttyACM0 > uke-kernel.log    # 环形缓冲每秒回绕重放一次，�
 
 驱动的 TX 线程每秒把读指针回绕一次，所以**迟到的连接也能拿到完整日志**（这是 sirius 那轮
 debug 出来的、被记录为"load-bearing"的行为）。
+
+---
+
+## 42. 两个仓库、两个产物：固件与内核分别装了什么（Round 28 用户提问）
+
+这一轮用户连问两次"无厂商固件是做什么的""uefi-uke 里有吗"，说明分工需要写清楚。
+
+| 位置 | 谁编译 | 里面装的东西 |
+|---|---|---|
+| **固件**（UEFI FV）→ `boot.img` | `workspace/uefi-uke`（Mu-Silicium fork） | EDK2 核心 + 我们自己的 `UkeBootMemoryDxe`、`UkeUsbLogDxe`；**厂商 DXE 栈只在 `UKE_VENDOR_HW=1` 时进 FV** |
+| **内核**（XNU + 自研 kext）→ `vendor_boot` | CI（`work/push/macOS-ForUke` 的 board.toml/archives） | `kernel.macho`：`UkeLastLog.c`（msgbuf→pram）、`uke_usb.c`（DWC3 CDC-ACM 串口）、ArmCpu/ArmDTPlatform 等 |
+
+`uefi-uke` 里**有**：
+
+```
+Binaries/uke/QcomPkg/Drivers/      48 目录 / 49 个 .efi（从库存 uefi_a.img 抽出）
+  UsbfnDwc3Dxe UsbConfigDxe UsbDeviceDxe UsbMsdDxe UsbInitDxe UsbPwrCtrlDxe UFSDxe ClockDxe PmicDxeLa …
+Platforms/Xiaomi/ukePkg/{uke.dsc,uke.fdf,uke.dec,Include/*,Drivers/*,Tools/gen-vendor-binaries.py}
+```
+
+`uefi-uke` 里**没有**（那是内核侧的）：`package/uke_usb.c`、`scripts/build-uke-usb.py`、
+`package/UkeLastLog.c`。
+
+### 为什么"无厂商固件"
+
+厂商栈只为"UEFI 阶段把日志当 U 盘给主机"服务（`UsbMsdDxe`）。实测它自己把启动搞挂：
+
+- 256 KiB 固件栈被用穿（`SP=0xA7600F20`、`FAR=0xA7600F30` 落在唯一未映射的 4 KiB 页）；
+- 栈加到 1 MiB 后变成黑屏 + 自己重启（Gunyah 虚拟看门狗窗口，已加喂狗但未验证）。
+
+于是把"日志"这件事移到内核侧（DWC3 CDC-ACM），固件回到 `UKE_VENDOR_HW=0`——就是 b51 那种
+能走到 XNU 的配置。代码和 `.efi` 都还在，将来要回到 UEFI 暴露 U 盘的路，只需把开关改回 1，
+并解决栈与看门狗这两个已知问题。
+
+### 移植驱动的编译回合（都是小问题，逐条修完）
+
+| run | 错误 | 修法 |
+|---|---|---|
+| `42239274488` | `kmem_alloc_contig` / `KMA_*` 未声明 | 改静态页对齐缓冲（16 KiB，本来就要验证物理连续） |
+| `42239610271` | 同上一组（另一份提交） | 同上 |
+| `42242998639` | `aligned(PAGE_SIZE)` 不是整型常量 | 写 `4096` |
+| `42246401123` | `GSNPSID` 未声明 | 该文件里它是字面量 `0xc120` |
+| `42249199942`（`066eb74`） | — | 只读探测段（`uke_usb=1 uke_usb_power=11`） |
