@@ -31,6 +31,12 @@ volatile uint32_t armdt_platform_nvram_proxy = 0;
 volatile uint32_t armdt_platform_device_count = 0;
 volatile uint32_t armdt_platform_platform_io = 0;
 volatile uint32_t armdt_platform_platform_errors = 0;
+
+// uke-stage-last-panic (patches/xnu/uke-stage-last-panic.patch) writes text into the
+// pram panic record, which the next boot prints and UkeUsbLogDxe also echoes onto the
+// panel. Weak so a configuration without that patch still links: the SError details
+// then live only in this boot's log.
+void uke_stage_last_panic (const char *text) __attribute__((weak));
 }
 
 // XNU's machine layer asks PE_handle_platform_error() about every platform error
@@ -56,10 +62,19 @@ bool ArmDTPlatformIO::handlePlatformError (vm_offset_t far)
 {
   unsigned strict = 0;
   unsigned long total = ++armdt_platform_platform_errors;
+  unsigned long long pc = (unsigned long long) (vm_offset_t) __builtin_return_address (0);
+  char text[192];
+
   PE_parse_boot_argn ("uke-platform-error-panic", &strict, sizeof (strict));
-  IOLog ("ArmDTPlatformIO: platform error #%lu far=0x%llx pc=0x%llx%s\n", total,
-      (unsigned long long) far, (unsigned long long) (vm_offset_t) __builtin_return_address (0),
-      (strict != 0) ? " (panicking as asked)" : " (ignored)");
+  snprintf (text, sizeof (text), "ArmDTPlatformIO: platform error #%lu far=0x%llx pc=0x%llx",
+      total, (unsigned long long) far, pc);
+  IOLog ("%s%s\n", text, (strict != 0) ? " (panicking as asked)" : " (ignored)");
+  // Stage it for the next boot as well: with the log retrieval channel not yet
+  // working, the pram record is how this line survives this boot.
+  if (uke_stage_last_panic != nullptr) {
+    uke_stage_last_panic (text);
+  }
+
   return strict == 0;
 }
 
