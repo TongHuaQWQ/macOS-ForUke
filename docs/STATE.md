@@ -2940,3 +2940,30 @@ USB（内核侧 `uke_usb.c`，新内核已就绪）与 **面板分页**（本轮
 work/flash/boot-round-b81-paged.img       1122304 B  sha256 084cb2adc1ca0d9c0786c5e73cbfe4bca6b00b4981610bab7d83090ffa04a1a3
 work/flash/vendor_boot_round-b80-usbkernel.img  85782528 B  sha256 63d0cf66…（内核 e868737c，带 USB 探测线程）
 ```
+
+---
+
+## 60. b81 + 新内核真机：固件正常，内核起到达尔文，然后仍是那个已知的 SError panic
+
+实拍三张（同一轮）：
+
+```
+Unhandled implementation specific error            ← XNU panic 屏（绿/蓝条 = 视频控制台）
+```
+
+另外两张是控制台尾部：我们的 `gic-probe:` 全部行 + `Exiting boot services. A green bar across the
+top marks the loader handoff before the kernel branch.` + `SecurityLock: […] LockType: SOFTWARE_LOCK …`。
+
+也就是说这一轮：
+
+1. **固件侧没有卡住、没有异常** —— 无厂商驱动的 b81（分页 + UKE-GCC + 阶段日志）走完了整个 DXE；
+2. **内核起来了、EARLY_BOOT 走完、退出 boot services、进了 kext 阶段**；
+3. 然后命中 `panic_plain("Unhandled implementation specific error")` —— 就是 §46/§47 记过的那条：
+   `arm64_platform_error()` → `PE_handle_platform_error(far)` 返回 false（因为没有 `IOPlatformIO`
+   服务发布）→ `sleh.c` 的 SError 兜底 panic。**这轮没有新的坏消息，是同一个老关口。**
+
+关键点：`UKE USB:` 那几行在**上一屏**（`uke_usb` 的线程在 EARLY_BOOT + 8 s 打印），
+被后面的 `gic-probe` 20 秒停留和 boot-services 退出刷掉了 —— 所以照片里看不到，
+不等于驱动没跑。**正好用这次新加的分页来取**：再启动一次同一对镜像，
+ReadyToBoot 的 `--- boot log page N ---` 里就是**上一次启动的内核日志**（从 pram 读回来的），
+翻页找 `UKE USB:` 即可。
