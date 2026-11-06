@@ -2599,3 +2599,49 @@ work/flash/boot-round-b75-prevlog.img   1536000 B
 sha256 0356dd77fbde307bb7907e601ad73ad36eccd94f9c24ec2c93c870d04641cbf6
   FD sha256 d84e64b3dd4757b2…（55 images verified）
 ```
+
+---
+
+## 55. 两个真答案：诊断行被 DEBUG 级别过滤掉了；启动停在 `ClockDxe`
+
+### (1) 为什么我的打印一行都没出现 —— 不是崩溃，是级别过滤
+
+`SiliciumPkg.dsc.inc:71` 把 `PcdDebugPrintErrorLevel` 设成 **0x8007EE0F**：
+
+```
+DEBUG_INIT  0x00000001  on      DEBUG_INFO      0x00000040  OFF
+DEBUG_WARN  0x00000002  on      DEBUG_DISPATCH  0x00000080  OFF
+DEBUG_LOAD  0x00000004  on      DEBUG_VARIABLE  0x00000100  OFF
+DEBUG_FS    0x00000008  on      DEBUG_ERROR     0x80000000  on
+```
+
+dispatcher 打印的 `Loading driver at …` 是 `DEBUG_LOAD|DEBUG_INFO` ⇒ 因为 LOAD 位在，**能打**；
+而 `UkeProgressDxe` 里我写的是纯 `DEBUG_INFO` ⇒ 编译进去、运行时被**过滤掉**。
+所以 b71–b75 里所有 `UKE-BEAT`/`UKE-PREV` 静默，**原因在这里**，既不是中断没投递，也不是崩溃。
+（这也解释了 b72 的 assert：那是 `AsciiPrint`，另一条路径。）
+
+已把这 9 处改成 `DEBUG_WARN`。
+
+### (2) 真正停在哪：`ClockDxe`
+
+b75 的那张照片把整个 APRIORI 走了下来，最后一行是：
+
+```
+Loading driver at … ClockDxe.efi     ← 然后黑屏
+```
+
+前面依次过了 Smem / DALSys / HWIO / ChipInfo / PlatformInfo / ProjectInfo / HALIOMMU / ULog /
+CmdDb / PwrUtils / Npa / Rpmh / Vcs（IPC 三件套已移除，`Smp2pDxe`/`GlinkDxe` 那一段不再出现）。
+
+`ClockDxe` 是按 BSP 数据重配整棵 GCC 时钟树的驱动：它很可能把 **DPU/panel 的时钟或电源关掉**
+（屏幕黑但 CPU 继续），也可能自己挂住。这两种情况下一轮就能分辨：
+
+- 下一次开机的 `UKE-PREV` 若报 `stage 4/5/6` ⇒ 固件穿过了 ClockDxe 一路走到 ReadyToBoot/payload，
+  黑屏只是**显示被关**，内核侧继续；
+- 若只报 `stage 1/2` ⇒ `ClockDxe` 把启动卡死在那里。
+
+```
+work/flash/boot-round-b76-visible.img   1536000 B
+sha256 8fe14f5727382f15536deb6c68aa192d95cdd1b3550da01d6241a3f45cd16f46
+  FD sha256 873aa3958cd69158…（9 处 DEBUG_WARN，UKE-PREV/UKE-BEAT 现在能打出来）
+```
