@@ -1998,8 +1998,23 @@ uke_usb_console_start(void)
  * makes a panic visible from the host.
  */
 static void
+uke_usb_thread(void *arg __unused, wait_result_t wr __unused)
+{
+	/* The video console is attached by the platform kexts, long after EARLY_BOOT. Printing the
+	 * probe before that puts the lines in msgbuf only, which is why the first b67 run showed a GIC
+	 * probe screen with no UKE USB lines at all: they had been printed into the ring and the ring is
+	 * not replayed when the console comes up. Wait for the console, then probe. */
+	IOSleep(3000);
+	printf("UKE USB: probe thread running\n");
+	uke_usb_console_start();
+}
+
+static void
 uke_usb_startup(void)
 {
-	uke_usb_console_start();
+	thread_t thread;
+	if (kernel_thread_start_priority(uke_usb_thread, NULL, BASEPRI_KERNEL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
+	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, uke_usb_startup);
