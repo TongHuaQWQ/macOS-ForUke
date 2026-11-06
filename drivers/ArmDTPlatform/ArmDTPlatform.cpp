@@ -61,7 +61,8 @@ OSDefineMetaClassAndStructors (ArmDTPlatformIO, IOPlatformIO)
 bool ArmDTPlatformIO::handlePlatformError (vm_offset_t far)
 {
   unsigned strict = 0;
-  unsigned long total = ++armdt_platform_platform_errors;
+  armdt_platform_platform_errors += 1; /* volatile: no ++/-Werror,-Wdeprecated-volatile */
+  unsigned long total = armdt_platform_platform_errors;
   unsigned long long pc = (unsigned long long) (vm_offset_t) __builtin_return_address (0);
   char text[192];
 
