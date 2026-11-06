@@ -2645,3 +2645,41 @@ work/flash/boot-round-b76-visible.img   1536000 B
 sha256 8fe14f5727382f15536deb6c68aa192d95cdd1b3550da01d6241a3f45cd16f46
   FD sha256 873aa3958cd69158…（9 处 DEBUG_WARN，UKE-PREV/UKE-BEAT 现在能打出来）
 ```
+
+---
+
+## 56. b76 复现了 `0xA700DFAC` 异常；于是把 ClockDxe 拿掉，持久记录也搬走
+
+用户实测 `boot-round-b76-visible.img`：**又出现 `Synchronous Exception at 0xA700DFAC`**（和 b73 同一地址）。
+但 b74、b75 同一位置是好的，而 b73/b76 之前唯一共同的差别是"我的驱动真的往外打印了" ——
+可这行异常来自 **Sec 的早期异常向量**，那时连 `ArmCpuDxe`（第 6 个驱动）都没 dispatch，
+`UkeProgressDxe`（第 10 个）**根本还没跑**。
+
+⇒ 结论：这个异常**不是我的代码引起的**，是启动最早期的一段**间歇性**故障（b74/b75 没触发）。
+地址 `0xA700DFAC` 落在 MemoryMapLib 的 **"FD Reserved"（0xA7000000, 1 MiB）** 里，即"跳进了没有代码的页"。
+注意这片页在所有 Silicium 平台里都是 FD 下方的预留区（例如 pong/aston 的 FD 在 0xA7400000，预留 4 MiB），
+而 uke 的 FD 挪到了 0xA7100000。
+
+两处保守措施：
+
+1. **持久阶段日志搬家**：`UKE_PERSIST_BASE` 从 `0xA7000000`（FD Reserved）改到
+   **`0xA7605000`（MemoryMapLib 的 "Log Buffer"，32 KiB，RtData，本固件所有，带 XN）** ——
+   不再和那片可疑页共用。
+2. **`ClockDxe` 移出镜像和 APRIORI**：b75 的面板显示启动死在它那一行（之后黑屏且不复位）。
+   它按 BSP 数据重配整棵 GCC 时钟树；而 USB 侧并不需要它 ——
+   `QcomXnuUsbDebug` 只检查继承下来的 GDSC/BCR/CBCR 状态，而 `UkeUsbLogDxe` 会把这份状态在
+   ReadyToBoot 时读出来打印。所以这轮正好测"没有 ClockDxe 能不能第一次走到 ReadyToBoot"。
+
+顺带确认了移除 ClockDxe 不会让别的驱动卡住 DEPEX：b75 的顺序里 `CmdDb → PwrUtils → Npa → Rpmh → Vcs`
+都排在 ClockDxe **之前**并且已经被 dispatch，说明它们等的 `1c34f691` 由 `CmdDbDxe` 提供。
+
+镜像里现在是 28 个厂商模块（含 `PmicDxe` + 5 个 USB 模块），`ClockDxe` 已不在。
+
+```
+work/flash/boot-round-b77-noclock.img   1499136 B
+sha256 d72c2a55c46df3ebfd46894a04e83d7e08daaa68d3776800e1a7fbcb0ccba531
+  FD sha256 058a8ddbe44f06f0…
+```
+
+内核侧：run `42269780292` 已经编到 **第 17 步 "Link the kernel (prelink included)"** ——
+也就是 Pass 1 / Pass 2 / 各个 archive（包括 `build-uke-usb.py`）都过了，`uke_usb.c` 的编译修复生效。
