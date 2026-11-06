@@ -2854,3 +2854,40 @@ total 0
 目录存在但没有任何记录，说明 pstore core 在、但要么 ramoops 后端没把这块区域注册成 backend，
 要么我们的记录没通过 `persistent_ram` 的校验。要分辨只需要几条命令（见下），
 比继续猜快得多。
+
+### 59b. dmesg 把 pstore 为空的原因说清楚了，而且顺带给了一条更好的路
+
+用户贴的 Android dmesg：
+
+```
+[0.000000] OF: reserved mem: 0x00000000a7000000..0x00000000a73fffff (4096 KiB) map non-reusable ramoops_region
+[0.077553] printk: console [ramoops-1] enabled
+[0.077683] pstore: Registered ramoops as persistent store backend
+[0.077683] ramoops: using 0x400000@0xa7000000, ecc: 0
+[0.177379] pstore: Invalid compression size for deflate: 0
+[2.661000] mtdoops: pares mtd_dt, mem_address =0xa7000000, mem_size =0x400000
+[2.661006] mtdoops: pares mtd_dt, pmsg_size =0x200000,console-size =0x200000
+[2.668164] mtdoops: Attached to MTD device 0
+[2.781102] mtdoops: ready 3, 140
+```
+
+三条结论：
+
+1. **区域是对的**：`ramoops: using 0x400000@0xa7000000`，正好是我们写的那块。
+2. **pstore 后端确实注册了**，但这个内核开了 `CONFIG_PSTORE_COMPRESS` +
+   `CONFIG_PSTORE_COMPRESS_DEFAULT="deflate"`，记录要带压缩头和长度校验
+   （`pstore: Invalid compression size for deflate: 0`）；我们写的是裸文本，
+   于是被**静默丢掉** —— 不是地址错，是格式不合它的压缩约定。
+3. **更好的一条路**：Xiaomi 自己的 `mtdoops` 把同一块区域接成了 **MTD device 0**
+   （`mtdoops: Attached to MTD device 0`）。也就是说 Android 侧有 `/dev/mtd0`，
+   **可以绕过 pstore 的格式校验直接 dd 原始字节**：
+
+```sh
+adb shell su -c 'cat /proc/mtd'
+adb shell su -c 'dd if=/dev/mtd0 bs=1M count=1 2>/dev/null | strings | head -100'
+```
+
+我们的记录在 `0xa7000000`（区域起点、console 区前 1 MiB），所以 `count=1` 就够。
+
+顺带确认 `printk: console [ramoops-1] enabled` **不会**覆盖我们的记录：pstore 的 console
+只在 oops/panic 时才写（否则 `pstore.console=force`），正常开机不动这块。
