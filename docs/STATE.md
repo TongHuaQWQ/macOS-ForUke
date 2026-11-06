@@ -1040,3 +1040,59 @@ uke.dsc
 `Drivers/UkeUsbLogDxe/`、`Tools/gen-vendor-binaries.py`、`Resources/Configs/uke.toml`（FD 0x500000）
 全部纳入版本控制；`Binaries/uke/QcomPkg/**` 由 `Tools/gen-vendor-binaries.py` 从
 `work/analysis/ref/vendor-dxe/`（库存 `uefi_a.img` 的抽取结果）重新生成，不入库。
+
+---
+
+## 27. fileset 未匹配调用：把 panic 的现场对到具体函数（Round 17，为下一轮准备）
+
+`--allow-missing` 的语义是"每个未匹配的函数起点都绑到 panic stub"，所以现在每条 panic 都指向一个
+具体的未匹配函数。这轮把 b47 内核上的那条 panic 拆开看：
+
+```
+fileset: original component called an unmapped kernel function from 0xfffffff00979c38c (x0 0x8 x1 0x2)
+```
+
+用 `work/analysis/symbolize-panic.py --artifact work/ci-artifacts/b47 --disasm`（slide `0x42f0000`）：
+
+```
+fffffff00979c384: mov  w0, #0x8
+fffffff00979c388: bl   0xfffffff00c09e690      ← 被调用者（stub）
+fffffff00979c38c: cbnz w0, ...                 ← 返回地址 = panic 里的 0x…c38c
+fffffff00979c394: adrp x0, 0xfffffff0075fe000 ; add x0,#0xffd ; add x1,sp,#8 ; mov w2,#4
+fffffff00979c3a4: bl   0xfffffff00c02dd84      ← 形状像 PE_parse_boot_argn(name,&v,4)
+fffffff00979c3a8: adrp x0, 0xfffffff007602000 ; add x0,#0xf4f ; add x1,sp,#0xc ; mov w2,#4
+fffffff00979c3b8: bl   0xfffffff00c02dd84
+```
+
+两个信息：
+
+1. 调用者在**解析 boot-arg**（连续两个 `(name, &int, 4)` 的调用），所以这条 panic 发生在很早的
+   boot-arg 处理里，还没到 kext 启动；
+2. `0xfffffff00c09e690` 在 b47 产物里解析成
+   `_set_awl_scratch_exists_flag_and_subscribe_for_pm + 0xc8` —— **不是函数起点**。
+   也就是说 emitter 给未匹配函数放的 stub 落在了一个已匹配函数的中段。这一点在写实现之前要先搞清楚
+   （是 fileset 的函数 extent 与 native 函数重叠，还是 stub 放置按"原地址"而 native 布局不同）。
+
+### 缺口规模（`ref/classify-b47.json`）
+
+| 类别 | 函数数 | 调用点 | 处理方式 |
+|---|---|---|---|
+| `anchorable` | 2 | 18 | 已改名加进 `kits/XnuPrelink/fixtures/fileset-25F84-symbols.json`（`_vnode_hold`、`_ml_set_interrupts_enabled_with_debug`） |
+| `absent` | 22 | 1018 | **我们的重建内核里根本没有对应函数**，没法 anchor，只能自己实现或按需放过 |
+
+`absent` 里最重的几个（calls 数 / 体积 / 线索）：
+
+```
+216  0x190  amcc_rorgn_common.c / "overflow in rorgn_contains: %p + %zu @%s:%d"
+173  0x90   callees: IORWLockUnlock, IOStatistics::getKextNodeFromBacktrace, kalloc_ext
+137  0x8    （空体，像 getter）
+126  0x48
+ 83  0x2c
+ 62  0x20
+ 48  0x8c
+ 36  0xc
+```
+
+下一步的顺序：先用 USB 日志通道确认启动链到底走到哪，再按"实际被调用到的"顺序补实现
+（0x8/0xc/0x20 这些一两条指令的大概率是 getter/谓词，风险低；`IORWLockUnlock` 那个明显有副作用，
+不能直接空返回）。
