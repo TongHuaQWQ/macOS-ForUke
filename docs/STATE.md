@@ -893,3 +893,71 @@ UsbDeviceDxe/UsbInitDxe/UsbfnDwc3Dxe/PmicDxeLa/SmemDxe/NpaDxe/ChipInfoDxe/Platfo
 work/flash/vendor_boot_round-b53-ukelog.img   ed50aa6b…  (85,782,528 B)
 work/flash/boot-round-b53-ukelog.img          2d0e9915…  (1,724,416 B，内含 5 MiB FV，sha 已核对)
 ```
+
+---
+
+## 24. 内核日志 → pram → USB：通道两头都接上了（Round 16）
+
+### 先把 pram 地址钉死（之前没有验证过）
+
+`board.toml [payload.adt] panic_region = "0x9FFE00000:0x200000"` 从来没被核对过。这次直接读
+**构建出来的 ADT**（`out/.../Payloads/kernel.macho.adt`，14,192 B）：
+
+```
+pram occurrences: ['0x28c4']           # 只有一个 pram 节点
+0x9ffe00000 as LE u64 at: ['0x28f0']   # reg = 0x9FFE00000
+0xff800000  as LE u64 at: []           # make-uke-adt.py 里 PANIC_LOG_BASE 的那个值根本没进 ADT
+reg 数据: 00 00 e0 ff 09 00 00 00 | 00 00 20 00 00 00 00 00  → 0x9FFE00000 + 0x200000 ✅
+```
+
+结论：**XNU 的 panic/日志窗口就是 `0x9FFE00000 + 0x200000`**（`unixnu/devicetree.py` 从
+`panic_region` 生成 `/chosen/pram`）。`scripts/make-uke-adt.py` 里的
+`PANIC_LOG_BASE = 0xFF800000 / PANIC_LOG_SIZE = 0x380000` 是死代码，但它把
+`/chosen/embedded-panic-log-size` 写成了 `0x380000`（ADT 里实测 `00 00 38 00` = LE `0x00380000`），
+与 reg 的 `0x200000` 不一致 —— **待修**（见下）。
+
+### 固件侧：`UkeUsbLogDxe` 现在会把上一次启动的内核日志搬进日志盘
+
+- `PcdUkePramBase = 0x9FFE00000`、`PcdUkePramSize = 0x200000`（与 ADT 实测一致）。
+- ReadyToBoot 时先 `gDS->GetMemorySpaceDescriptor()` 确认窗口在 GCD 里（未映射就读会 fault），
+  再扫一遍、只保留长度 ≥8 的可打印串（换行连接），最多 192 KiB 写进日志盘，
+  并打一行摘要到面板：`pram first text: "..."` / `<none: DRAM did not survive…>`。
+- 日志盘从 256 KiB 扩到 **1 MiB**（`UKE_LOG_BLOCKS 256 × 4096`）。
+
+所以现在的链路是：
+
+```
+XNU 运行 → msgbuf 尾部写进 pram（内核侧）            ┐
+                                                   ├→ 下一次 UEFI 启动读 pram → 1 MiB RAM 盘 → USB MSD → 主机 dd
+UEFI 阶段自己的日志（dispatch/枚举/UFS LUN）────────┘
+```
+
+### 内核侧：`UkeLastLog` 终于被链接进去了（CI run `42211461355`）
+
+`board.toml [kernel] archives` 里 `build-boot-log.py` 一直是被注释的，理由是"本仓库没有
+`kits/uke`"—— 实际上源就在 `package/`（`kit = "uke"` 让它在构建树里显示为 `kits/uke`）。
+已让 `scripts/build-boot-log.py` 在 `kits/uke/` 缺失时回退到 `package/`，并打开这个 archive。
+
+`UkeLastLog.c` 的行为（读代码确认，不是猜）：
+- 由 `sheng-log=1` 打开（这个 boot-arg 一直在 kernel_args 里，之前没有消费者）；
+- 每 500 ms 把 **msgbuf 环的最新 cap 字节**拷到 `gPanicBase` 的 FUNK 头后面
+  （`cap = min(msgbuf size, 2 MiB − header)`，msgbuf 默认远小于 2 MiB，所以不会越界）；
+- ramoops 那半边有 `gPanicSize < 0x200000+0x200000` 的守卫，我们只有 2 MiB → 自动跳过（不会写飞）；
+- `XNU_WATCHDOG_POLICY` / `CONFIG_XNU_BOOT_PROGRESS` 都没开，所以另外两个源文件是惰性的。
+
+也就是说：CI 产物一旦到位，下一次 payload 就能取到**内核控制台日志尾部**，不再只有 panic 文本。
+
+### 待修的小坑（下一轮）
+
+`/chosen/embedded-panic-log-size` = 0x380000 比 `pram.reg` 的 0x200000 大：XNU 若按这个长度写，
+尾部会越过 DRAM 高区末端 `0xA00000000`。等通道验通后把它改成与 reg 一致（改 make-uke-adt.py 的
+`PANIC_LOG_SIZE`，或让 devicetree.py 覆盖该属性）。
+
+### b54 镜像（要刷的是这个；b53 作废）
+
+```
+work/flash/vendor_boot_round-b54-pramlog.img  826eb3de…  (85,782,528 B)
+work/flash/boot-round-b54-pramlog.img         c76d3ff5…  (1,724,416 B，内含 5 MiB FV)
+```
+
+**要 boot 两次**：第一次让 XNU panic 把日志写进 pram，第二次 UEFI 就会把它搬进日志盘。
