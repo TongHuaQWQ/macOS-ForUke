@@ -73,8 +73,13 @@ bool ArmDTPlatformIO::handlePlatformError (vm_offset_t far)
   IOLog ("%s%s\n", text, (strict != 0) ? " (panicking as asked)" : " (ignored)");
   // Stage it for the next boot as well: with the log retrieval channel not yet
   // working, the pram record is how this line survives this boot.
-  if (uke_stage_last_panic != nullptr) {
-    uke_stage_last_panic (text);
+  /* An indirect call through a volatile pointer, not a direct one: the reference kernel this build
+   * links ArmDTPlatform into is RELEASE, where uke_stage_last_panic is compiled out, so the weak
+   * symbol resolves to 0 and a direct branch to it is "out of range" at link time
+   * (run 42235545609). Loading the address first turns that into a null check. */
+  void (*volatile stage) (const char *) = uke_stage_last_panic;
+  if (stage != nullptr) {
+    stage (text);
   }
 
   return strict == 0;
