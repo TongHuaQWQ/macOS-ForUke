@@ -731,3 +731,37 @@ USB 日志这条路是**可行的但需要一轮工程**（FV 解析 + DEPEX 判
 1. **先把 QEMU 日志通道收尾**（确定收益、当天可见）：`pmemsave` 已成功，只差按 XNU msgbuf 布局切片；
 2. USB 路线保留为独立项目：先只把 `pe-Ufs-*.efi` 加进 FV 实测（它的依赖最少），
    能 dispatch 就顺势拿到分区读取能力；再决定是否搬 Dwc3 的整条依赖链。
+
+---
+
+## 22. 达成：内核日志可以机读了（本地/QEMU）— Round 14
+
+`work/analysis/qemu-dump-log.sh` 已经端到端跑通：QEMU 跑同一份内核 →
+`pmemsave 0x48000000 0x20000000`（512 MB 内核数据窗口）→ 用控制台前缀 `[%5d.%06d]:` 抽出**真实日志行**。
+
+**这是"日志不再依赖拍照"的本地达成**，而且比照片信息量大得多（带时间戳、可 grep）。
+已保存样本：`work/analysis/ref/qemu-kernel-log-b47.txt`（23 行，b47 内核）。
+
+### 抽到的日志已经给出两条新事实
+
+```
+[   29.671879]: pe_arm_map_interrupt_controller: soc_phys:  0x8000000
+[   30.457132]: IONVRAM.cpp:start:1447 - ...
+[   30.460078]: IONVRAM.cpp:handleEphDM:1373 - ephemeral-data-mode not supported
+[   30.466594]: vm: creating swapfile creation thread
+[   30.481639]: AppleImage4: no legacy blob present
+[   30.485722]: AppleImage4: magazine[c1gn]: failed to read nonce slot data: 2
+```
+
+1. **`pe_arm_map_interrupt_controller` 真的执行了** —— 说明平台专家把 `intc` nub 发布出来了，
+   内核的 pexpert 中断控制器映射路径走到了（这比之前"没看到 ArmCpu 输出"强得多）。
+2. **IONVRAM 起来了**（`IONVRAM.cpp:start`），且报告 `ephemeral-data-mode not supported`
+   —— 这是 nonce/NVRAM 相关的能力缺口，可作为后续线索。
+
+magazine 名字第一次读清（之前照片太小）：`pdmg, cptx, dvdi, c1bt, c1ab, c1gn, c1sm, d1ma, c1ge, c1er, c1ai, c1al`。
+
+### 局限与下一步
+
+- 只捞到 23 行：XNU 的 msgbuf 环会滚动覆盖，且 `pmemsave` 窗口里混着 kext 的格式串表（已按前缀过滤）。
+  下一步把窗口缩到 msgbuf 所在页（用 `_msgbufp` 符号定位），并考虑用 `msgbuf=` 之类调大环形缓冲。
+- QEMU 只覆盖"能在 virt 上跑的路径"；设备上的等价物仍是 USB/UFS 那条线（§20/§21）。
