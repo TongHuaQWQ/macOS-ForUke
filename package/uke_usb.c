@@ -1695,6 +1695,26 @@ uke_usb_console_start(void)
 	if (gdscr & (1u << 31)) {
 		uke_usb_step = 3;
 	}
+	if (power == 11) {
+		/* Read-only identity of the controller: no GCC write, no DWC3 write, nothing but loads.
+		 * One boot answers "can XNU see this block at all, and is it in device mode" without
+		 * touching a single clock enable whose offset is only known for SM7250. */
+		vm_offset_t dwc = ml_io_map(DWC3_PA, DWC3_SIZE);
+		if (dwc == 0) {
+			printf("UKE USB: DWC3 map failed at %08x\n", DWC3_PA);
+			uke_usb_park(hold);
+			return;
+		}
+		uint32_t id = dwc_rd(GSNPSID);
+		uke_usb_dwc = id;
+		uke_usb_dsts = dwc_rd(DSTS);
+		uke_usb_clk = dwc_rd(GCTL);
+		printf("UKE USB: DWC3 id=%08x gctl=%08x dctl=%08x dsts=%08x\n",
+		    id, dwc_rd(GCTL), dwc_rd(DCTL), dwc_rd(DSTS));
+		uke_usb_step = 58;
+		uke_usb_park(hold);
+		return;
+	}
 	if (power == 10) {
 		/* Full clock bring-up in the order the experiments established: GDSC, the two AXI branches,
 		 * then the USB30 master branch. The DWC3 is only read (GSNPSID, DCTL, DSTS) and the driver
