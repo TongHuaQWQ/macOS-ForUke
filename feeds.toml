@@ -58,6 +58,13 @@ local = "drivers/NativeNovatekTouch"
 # component the core carries as a submodule silently never takes effect -- two rounds built the submodule's
 # ArmCpu and shipped a kernel with no probes. A `local` entry resolves in step 4 and does win.
 # The same content is published as TongHuaQWQ/ArmCpu@6288238.
+# Board copy of the platform expert, for the same first-wins reason as ArmCpu. The only
+# difference from the core's copy is the IOPlatformIO provider (see the driver).
+[[source]]
+name = "ArmDTPlatform"
+kind = "driver"
+local = "drivers/ArmDTPlatform"
+
 [[source]]
 name = "ArmCpu"
 kind = "driver"
