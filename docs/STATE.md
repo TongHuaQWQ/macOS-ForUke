@@ -2817,3 +2817,40 @@ sha256 ca92dede043fd900a934fe57d52cc21caead3e3f78ab185a82249831056c1d7e
 USB 那一侧并没有被放弃：等内核产物出来（run `42269780292` 已到第 17 步链接），
 用 `uke_usb.c` 在 XNU 里自己冷启 DWC3 是当前唯一不被厂商链路卡住的路径，
 而它的日志现在可以通过上面这条 adb/pstore 通道取回。
+
+---
+
+## 59. 内核终于编出来了（带 `uke_usb.c` 修复），新 payload 已配对；pstore 这条路暂时是空的
+
+### 内核：run `42269780292` 成功
+
+```
+kernel.macho  136527872 B  sha256 e868737c62af4a8cf8c71ea2f70f76c3cde439cd671dfd7bdd6c9b5d1967aab2
+prelink: stubbed 0 / stub_sites 0        （362 个未匹配调用依然是 0，没有回归）
+strings "UKE USB:" 125 处，含 "UKE USB: probe thread running"
+```
+
+也就是说 `uke_usb.c` 的 `delay()` / `kernel_thread_start` 修复生效，**内核里第一次真正带着
+CDC-ACM 探测线程**（b66 那版是没有它的）。
+
+另外为了让 payload 过得去，把 `iokit_print_verbose_match_logs=1` 从 kernel_args 里删了：
+payload 步骤会追加 `native-ufs-root=0`，990 + 18 字节会撞上 1000 字节上限（`io=0x10` 本来
+就会打印每个 nub 的匹配候选）。
+
+```
+work/flash/boot-round-b80-usbkernel.img        1122304 B  sha256 ca92dede…（= b79 固件，无厂商驱动）
+work/flash/vendor_boot_round-b80-usbkernel.img  85782528 B  sha256 63d0cf66…（内核 e868737c + ADT）
+```
+
+### pstore：`/sys/fs/pstore/` 是空的
+
+用户实测（b79 跑完 → 刷回 stock `vendor_boot_a` → 进 Android）：
+
+```
+$ adb shell su -c 'ls -l /sys/fs/pstore/'
+total 0
+```
+
+目录存在但没有任何记录，说明 pstore core 在、但要么 ramoops 后端没把这块区域注册成 backend，
+要么我们的记录没通过 `persistent_ram` 的校验。要分辨只需要几条命令（见下），
+比继续猜快得多。

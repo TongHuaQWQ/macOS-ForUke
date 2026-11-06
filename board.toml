@@ -457,7 +457,9 @@ kernel_args = [
   # only way to tell "ArmCpu was never a candidate" from "ArmCpu probed and rejected the nub silently".
   # Two offline-legacy flags were dropped to stay inside the 1000-byte command line.
   "io=0x10",
-  "iokit_print_verbose_match_logs=1",
+  # "iokit_print_verbose_match_logs=1",  (dropped for the 1000-byte command-line cap: the payload
+  # step appends native-ufs-root=0 because this defconfig has no storage stack, and 990 + 18 bytes
+  # overflowed it. io=0x10 already logs the matched candidate for every nub.)
 ]
 # Fixups of signed text, applied by the kernel after signature validation (patches/xnu/native-text-fixup.patch); they reach it as
 # /chosen/text-fixups, not on the command line. Each is <file name>,<file offset>,<original>,<replacement>, in hex. uke runs the
