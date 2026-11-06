@@ -1161,3 +1161,31 @@ kit 自带测试 `pytest test_emit_prelink.py test_fileset_match.py` → 26 pass
   `_unixnu_fileset_unmapped` 是我们内核新增的符号，symbolize 工具用的是 Apple kernelcache 的
   符号表，自然对不上位置。stub 只有一个，所有未匹配调用都指向它。
 - §27 说的"22 个 absent 只能实现"作废，见上。
+
+### §28 补充：anchor 的证据强度与一次独立交叉验证
+
+anchor 的主证据是 **kernelcache 自己的 `LC_SYMTAB` 在该地址上给出的唯一符号名**，加上
+"extent 由 matcher 自己按 `LC_FUNCTION_STARTS` 推导 + 该 extent 的 sha256"。
+为了不全靠单一来源，又用**另一份 Apple kernelcache**（`work/macos-ipsw/kernelcache.mac17p.decompressed`，
+mac17p，22,951 个函数、5,850 个具名符号）做了字节级交叉验证：
+
+| 结果 | 数量 |
+|---|---|
+| mac17p 里能找到**字节完全相同**的函数 | 39 |
+| 其中名字相同 | **31** |
+| 其中名字不同 | 8 |
+| mac17p 里没有（不同 SoC，函数体不同） | 83 |
+
+8 个不同名的都发生在**极小函数体**上（例如 `_OSSynchronizeIO` ↔ `_flush_dcache`、
+`_IOMallocPageable` ↔ `_cpu_broadcast_xcall`），即字节相同但两份构建给了不同名字 —— 这是小
+桩函数的常见现象，不构成推翻主证据的理由，但也提醒：**这批 anchor 的正确性最终要由设备上的
+行为来验证**（这正是 USB 日志通道的用处）。
+
+另外记一条待查：`0xfffffe000b9fcb70` 在早期人工 anchor 里叫 `_vnode_hold`，而 v25F84 的
+`LC_SYMTAB` 在该地址上写的是 `_vnode_getparent`；两者 extent（0x178）与 sha256 都能通过 matcher
+校验，所以**结构上都是合法 anchor**，语义谁对还没定论。这条只有 12 个调用点（apfs/sandbox），
+若后续出现 vnode 相关的诡异行为，先从这里查。
+
+`work/analysis/fetch-kernel-artifact.py <run-id>` 是新加的取件脚本（解析 run 的 artifact id/size →
+交给 `fetch-artifact.sh` 分块并发下载 → 解包 → 打印 kernel.macho 的 sha256），
+以后每轮取内核不再手搓。
