@@ -2085,3 +2085,60 @@ scripts/                    capture.py / xnu_usb_control.py / screenshot.py（�
    不带 UFS/charger/MSD —— 这也回避了 b56 那次整套 48 驱动把栈用穿的问题。
 3. **补丁版本**：组件自带的是 `patches/darwin22`（XNU 8796.141.3）；我们是
    `10063.141.1 / Darwin 23.6.0`，需要在 `patches/darwin23` 增一份 profile（`scripts/xnu_patches.py` 里加版本配置）。
+
+---
+
+## 46. uke 接 QcomXnuUsbDebug：SoC 配置已写完并通过断言（Round 28）
+
+按用户指示"直接照别人的做"，把组件原样取下来，只补一个 SoC 配置。
+
+### 组件本体已入库（板级副本，952 KB）
+
+```
+drivers/QcomXnuUsbDebug/           ← WQSQW/UniXNU-dby_w09 package/QcomXnuUsbDebug（未改动）
+  kernel/QcomXnuUsbDebug.c  usb/Dwc3.c  soc/{QcomUsbQualify,QcomUsbDmaDomain}.c
+  soc/{Sm8550,Sm8250,Uke}.h  include/  scripts/  tests/  fixture/
+  patches/darwin22/  patches/darwin23/        ← darwin23 已按 xnu-10063.141.1 重基（正是我们的 XNU）
+```
+
+**关键确认**：`docs/port-sm8250.md` 的标题就是
+"SM8250 / **xnu-10063.141.1** port" —— 说明补丁集已经适配到我们这个 XNU 版本，
+不需要再自己写一份 patch profile。
+
+### `soc/Uke.h`（新文件，值全部有出处）
+
+| 宏 | 值 | 出处 |
+|---|---|---|
+| `QUD_GCC_BASE/BYTES` | `0x100000 / 0x1f4200` | live.dts:13381 `clock-controller@100000` |
+| `QUD_DWC3_BASE/BYTES` | `0xa600000 / 0x100000` | live.dts:15967 `ssusb@a600000` |
+| `QUD_SMMU_BASE/BYTES` | `0x15000000 / 0x100000` | live.dts:15265 `apps-smmu@15000000` |
+| `QUD_STREAM_ID` | `0x40` | live.dts:16001 `iommus = <0x129 0x40 0>` |
+| `QUD_DMA_IOVA` | `0x90000000` | live.dts:16000 `qcom,iommu-dma-addr-pool` |
+| `QUD_GCC_CBCR_OFFSETS` | `{0x39018,0x39024,0x39028,0x39060,0x39064}` | `gcc-cliffs.c` 的 `halt_reg` |
+| `QUD_GCC_CBCR_REQUIRED` | `3` | 本板 `qcom,use-eusb2-phy`，无 SS PHY（aux 时钟可停） |
+| `QUD_GCC_GDSCR_OFFSET` | `0x39004` | live.dts:15764 `qcom,gdsc@139004` 是**绝对址** − GCC 基址 |
+| `QUD_GCC_CFG_GDSCR_OFFSET` | `0x39008` | GDSCR+4；且该 GDSC 带 `qcom,support-cfg-gdscr`（live.dts:15769） |
+| `QUD_GCC_BCR_OFFSET` | `0x39000` | 同代布局（gdscr = bcr+4），**待实机确认** |
+| `QUD_QSCRATCH_HS_PHY_CTRL_OFFSET` | `0xf8810` | wrapper 0xa6f8800 + `QSCRATCH_HS_PHY_CTRL 0x10` |
+| `QUD_PSCI_SMC_RESET` | **0** | 本板从未观察到 stage 探针真的重启，按模块规定置 0（只影响 reboot 命令） |
+
+**校验**：用组件自己的 `include/QcomUsbSoc.h`（含 12 条 `_Static_assert`：页对齐、窗口不重叠、
+偏移在窗口内、SID ≤ 0x7fff、IOVA 2 MiB 对齐 …）编译通过：
+
+```
+cc -std=c11 -I. -Iinclude -DQUD_SOC_HEADER='"soc/Uke.h"' …  →  exit 0
+```
+
+也就是说 **cliffs 的 GCC 布局与 Kalama(SM8550) 同代**：五个 CBCR 与 GDSCR/CFG_GDSCR/BCR 的相对
+关系完全一致，唯一实质差异是 GCC 窗口更大（0x1f4200）。这也解释了为什么之前我在内核里手搓
+GCC 探测会踩到总线异常——**那条路本来就不该由内核走**。
+
+### 还差三件事（下一步）
+
+1. **固件要先把 USB 举起来**：在 uke 的 FV 里只加 USB function 子集
+   （`UsbConfigDxe`/`UsbDeviceDxe`/`UsbfnDwc3Dxe`/`UsbInitDxe`/`UsbPwrCtrlDxe`），不带 UFS/charger/MSD；
+2. **接线**：`feeds.toml` 里注册板级副本（同 ArmCpu）、`board.toml` archives 加
+   `"component:QcomXnuUsbDebug"`、defconfig `XNU_QCOM_USB_DEBUG=1`、内核参数
+   `qcom-usb-debug=1`（双向控制再加 `qcom-usb-ctl=1`）；
+3. **主机侧**：组件自带 `scripts/collect-xnu-usb.py`（采集）、`xnu_usb_control.py`（status/reboot）、
+   `screenshot.py`（**内核里抓屏出 PNG**）。
