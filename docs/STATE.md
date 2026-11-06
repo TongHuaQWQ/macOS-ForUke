@@ -639,3 +639,32 @@ ABL **没有任何 OEM 命令**，所以"内存 dump 经 fastboot 取回"这条�
 `work/analysis/qemu-dump-log.sh`：QEMU 里 `pmemsave 0x48000000 0x20000000`（内核装在 pa 0x48004000）
 把 512 MB 内核数据拷出来再提取可打印串。实测 dump 已成功写出（536,870,912 字节），
 下一步只需在提取阶段按 XNU 的 msgbuf 布局切分（现在是无差别提取可打印 run）。
+
+---
+
+## 19. 抽取进度与下一步（Round 11）
+
+已确认（见 §18）：厂商 `uefi_a.img` 里有 `Dwc3`(98,630 B)、`UsbConfig`(53,322 / 90,258 / 28,726 B)、
+`FatDxe`(61,456 B)，内容搜索命中。
+
+**但抽出来的 5 个 `.ffs` 目前是 section payload，不是独立可用的 FFS 文件**：
+`uefi_firmware.AutoParser` 对它们返回 `unknown`，说明缺 FFS 头；库的 `attrs` 里也没有 offset，
+无法直接按偏移切分原镜像。
+
+### 下一轮的正确做法（按顺序）
+
+1. **自己写 FV→FFS→section 游走器**（约 60 行，FFS2 头 24 字节 / FFS3 头 32 字节，按
+   `attributes` 的 `FFS_ATTRIB_LARGE_FILE` 位选择），把每个目标驱动的**完整 FFS 字节**切出来；
+2. 解出其中的 **DEPEX 段** 并打印协议 GUID —— 这决定"我们的 FV 里会不会 dispatch"：
+   - 若只依赖通用协议（`EFI_PCI_IO`/`EFI_USB2_HC`/`EFI_SIMPLE_FILE_SYSTEM` 等）→ 直接加 FV 即可；
+   - 若依赖 `gQcomTokenSpaceGuid`/QcomPkg 的私有协议 → 需要从 `imagefv_a.img` 里连依赖一起搬，
+     或者放弃厂商驱动、只加 EDK2 通用的 `UsbBusDxe`+`UsbMassStorageDxe`（但没有 HC 驱动，USB 起不来）；
+3. 加 FV 的方式有两种：把切出的 FFS 追加进 FV 的自由空间（需重算 FV header 的 free space 与 checksum），
+   或按 EDK2 的 binary INF 流程（`[Binaries] PE32|xxx.efi|DEBUG` + `[Depex]`）纳入 DSC/FDF；
+4. 启动后在 DarwinBoot 里枚举 `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` 句柄并打印数量 —— 这就是
+   "U 盘是否可见"的判据，不需要真的写文件就能确认通道成立。
+
+### 结论
+
+USB 日志这条路是**可行的但需要一轮工程**（FV 解析 + DEPEX 判定 + 集成）。在它打通之前，
+`work/analysis/qemu-dump-log.sh`（QEMU + `pmemsave`）是本地的日志通道，实测 dump 已成功。
