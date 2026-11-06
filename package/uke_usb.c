@@ -34,6 +34,7 @@
 #include <arm/caches_internal.h>
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
+#include <kern/startup.h>
 #include <pexpert/pexpert.h>
 #include <sys/msgbuf.h>
 
@@ -1960,3 +1961,18 @@ uke_usb_console_start(void)
 	}
 	uke_usb_park(hold);
 }
+
+/* Entry point.
+ *
+ * The sirius port calls uke_usb_console_start() from bsd_init(), which needs a patch in
+ * bsd/kern/bsd_init.c. A STARTUP entry needs none, and EARLY_BOOT/STARTUP_RANK_LAST is exactly
+ * where UkeLastLog's writer is started in this kernel, so it is known to run. Starting here also
+ * means the console ring is already mirroring msgbuf before the disk drivers run, which is what
+ * makes a panic visible from the host.
+ */
+static void
+uke_usb_startup(void)
+{
+	uke_usb_console_start();
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, uke_usb_startup);
