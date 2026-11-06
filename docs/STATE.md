@@ -2683,3 +2683,74 @@ sha256 d72c2a55c46df3ebfd46894a04e83d7e08daaa68d3776800e1a7fbcb0ccba531
 
 内核侧：run `42269780292` 已经编到 **第 17 步 "Link the kernel (prelink included)"** ——
 也就是 Pass 1 / Pass 2 / 各个 archive（包括 `build-uke-usb.py`）都过了，`uke_usb.c` 的编译修复生效。
+
+---
+
+## 57. 诊断通道打通了；厂商链路确认走不通（SPMI 外部中止已解出）
+
+### 面板现在真的能说话了
+
+b77 第一次把我们的行打了出来（`DEBUG_WARN` 生效）：
+
+```
+UKE-PREV: no stage log (first boot into this image)
+UKE-BEAT entry: marker=0 stallhook=0
+UKE-BEAT entry: pet + mark done
+UKE-BEAT timer probe: 0 callbacks in 2 s (Success)
+UKE-BEAT stall hook disabled by PCD
+```
+
+**`0 callbacks in 2 s`** —— 定时器事件（中断）在这套 UEFI 里**确实不投递**，这次是量出来的，
+不是推断的。所以以后任何"靠定时器"的诊断都不能用，要看时间就得查计数器。
+
+### 崩溃被我解出来了：SPMI 访问到没上电的控制器
+
+面板上的寄存器（照片 1/2）：
+
+```
+ELR 0x0000C256A700 (= SPMI.dll + 0x3700)   ESR 0x96000010   FAR 0x00000000C7E5008
+Data abort: Synchronous external abort
+```
+
+解 ESR：`EC = 0x25`（同级取指无关的数据中止）、`ISS = 0x10` → **DFSC 0x10 = Synchronous
+External abort（不是页表遍历错）** —— 意思是**总线拒绝了这次访问**，不是没映射。
+`FAR = 0xC7E5008` 落在 live DT 的 SPMI 通道窗口里：
+
+```
+spmi0_bus: qcom,spmi@c42d000
+  reg-names = "cnfg" 0xc42d000 / "core" 0xc400000 / "chnls" 0xc500000+0x400000 / ...
+                             0xC500000..0xC900000  ← 0xC7E5008 在其中
+```
+
+调用栈（照片 3 带符号解析）：`DxeCore → PmicDxe.dll → SPMI.dll`，崩在 `SPMI.dll+0x3700`。
+紧邻的上一行是 `ERROR: Fail to init client handle to QDSS clock node` ——
+**时钟数据库里查不到 QDSS 节点**，因为 `ClockDxe` 被拿掉了。
+
+⇒ 结论：**厂商链路在这块板子上是个环**——
+
+| 配置 | 结果 |
+|---|---|
+| 带 `ClockDxe` | 启动停在 ClockDxe 那一行，黑屏且**不复位**（它重配 GCC 时把显示/或 RPMh 投票挂住）|
+| 不带 `ClockDxe` | `PmicDxe` → `SPMI` 访问未上电的 SPMI 控制器 → **外部中止** |
+| 带 IPC 三件套 | `GlinkDxe` / `Smp2pDxe` 在各自 entry 里死（ICC 传输要的对端在这次启动里不可用）|
+| 全不带 | 稳定走到 payload（b66 时代的固件就是这样）|
+
+所以这一轮改回"没有厂商驱动"，但**把 USB 状态读取提前到厂商 fleet 之前**（`UkeProgressDxe`），
+于是不管后面发生什么，`UKE-GCC:` 那两行一定会打出来，回答"bootloader 留给我们的 USB 电源/时钟
+到底是什么状态"——这正是内核侧 `uke_usb.c` / `QcomXnuUsbDebug` 需要的输入。
+
+```
+work/flash/boot-round-b78-novendor.img   1122304 B
+sha256 6ed3d44f3d7eb31fb3126e5b944cbfd073de2e703c255478b275e39b6ce13f6a
+  FD sha256 355f1f1e12e30ace…（0 个厂商模块；UkeProgressDxe / UkeUsbLogDxe / UkeBootMemoryDxe 都在）
+```
+
+要看的只有两条：
+
+```
+UKE-GCC: bcr=… cfg_gdscr=… cbcr … … … … …
+UKE-GCC: gdsc_powered=? reset_deasserted=? usb_clocks_running=?/3
+```
+
+`usb_clocks_running=3/3` + `gdsc_powered=1` ⇒ 时钟/电源已经是好的，内核只需拿下 DWC3；
+否则就说明我们得自己写那五个 CBCR 和 GDSC。
