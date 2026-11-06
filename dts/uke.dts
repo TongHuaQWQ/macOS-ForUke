@@ -22,7 +22,8 @@
     // besides this run, and the 12 GB reference machine used 0x8C0000000+0x240000000.
     memory@8c0000000 {
         device_type = "memory";
-        reg = <0x00000008 0xC0000000 0x00000001 0x40000000>;
+        // 5 GiB minus the 2 MiB panic-log region reserved at the tail (see [payload.adt] panic_region).
+        reg = <0x00000008 0xC0000000 0x00000001 0x3FE00000>;
     };
 
     cpus {

@@ -765,3 +765,97 @@ magazine 名字第一次读清（之前照片太小）：`pdmg, cptx, dvdi, c1bt
 - 只捞到 23 行：XNU 的 msgbuf 环会滚动覆盖，且 `pmemsave` 窗口里混着 kext 的格式串表（已按前缀过滤）。
   下一步把窗口缩到 msgbuf 所在页（用 `_msgbufp` 符号定位），并考虑用 `msgbuf=` 之类调大环形缓冲。
 - QEMU 只覆盖"能在 virt 上跑的路径"；设备上的等价物仍是 USB/UFS 那条线（§20/§21）。
+
+---
+
+## 23. USB 日志：设备树里本来就有的厂商栈，被 `UKE_VENDOR_HW=0` 关掉了（Round 15）
+
+### 结论先行：§18/§19/§20 的前提是错的
+
+§18–§20 一直假设"我们的 FV 里没有 USB/UFS 驱动，所以要把厂商驱动搬进来"。实际情况是：
+固件树 `workspace/uefi-uke`（Project Silicium / Mu-Silicium 的 fork）里，
+`Platforms/Xiaomi/ukePkg/{Include/APRIORI.inc,Include/DXE.inc}` **早就写好了整套 USB/UFS 驱动**，
+只是被 `uke.dsc` 的 `UKE_VENDOR_HW = 0` 整块条件编译掉了：
+
+```
+  INF Binaries/uke/QcomPkg/Drivers/UFSDxe/UFSDxe.inf            # 存储
+  INF Binaries/uke/QcomPkg/Drivers/UsbfnDwc3Dxe/UsbfnDwc3Dxe.inf # DWC3 function controller
+  INF Binaries/uke/QcomPkg/Drivers/UsbConfigDxe/UsbConfigDxe.inf
+  INF Binaries/uke/QcomPkg/Drivers/UsbDeviceDxe/UsbDeviceDxe.inf
+  INF Binaries/uke/QcomPkg/Drivers/UsbMsdDxe/UsbMsdDxe.inf       # ← 关键：把块设备当 U 盘给主机
+  INF Binaries/uke/QcomPkg/Drivers/UsbInitDxe/UsbInitDxe.inf
+  INF Binaries/uke/QcomPkg/Drivers/{Clock,Rpmh,Npa,Vcs,ICB,Smem,SPMI,I2C,TLMM,ChipInfo,Pmic}Pkg...
+```
+
+`UKE_VENDOR_HW=1` 缺的唯一东西是 `Binaries/uke/QcomPkg/**`（设备子模块里 uke 只有 `RawFiles/`）。
+
+### 已经做的事（全部本地可复现）
+
+1. **从库存固件抽出整套 DXE**：`work/analysis/fw-extract-mods.py`（venv `work/analysis/.venv-fw`）
+   解析 `work/tablet-backup-20261103/images/uefi_a.img`，得到 **97 个 PE32** + 各自的
+   **FFS GUID + DEPEX 原始字节 + UI 名字**，落在 `work/analysis/ref/vendor-dxe/`
+   （`manifest.json` 里含 `ffs_guid`/`bytes`/`depex`）。DEPEX 解码表：`PUSH=0x02 … END=0x08`。
+2. **生成二进制 INF**：`Platforms/Xiaomi/ukePkg/Tools/gen-vendor-binaries.py` 把 49 个驱动按
+   Silicium 的路径约定写成 `Binaries/uke/QcomPkg/Drivers/<Dir>/<Name>.{inf,efi,depex}`
+   （`FILE_GUID` 用库存 FFS 的 GUID；`UFSDxe`/`EnvDxe` 的 GUID 与其它机型 `Binaries/9707f` 完全一致，
+   说明这批二进制就是同一套厂商 QcomPkg 产物）。
+3. **打开开关**：`uke.dsc` `UKE_VENDOR_HW = 1`；`uke.fdf` FV 尺寸 3 MiB → **5 MiB**。
+   5 MiB 不是随便选的：`MemoryMapLib.c` 早就把 `0xA7100000+0x300000`（UEFI FD）和
+   `0xA7400000+0x200000`（UEFI FD Reserved）都留出来了，库存 `uefi_a.img` 本身就是 5 MiB。
+4. **注释掉两个不存在的**：库存固件里没有 `XhciDxe`/`XhciPciEmulationDxe`（uke 只有 device mode，
+   没有 USB host），`APRIORI.inc`/`DXE.inc` 里这两行改为注释。
+5. **本地构建通过**：
+   ```
+   cd workspace/uefi-uke
+   PATH="$PWD/.venv-edk2/bin:$PATH" .venv-edk2/bin/python \
+     Platforms/Xiaomi/ukePkg/DeviceBuild.py TARGET=DEBUG ENABLE_SECUREBOOT=0 \
+     FD_BASE=0xa7100000 FD_SIZE=0x500000 FD_BLOCKS=0x500 DEVICE_MODEL=0
+   ```
+   产物 `Build/ukePkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd` 里现在有 97 个模块，
+   实测含 `UFSDxe/UfsfnDwc3Dxe/UsbMsdDxe/UsbDeviceDxe/UsbConfigDxe/UsbInitDxe/UsbPwrCtrlDxe`
+   与 `ClockDxe/PmicDxeLa/DALSYSDxe/TLMMDxe/I2CDxe/SPMIDxe/RpmhDxe/NpaDxe/VcsDxe/ICBDxe/SmemDxe/
+   TzDxeLA/ScmDxeCompat/ShmBridgeDxeLA/ChipInfoDxe/HALIOMMUDxe/HWIODxe/GLinkDxe/IPCCDxe/ULogDxe…`。
+   **这一步不需要 CI，本地 ~1 分钟增量**。
+
+### 关键机制（读厂商代码得到，不是猜的）
+
+- `Silicon/Qualcomm/QcomPkg/Include/Protocol/EFIUsbMsd.h` 暴露
+  `EFI_USB_MSD_PROTOCOL`：`AssignBlkIoHandle(This, EFI_BLOCK_IO_PROTOCOL*, Lun)` /
+  `QueryMaxLun` / `StartDevice` / `StopDevice` / `EventHandler`。
+  GUID `C8591FAF-DBCC-479E-9EF2-FD085BC37BC7`。
+- `UsbMsdDxe` 的字符串里有 `UFS-LUN 0…7`、`UsbMsdFindPartitions`、`CheckBlkIoLunAssociation`
+  —— 它就是把 **UFS 的块设备映射成 USB 大容量存储 LUN**。
+- 厂商自带 `MassStorage` 应用（`Silicon/Qualcomm/QcomPkg/Applications/MassStorage/MassStorage.c`，
+  并且已经在我们的 FV 里）示范了完整流程：按 `gEfiUfsLUnGuid` 找到块设备 →
+  `AssignBlkIoHandle` → `StartDevice` → 循环 `EventHandler` → 音量上键退出。
+- BDS 派发顺序不会困住任何驱动：`BdsDxe` 的 **DriverEntry 只安装 BDS arch protocol 就返回**，
+  `DxeMain` 在 `CoreDispatcher()` 返回后才调 `gBds->Entry()`，而 `BdsEntry` 里的
+  `EfiBootManagerConnectAll → BmConnectAllDriversToAllControllers` 会循环 `gDS->Dispatch()`。
+  所以 APRIORI 里排在 `BdsDxe` 后面的驱动照样会起来（这也解释了为什么以前的控制台驱动能生效）。
+
+### 新增 `UkeUsbLogDxe`（本轮写的代码）
+
+`Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/`：
+- 发布一个 **256 KiB 可写 RAM 块设备 `UKE-LOG`**，内容是它自己的日志文本（主机读到的就是磁盘内容，
+  日志是"活"的：追加一行，下次主机读就能看到）；
+- 在 **ReadyToBoot** 回调里（此时 UFS/USB 都已 dispatch）枚举所有 BlockIO、按 device path 里的
+  UFS LU GUID 命名打印，然后 `AssignBlkIoHandle`（`UKE-LOG` 固定 LUN0）→ `StartDevice` →
+  循环 `EventHandler` 保持 **`PcdUkeUsbLogHoldSeconds`（本轮设 40 秒）**，音量上键提前结束 →
+  `StopDevice` → 继续启动 XNU；
+- 面板上也会打同样几行，所以照片仍然能拿到诊断结果。
+
+写这个驱动踩到的两个坑（记下来省时间）：
+- `Protocol/EFIUsbfnIo.h` 会拉进 `EFIUsbEx.h`，与 MdePkg 的 USB 描述符 typedef 冲突，
+  **不能**直接 include QcomPkg 的 USB 头；MSD 协议结构+GUID 在本文件里本地声明。
+- 现在 MdePkg 的设备路径宏是 `HARDWARE_DEVICE_PATH`/`HW_VENDOR_DP`（不是老的 `HARDWARE_DEVICE`/`HW_VENDOR`），
+  `IsDevicePathEnd`/`SetDevicePathNodeLength` 在 `<Library/DevicePathLib.h>`。
+
+### 下一轮（b52）要看的
+
+1. 主机侧：`fastboot boot boot.img` 后 **40 秒窗口内**，`lsblk` / `dmesg` 应出现新的 USB 磁盘；
+   新增的第一块（256 KiB，无分区表）是 `UKE-LOG`，`dd if=/dev/sdX bs=4096 count=64 | strings` 就是 UEFI 阶段日志。
+2. 其余块设备应被命名成 `UFS-LU0…`（面板上会打印），说明 UFS 真的起来了 —— 这是**内核日志落盘 → 主机读取**的前提。
+3. 若面板出现 `usb-msd … Not Found`，说明 `UsbMsdDxe` 没 dispatch（DEPEX 未满足），下一轮就只剩
+   `UsbfnDwc3Dxe` 那 16 个 GUID 依赖要逐个对上（`fa5f306b…`/`f4e5c7d0…`/`157a5c45…` 等 Qcom 私有协议）。
+4. 若卡在 `start …` 之前/之后不动，是 DWC3/PHY 的问题（Type-C 角色、`UsbPwrCtrl`+`QcomCharger` 链路），
+   面板会停在最后一行，照片可以定位。
