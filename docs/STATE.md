@@ -1506,3 +1506,40 @@ b60 剩下的 4 对全指向**同一个**目标：
 `missing_address_space: 'output collection'` **都是 `fileset_emit.py` 里写死的字面量**
 （第 736 行附近），不是这一版真的缺了什么。`personalities_dropped` 里的
 `IOGraphicsFamily`/`IOPCIFamily` 是这个移植本来就不要的（无 PCI、legacy display 路径）。
+
+---
+
+## 36. 打开 `CONFIG_XNU_BOOT_LOG` 才发现的两个连锁问题（Round 24）
+
+### (1) 归档一链接就暴露 `NativeUfs` 依赖 → run `42220507424` 失败
+
+```
+Undefined symbols for architecture arm64e.kernel:
+  "_native_ufs_log_open",  referenced from: _uke_last_log_writer in lto.o
+  "_native_ufs_log_write", referenced from: _uke_last_log_writer in lto.o
+  "_native_ufs_log_sync",  referenced from: _uke_last_log_writer in lto.o
+```
+
+`UkeLastLog.c` 其实有**两半**：pram 写手（我们要的）和 userdata 窗口（需要 `NativeUfs`，
+而 `uke-macos_defconfig` 里 `CONFIG_XNU_NATIVE_UFS` 是关的，`board.toml` 也把两条 UFS archive 注释掉了）。
+
+修法：把 userdata 那半（含 `uke_snapshot`/`uke_crc32`/`ukeUfs*` 静态变量/三个外部声明）
+包进 `#if UKE_LOG_USERDATA`（默认 0），并把 `tick++` 移到条件外面 —— 否则 `tick == 4`
+（重复上次 panic）和 `tick == 240`（vnode 报告）永远不会触发。
+用预处理器模拟 `UKE_LOG_USERDATA=0` 自查：`native_ufs_`/`ukeUfs`/`uke_snapshot`/`uke_crc32`
+残留引用均为 **0**。提交 `8ba774f`。
+
+### (2) `_csr_check` 是 LTO + dead-strip 的牺牲品（见 §35）
+
+`package/KeepOutOfLine.c` + `build-boot-log.py` 的 sources + `CONFIG_XNU_BOOT_LOG=y`
+三者缺一不可：归档不链接 → 引用的对象根本不进链接；`UKE_LOG_USERDATA` 不关 → 链接直接失败。
+
+### 现在的排队情况
+
+| run | commit | 内容 | 预期 |
+|---|---|---|---|
+| `42226020235` | `8ba774f` | 197 anchor + ArmCpu 继续 + pram 写手链接 + `KeepOutOfLine`(~0 stub) + userdata 关闭 | **b61 候选** |
+| `42223121318` | `7fdbe2c` | 同上但 userdata 未关 | 会以同样的 undefined 失败 |
+| `42218599309` | `295c481` | 197 anchor + ArmCpu 继续（无 pram 写手） | ✅ 已成功，`stubbed` 87 |
+
+固件侧 b60/b61 已建好（1 MiB 栈 + Gunyah 喂狗 + 面板回显 pram 尾部），等内核到位即可打包。
