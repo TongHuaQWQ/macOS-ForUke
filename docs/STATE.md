@@ -3624,3 +3624,65 @@ preflight: 0 error(s) across 5 units          ← 这次是真的 0
 
 - 归档失败会在 step 17 开始后**约 8 分钟**就暴露（`archive-17-…log`），不用等满 45 分钟；
 - 反过来，step 17 跑过 10 分钟还在继续，就说明归档已经过了。
+
+---
+
+## 73. 归档真的编出来了（`5931e57a…`），然后死在两个**补丁移植**错误上
+
+run `42387297776`（`d77649e`）的结果，一句话：**`libQcomXnuUsbDebug.a` 成功生成**，
+然后内核编译挂在两处补丁上 —— 都是我把 darwin23 补丁搬到 12377 时搬错的地方，不是设计问题。
+
+```
+== kernel: archive-17-build-qcom-usb-debug
+QcomXnuUsbDebug: 5931e57a553207f7 soc=soc/Uke.h          ← 归档成功，sha256 前 16 位
+...
+osfmk/kern/printf.c:965:3: error: expected identifier or '('
+  965 |                 if (!qcom_usb_pe_kputc_reenters_console())
+bsd/kern/bsd_init.c:1338/1348/1426/1437/1442/1444: error: use of undeclared identifier 'master_cpu'
+```
+
+### 缺陷一：`printf.c` 的 guard 落到了函数外面
+
+darwin23 原补丁的意图是：在两个 fan-out 里，给 **`PE_kputc(c);`** 前面加条件
+（`if (!qcom_usb_pe_kputc_reenters_console())`），避免 USB sink 自己再把字节喂回 `_cnputs`。
+12377 的 fan-out 形状变了（多了 `(PE_kputc != NULL)` 与 `sptm_serial_putc` 分支），我移植时：
+
+- 第一个 hunk 把 guard 加到了 **`debug_putc(c);`** 前面（目标错了，而且 `debug_putc` 只写 msgbuf、
+  根本不会重入控制台，加了反而会丢掉内核日志字节）；
+- 第二个 hunk 把 guard 加到了 **`consdebug_putc_unbuffered` 的函数定义之前** —— 也就是文件作用域，
+  于是 `error: expected identifier or '('`。
+
+修法：按 darwin23 的语义重写，两处都改成在 `PE_kputc(c);` 之前加 guard。
+
+### 缺陷二：worker 补丁还写着 10063 的 `master_cpu`
+
+`bsd_init.c` 新增的 7 处 `master_cpu` 在 12377 里不存在（改名 `boot_cpu_id`）。
+`-DXNU_KERNEL_PRIVATE` 在 `makedefs/MakeInc.def:157` 是**全局**定义的，所以
+`<kern/cpu_number.h>`（补丁已经 include）能声明 `boot_cpu_id`，直接改名即可。
+
+### 这次不再手写补丁
+
+两份补丁都用**本地 12377 clone 重新生成**，不再手写 hunk 行数：
+
+```sh
+# 在 work/analysis/xnu-12377（checkout ac9718f，干净树）
+# 1) 只保留原补丁中除 printf.c 以外的 hunk 并 git apply
+# 2) 手动把 printf.c 改成"guard 在 PE_kputc 前"
+# 3) git diff -- <五个文件> > patches/darwin24/0001-…patch
+#    sed -i s/master_cpu/boot_cpu_id/g bsd/kern/bsd_init.c
+#    git diff -- bsd/kern/bsd_init.c > patches/darwin24/0002-…patch
+```
+
+验证（都过）：
+
+- `git apply --check` 对两份补丁在**干净树**上通过；
+- 与 darwin23 原补丁逐行比对"新增行"：`serial_console.c`/`serial_general.c`/`debug.c`/`pe_kprintf.c`
+  的新增行**逐字相同**，只有 `printf.c` 的注释措辞不同（结构相同，两处 guard）；
+- 用花括号深度扫一遍所有新增行：**没有任何语句落在函数作用域外**（剩下 21 条 depth=0 的都是
+  `extern`/`static` 变量/函数定义，合法）。
+
+### 下一轮的预期
+
+只剩"内核编译 + 链接"要过：归档已在（同一次构建里会重建），`-force_load` 的契约已核对，
+`boot_progress_persist` 是 weak（顶多是丢两行报告）。若还失败，错误一定在**别的补丁落点**或链接符号，
+而 `-k` 会让一轮就把它们全报出来。

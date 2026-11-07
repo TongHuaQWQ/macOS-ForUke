@@ -88,7 +88,7 @@ index 48f9405..6e0f267 100644
  #if defined(__arm__) || defined(__arm64__)
  		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
 diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
-index 2fc6931..36a7d87 100644
+index 2fc6931..f0e6383 100644
 --- a/osfmk/kern/printf.c
 +++ b/osfmk/kern/printf.c
 @@ -918,6 +918,21 @@ vprintf(const char *fmt, va_list ap)
@@ -113,31 +113,34 @@ index 2fc6931..36a7d87 100644
  #if !CONFIG_SPTM
  #define sptm_serial_putc(c)
  #endif
-@@ -926,6 +941,13 @@ void
- consdebug_putc(char c)
- {
- 	console_write_char(c);
+@@ -931,6 +946,13 @@ consdebug_putc(char c)
+ 
+ 	/* Ignore `disable_serial_output` for early panic serial output from `sptm_serial_putc()`. */
+ 	if (!console_is_serial() && !disable_serial_output && (PE_kputc != NULL)) {
 +#if XNU_QCOM_USB_DEBUG
-+		/* console_write_char -> console_write -> _cnputs already teed this
-+		 * byte to USB.  Skip the fan-out only when it would re-enter the
-+		 * console; serial and boot-progress consumers still get the byte.
++		/* console_write_* -> _cnputs already teed this byte to USB.  Skip the
++		 * fan-out only when it would re-enter the console; serial and
++		 * boot-progress consumers still get the byte.
 +		 */
 +		if (!qcom_usb_pe_kputc_reenters_console())
 +#endif
+ 		PE_kputc(c);
+ 	} else if (!console_is_serial() && (PE_kputc == NULL)) {
+ 		/* Use SPTM's serial interface for early serial output. */
+@@ -947,6 +969,13 @@ consdebug_putc_unbuffered(char c)
  
- 	debug_putc(c);
- 
-@@ -938,6 +960,10 @@ consdebug_putc(char c)
- 	}
- }
- 
+ 	/* Ignore `disable_serial_output` for early panic serial output from `sptm_serial_putc()`. */
+ 	if (!console_is_serial() && !disable_serial_output && (PE_kputc != NULL)) {
 +#if XNU_QCOM_USB_DEBUG
-+		/* console_write_unbuffered is a thin wrapper over _cnputs. */
++		/* console_write_* -> _cnputs already teed this byte to USB.  Skip the
++		 * fan-out only when it would re-enter the console; serial and
++		 * boot-progress consumers still get the byte.
++		 */
 +		if (!qcom_usb_pe_kputc_reenters_console())
 +#endif
- void
- consdebug_putc_unbuffered(char c)
- {
+ 		PE_kputc(c);
+ 	} else if (!console_is_serial() && (PE_kputc == NULL)) {
+ 		/* Use SPTM's serial interface for early serial output. */
 diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
 index 7a4bbd3..15d7d50 100644
 --- a/pexpert/arm/pe_kprintf.c
