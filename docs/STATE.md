@@ -3106,3 +3106,46 @@ sha256 b7a673d1017b5586ddfb9daf7f8f29a7a8cab3fc8df0a036516481cec0e1c5c6
 
 下一轮的流程：刷 b83 → 内核跑（这次会真的往 pram 写）→ 再启动一次 b83 → 分页里就能看到
 **上一次内核日志**，包括 `UKE USB:` 那几行。
+
+---
+
+## 63. b83 真机：pram 地址对了，但**内核根本没往那儿写**；两个内核线程都没跑出来
+
+照片里 pram 现在读的是对的地方（`--- pram 0xFF800000 (3584 KiB) ---`），头部有内容：
+
+```
+pram head: 10 30 A0 C0 86 40 00 00  0C 00 81 00 10 00 00 A2
+--- pram end: 0 KiB of text kept in 0 lines ---
+pram first text: <none: DRAM did not survive, or the kernel never wrote>
+```
+
+`0xC0A03010` **不是** XNU 的 `EMBEDDED_PANIC_MAGIC`（`0x46554E4B` "FUNK"，见
+`osfmk/kern/debug.h:345`）。所以那 16 字节只是**残留 DRAM**，不是我们写的记录 ——
+内核从未写过这块 pram。
+
+已核对的三件事都"应该"是通的：
+
+| 检查 | 结果 |
+|---|---|
+| ADT 里 `pram` 节点位置 | `make-uke-adt.py` 把它放在**根节点**（`node('pram', …)` 与 `cpus`/`defaults` 同级），正是 `pexpert/arm/pe_init.c` 里 `SecureDTLookupEntry(0, "pram", &entry)` 找的位置 |
+| `embedded-panic-log-size` | 0x380000，`pram.reg[1]` 也是 0x380000，`<=` 通过 |
+| 编译开关 | `XNU_DT_PANIC_REGION=1`（defconfig `CONFIG_XNU_DT_PANIC_REGION=y` → `build-xnu-4k-baseline.sh:639` 传给 `pe_init.o`）|
+
+⇒ 那么 `gPanicBase` 应该是非 0，`UkeLastLog` 的写线程应该每 500 ms 写一次 FUNK 记录。
+**但它没写。** 而 `uke_usb` 的探针线程同样一行输出都没有。
+
+两个驱动有个共同点：**它们都是 `STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, …)` 里用
+`kernel_thread_start*` 起的线程**。所以这一轮怀疑的对象不是寄存器、不是地址，而是
+**"这个内核里从 EARLY_BOOT STARTUP 起的线程没有在跑"**。
+
+### 因此改的是实验方式，不是猜寄存器
+
+`uke_usb_sync=1`（新增启动参数，已烘进 args）：
+
+- 在 STARTUP 上下文里**同步**跑探针（不再起线程），跑完按 `uke_usb_panic=1` panic；
+- panic 屏在这块板子上是**可见的**（SError 的 panic 屏我们就拍到过），所以
+  `UKE USB PROBE: step=… gcc=… dwc=… dsts=… clk=… smmu=… pll=…` 一定能被拍下来；
+- `kernel_thread_start` 失败也会打印返回值了；
+- 为腾命令行空间，删掉 `fileset-wait-cap-ms=5000`（它的作用已被 `uke-aes-stub.patch` 的无条件打印取代）。
+
+提交 `486f48e`，CI 已触发（约 45 分钟）。产物出来后配 b83 固件即可。
