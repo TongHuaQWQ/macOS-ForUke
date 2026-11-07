@@ -3445,3 +3445,29 @@ patches/xnu/zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch   备选挂点（#if XNU_Q
 - **"chirp 通过、高速数据失败 → eUSB2 参考时钟表"**：枚举到一半断，先查 38.4 MHz 参考时钟。
 - **`ep0OutEventOccurred: event 0` → stage 1 SMMU 上下文**：苹果栈不做缓存维护，
   stream 0x40 必须给它独立的 write-back inner-shareable 恒等映射上下文。
+
+---
+
+## 69. 工作区整理（文件都搬到哪了 + 三份索引）
+
+根目录此前混着录屏、分区 dump、KDK dmg；`work/` 里还有十几份旧 commit message。已整理并写了三份索引：
+
+| 新位置 | 内容 |
+|---|---|
+| `work/INDEX.md` | **第一页**：三仓库/两镜像/常用命令/目录地图/当前状态/取证方式 |
+| `work/flash/INDEX.md` | 45 个镜像的表格（类型、字节、sha256 前 16、时间、用途、是否被取代）|
+| `work/analysis/README.md` | 工具索引，按用途分组（prelink、AppleImage4/vtable、固件分析、内核产物、取证）|
+
+搬动清单：
+
+```
+VID_20261107_190413.mp4 / VID_20261107_191325.mp4   → work/captures/
+logfs.img / oops.img                                → work/device-dumps/
+Kernel_Debug_Kit_26.5.2_build_25F84.dmg (1.1 GB)    → work/apple/
+work/commit-msg*.txt (12 份)                        → work/archive/commit-msgs/
+uke-kernel.log (0 字节)                             → 删除
+```
+
+没有动的：`work/tablet-backup-20261103/`（14 GB 整机备份，**不要删**）、`device/uke-backup/`（恢复用 stock）、
+`work/ci-artifacts/`（3 GB，旧轮次可删）。`work/analysis/xnu-12377/` 是内核真实源码（`ac9718f`），
+以后验证补丁不用再 clone。
