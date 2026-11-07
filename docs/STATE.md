@@ -3471,3 +3471,68 @@ uke-kernel.log (0 字节)                             → 删除
 没有动的：`work/tablet-backup-20261103/`（14 GB 整机备份，**不要删**）、`device/uke-backup/`（恢复用 stock）、
 `work/ci-artifacts/`（3 GB，旧轮次可删）。`work/analysis/xnu-12377/` 是内核真实源码（`ac9718f`），
 以后验证补丁不用再 clone。
+
+---
+
+## 70. `--target=` 被拒的真相：它是 `-Xclang` 递给 cc1 的参数，不是 driver 的；以及 preflight 的盲区
+
+上一轮（run `42384716333`，commit `0fc1cf0`）的日志看起来自相矛盾：
+
+```
+record: dropped -mlinker-version=1267 (this compiler rejects it for a compile)
+record: keeping --target=arm64e-apple-ios26.5.2 (protected); probe said: error: unknown argument: '--target=...'
+preflight: 0 error(s) across 5 units
+--- QcomXnuUsbDebug.log ---
+error: unknown argument: '--target=arm64e-apple-ios26.5.2'
+```
+
+### 两个独立的错误，都被我自己的代码挡住看不见
+
+1. **`--target=…` 是 cc1 参数。** 编译记录里它是成对出现的：
+
+   ```
+   '-Xclang', '--target=arm64e-apple-ios26.5.2'
+   ```
+
+   cc1 没有 `--target`（cc1 只有 `-triple`），所以 driver 在 `-c` 路径上直接拒绝。
+   而我的探针**确实报告了拒绝**，只是保护名单里第一个前缀就是 `--target`，于是走了
+   "keeping (protected)" 并 `break` 出循环 —— 那对参数原封不动留在记录里，交给 `build.py`
+   编译，于是必然失败。保护名单本意是别丢掉 target，但它没区分 "driver 级 target" 和
+   "`-Xclang` 转发给 cc1 的伪 target"。
+
+2. **`preflight: 0 error(s)` 是假的。** 过滤条件是 `': error:' in line`，而 driver 级诊断
+   `error: unknown argument: '…'` **没有 `file:line:` 前缀**，所以五个单元的失败全被过滤掉了。
+   这是让这一轮白跑的第二个原因：报告说干净，实际全灭。
+
+### 修法（`scripts/build-qcom-usb-debug.py`，commit `c952140`）
+
+- 探针报出被拒参数时先定位它在列表里的下标；若**紧前一个 token 是 `-Xclang`**，就判定它是
+  cc1 选项，把这一对一起删掉，并且**不受保护名单限制** —— 因为 driver 级 `-arch arm64e`
+  已经设好 triple（记录里实测确有：`'-D', 'ARM64_BOARD_CONFIG_BCM2837', '-arch', 'arm64e', '-D', 'arm64'`）。
+  保护名单从此只对 driver 级参数生效。
+- 记录只算一次，preflight 与 `build.py` 共用同一份（之前在日志里跑两遍，看起来像探针跑了两次）。
+- preflight 的错误过滤改成 `(^|: )error: `，并且在 `returncode != 0` 却匹配不到诊断时，
+  直接把 stderr 前几行当作错误打印 —— 再也不允许出现 "0 error(s)" 伴随失败。
+
+### 本地验证（用桩编译器，不需要 macOS）
+
+桩编译器只做两件真实行为：拒绝 `-mlinker-version*`，拒绝 `-Xclang --target=*`。断言结果：
+
+```
+dropped -mlinker-version=1267 (this compiler rejects it for a compile)
+dropped --target=arm64e-apple-ios26.5.2 with its -Xclang (forwarded to cc1, which has no such option;
+        -arch already sets the triple)
+ASSERTIONS OK (-Xclang pair dropped, -arch kept, -W + linker flags dropped, idempotent)
+PREFLIGHT OK: driver-level rejections are counted, clean records report 0
+```
+
+即：假 target 与链接器参数被删、两对真 `-Xclang` 与 `-arch arm64e` 保留、`-W` 全集仍被删、
+二次运行是 no-op；而 driver 级拒绝现在会让 preflight 报 1 个错误而不是 0 个。
+
+### 本轮状态
+
+- 分支 `ci-ref-lto2` 已推到 `c952140`，内核 run **`42386664238`**（`build-uke-kernel-min`，约 45 分钟）。
+- 工作流最后一步是 `Upload artifacts (always)`，所以**即使归档编译失败，日志也会回来**：
+  下一步要读的是 preflight 的逐单元错误行与 `archive-17-build-qcom-usb-debug.log`。
+- 若这一轮 preflight 终于吐出真实的 12377 不兼容清单，那是**好消息**：一轮就能拿到全部单元的错误，
+  一次性修完（这正是 preflight 存在的理由）。
