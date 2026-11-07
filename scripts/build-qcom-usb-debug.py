@@ -18,7 +18,23 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/qcom-usb-debug'
-MODULE = Path(os.environ.get('UNIXNU_QCOM_USB_DEBUG_MODULE') or ROOT / 'drivers/QcomXnuUsbDebug')
+# The component rides in the device repository's package/ directory, which the tree links as kits/uke
+# (board.toml: kit = "uke"). The archive scripts run with the tree as ROOT, so the module is under
+# kits/uke/qcom-usb-debug there and under package/qcom-usb-debug in the device checkout - the same
+# kits-first, package-fallback resolution build-boot-log.py uses for its own sources. A feed entry
+# cannot be used for this: assemble() only links sources the component catalog resolves to a module,
+# and the catalog has no QcomXnuUsbDebug id, which is why "module missing" appeared with one added.
+def _module():
+    override = os.environ.get('UNIXNU_QCOM_USB_DEBUG_MODULE')
+    if override:
+        return Path(override)
+    for candidate in (ROOT / 'kits/uke/qcom-usb-debug', ROOT / 'package/qcom-usb-debug'):
+        if (candidate / 'scripts/build.py').is_file():
+            return candidate
+    return ROOT / 'kits/uke/qcom-usb-debug'
+
+
+MODULE = _module()
 RECORD = (ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/pexpert/DEVELOPMENT/pe_kprintf.o.json')
 
 

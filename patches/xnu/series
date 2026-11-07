@@ -124,7 +124,7 @@ uke-gic-timer.patch
 # funnels through, because the wrapper produced no output at all.
 uke-aes-stub.patch
 
-# USB log console (QcomXnuUsbDebug, drivers/QcomXnuUsbDebug) is NOT applied. Its patch sets target
+# USB log console (QcomXnuUsbDebug, package/qcom-usb-debug) is NOT applied. Its patch sets target
 # xnu-8796 (darwin22) and xnu-10063 (darwin23), while this kernel builds xnu-12377.121.6 — see
 # "xnu_version" in UniXNU profiles/os/macos-26.5.2-25F84/profile.toml, and this series' own
 # patches/xnu-12377/ entries. Run 42263483616 measured the consequence: the darwin23 pair dies on
@@ -141,8 +141,8 @@ uke-aes-stub.patch
 # visible in the pram beacon string.
 zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch
 
-# USB log console, the core component drivers/QcomXnuUsbDebug (same one alioth and munch ship).
-# Its own patch sets stop at xnu-10063; drivers/QcomXnuUsbDebug/patches/darwin24/README.md records the
+# USB log console, the core component package/qcom-usb-debug (same one alioth and munch ship).
+# Its own patch sets stop at xnu-10063; package/qcom-usb-debug/patches/darwin24/README.md records the
 # rebase onto this kernel's xnu-12377.121.6 (ac9718f) and both files here are byte-identical copies of
 # that rebased pair. The worker starts from bsd_autoconf() right after kminit(), which always runs -
 # unlike the STARTUP() route the board's own driver uses. Runtime is opt-in: qcom-usb-debug=1.

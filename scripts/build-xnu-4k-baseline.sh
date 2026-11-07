@@ -884,7 +884,10 @@ PY_BINDINGS
   # USB log console (QcomXnuUsbDebug). The six hook units take -DXNU_QCOM_USB_DEBUG and the module's
   # include directory; the archive must be force-loaded or the hooks link against nothing.
   if [ "${XNU_QCOM_USB_DEBUG:-0}" = 1 ]; then
-    QUD_MODULE="$ROOT/drivers/QcomXnuUsbDebug"
+    # The component ships in the device repository's package/, which the tree links as kits/uke; in this
+    # script $ROOT is whichever tree is being built, so try the kit path first and the checkout second.
+    QUD_MODULE="$ROOT/kits/uke/qcom-usb-debug"
+    test -d "$QUD_MODULE/include" || QUD_MODULE="$ROOT/package/qcom-usb-debug"
     QUD_ARCHIVE="$ROOT/build/qcom-usb-debug/libQcomXnuUsbDebug.a"
     test -d "$QUD_MODULE/include"
     test -f "$QUD_ARCHIVE"

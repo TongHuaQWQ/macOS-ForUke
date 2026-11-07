@@ -65,10 +65,6 @@ name = "ArmDTPlatform"
 kind = "driver"
 local = "drivers/ArmDTPlatform"
 
-# The USB log console component (the one alioth and munch ship), as a board-local source: the archive
-# scripts run with the build tree as ROOT, and only sources registered here are materialised into
-# <tree>/drivers. Without this entry build-qcom-usb-debug.py stops with "module missing:
-# <tree>/drivers/QcomXnuUsbDebug". Its darwin24 patch pair lives in patches/xnu/ and is in the series.
 [[source]]
 name = "QcomXnuUsbDebug"
 kind = "driver"

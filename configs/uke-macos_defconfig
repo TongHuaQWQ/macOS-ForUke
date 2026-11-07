@@ -151,8 +151,8 @@ CONFIG_XNU_CRYPTO_BOOTSTRAP="source"
 # UkeLastLog string at all), so the msgbuf -> pram path did not exist even though sheng-log=1
 # was in kernel_args.
 CONFIG_XNU_BOOT_LOG=y
-# The USB log console (drivers/QcomXnuUsbDebug): the component's darwin24 pair is in the series (rebased
-# onto xnu-12377.121.6, see drivers/QcomXnuUsbDebug/patches/darwin24/README.md) and
+# The USB log console (package/qcom-usb-debug): the component's darwin24 pair is in the series (rebased
+# onto xnu-12377.121.6, see package/qcom-usb-debug/patches/darwin24/README.md) and
 # build/qcom-usb-debug/libQcomXnuUsbDebug.a is force-loaded. Runtime stays opt-in with qcom-usb-debug=1.
 CONFIG_XNU_QCOM_USB_DEBUG=y
 CONFIG_XNU_EXTRA_LD_ARCHIVES=""
