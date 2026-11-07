@@ -3391,3 +3391,57 @@ patches/xnu/zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch   备选挂点（#if XNU_Q
 | 42375406774 | `module missing: <tree>/drivers/QcomXnuUsbDebug` | feeds.toml 必须登记 `local = "drivers/QcomXnuUsbDebug"` |
 
 现在跑的是 `de5c79c`（run `42377211143`）。
+
+---
+
+## 68. 生态文档核对（unixnu.com）：三条 USB 路线，以及 uke 的数值逐项吻合
+
+用户给了四篇文档：`/zh/drivers/qcom-dwc3`、`/zh/porting/usb`、`/zh/porting/arm64e`、
+`/zh/guide/debugging#usb-调试终端`。抓下来读过之后，结论如下。
+
+### 三条路线（生态里 USB 日志/栈的三个层次）
+
+| 路线 | 是什么 | 板级需要提供 | 我们 |
+|---|---|---|---|
+| **(a) `QcomXnuUsbDebug`** 组件 | 内核 console tee + CDC-ACM；主机端 `collect-xnu-usb.py` / `xnu_usb_control.py` / `screenshot.py` | 只要 DWC3 到 **device 模式** | **本轮 CI 正在做** |
+| **(b) `QcomDwc3`** 组件 | 派生自苹果 `AppleUSBXDCI` / `AppleUSBXHCI`，跑**原版苹果 USB 栈**（枚举、重新枚举、信任弹窗、与 Mac 配对、lockdown、服务启动）| eUSB2 中继器 + QMP PHY + retimer + 电源轨时序、SMMU **stage-1 一致(write-back inner-shareable)上下文**、UCSI(充电器 GLINK)报线缆角色、`board.toml [kernel.prelink] roots` 加入 USB 栈 | 未开始 |
+| **(c) `scripts/debug_terminal.py`** | giulia 协议 2 的电脑端终端：CDC 采集、`status`/`replay`、按主题导出、GSC1 帧缓冲投屏 | **设备侧要实现 giulia 协议 2**（只改 USB ID 没用）| 未开始 |
+
+文档明确：路线 (b) 在 **sheng（小米平板 6S Pro, SM8550, iPadOS 27.0.1/24A446）** 上已是
+"USB3 10 Gbps / USB2 480 Mbps 枚举、重新枚举、信任弹窗、与 Mac 配对、lockdown 会话"可用；
+主机模式部分可用。这正是"arm64e + xnu 12377"那条线 —— **与我们同代**。
+
+### uke 的数值逐项吻合（live DT 核对）
+
+| 文档要求（sheng 值）| uke 实况 | |
+|---|---|---|
+| DWC3 基址 `0x0a600000`，**苹果寄存器窗口 +0xc000** | `msm-dwc3 reg <0xa600000 0x100000>`；`dwc3@a600000 reg <0xa600000 0xd93c>`（0xd93c > 0xc000）| ✅ |
+| SMMU 流 **0x40** | `dwc3 iommus = <0x129 0x40 0x00>` | ✅ |
+| GIC **INTID 165** | `dwc3 interrupts = <0 0x85 4>` → SPI 0x85=133，INTID = 133+32 = **165** | ✅ |
+| eUSB2 PHY + PMIC 中继器 | `hsphy@88e3000` (`qcom,usb-snps-eusb2-phy`, `qcom,use-eusb2-phy`) + `eusb2-repeater@fd00` (`qcom,pmic-eusb2-repeater`) | ✅ |
+| 无 SuperSpeed PHY（uke 只有 eUSB2）| `usb_qmp_dp_phy: ssphy@88e8000` 是 DP-altmode 的 QMP，不是 USB3 SS | ✅ 与 `soc/Uke.h` 的 `CBCR_REQUIRED=3` 一致 |
+| eUSB2 参考时钟 **38.4 MHz** | cliffs GCC，待用时再核 | ⏳ |
+
+⇒ **不需要重新摸硬件参数**，文档常量可直接引用；这省掉了 `Qsoc/Uke.h` 现有值的再验证成本。
+
+### 对当前工作的三条影响
+
+1. **arm64e 那篇解释了前几轮的 CI 错误**：27 线（xnu 12377.121.6）以 **arm64e + PAC** 编译，
+   所以 `__attribute__((weak))` 函数仍需 `l_…$auth_ptr$ia$` 签名符号（§67 第 2 条）。
+2. **路线 (a) 是最短路径**：只要 DWC3 device 模式，不需要苹果 USB 栈、不需要 prelink roots。
+   而固件 `UKE-GCC` 读出的继承状态（GDSC 上电、5 个 CBCR 全跑、`BCR=0`、`DEVCTRLHLT=1`）
+   恰好就是 `QcomUsbQualify` 要的状态。
+3. **路线 (b) 的缺口清单（以后要苹果 USB 栈时）**：
+   - `board.toml [kernel.prelink] roots` 里**一个 USB 栈都没有**（查过：`IOUSBDeviceFamily` /
+     `AppleUSBDeviceMux` / `IOUSBHostFamily` / `USBDeviceConfiguration` 均不在）；
+   - 类布局脚本 `gen-usb27-abi.py` / `gen-usb27-host-abi.py` 是按 **24A446** kernelcache 生成的，
+     我们是 **25F84** —— 要么按其说明改脚本里的 kernelcache 与类地址，要么接受布局风险；
+   - 启动参数 `sheng-usb=1`（2 = 加寄存器采样，3 = 让控制器离线重接）与 `log-sys=1`
+     （打印 `native_usb_stats` 的 `[usb]` 行，含 bringUp 9 个阶段里失败的那一步）；
+   - UCSI/充电器 GLINK（线缆角色）—— 我们固件链里没有 vendor charger（§57 里它还会开看门狗）。
+
+### 文档里两条特别值得记住的排查提示
+
+- **"chirp 通过、高速数据失败 → eUSB2 参考时钟表"**：枚举到一半断，先查 38.4 MHz 参考时钟。
+- **`ep0OutEventOccurred: event 0` → stage 1 SMMU 上下文**：苹果栈不做缓存维护，
+  stream 0x40 必须给它独立的 write-back inner-shareable 恒等映射上下文。
