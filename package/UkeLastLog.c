@@ -24,6 +24,7 @@
 #include <IOKit/IOLib.h>
 
 extern vm_offset_t gPanicBase;
+extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 extern unsigned int gPanicSize;
 extern int desiredvnodes;
 extern uint64_t sane_size;

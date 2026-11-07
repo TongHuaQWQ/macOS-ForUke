@@ -39,6 +39,9 @@
 #include <sys/msgbuf.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+/* Same reasoning as ml_io_map above: the prototype sits behind PEXPERT_KERNEL_PRIVATE in
+ * osfmk/arm/machine_routines.h, which this archive's compile line does not define. */
+extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 extern uint64_t kvtophys(vm_offset_t va);
 extern void console_write_unbuffered(char);
