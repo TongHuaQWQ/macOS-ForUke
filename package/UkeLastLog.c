@@ -18,6 +18,7 @@
 #include <kern/sched.h>
 #include <kern/startup.h>
 #include <kern/thread.h>
+#include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <sys/msgbuf.h>
 #include <IOKit/IOLib.h>
@@ -470,17 +471,49 @@ uke_last_log_writer(void *arg, wait_result_t result)
 	}
 }
 
+/* A pram beacon of its own: this STARTUP and the USB one are the two places whose threads have
+ * never produced observable output, so each says whether it ran at all in a slot the firmware's
+ * printable-run scan can read on the next boot. 0xFF800000 is the /pram window the ADT declares. */
+static void
+uke_last_log_beacon(const char *text)
+{
+	static vm_offset_t va;
+	char *slot;
+	unsigned i = 0;
+
+	if (va == 0) {
+		va = ml_io_map_wcomb(0xFF800000ull, 0x2000);
+		if (va == 0) {
+			return;
+		}
+	}
+	slot = (char *)(va + 0x1100);
+	while (i < 63 && text[i] != '\0') {
+		slot[i] = text[i];
+		i++;
+	}
+	while (i < 64) {
+		slot[i++] = 0;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
 static void
 uke_last_log_start(void)
 {
 	uint32_t enabled = 0;
 	thread_t thread;
 
+	uke_last_log_beacon("UKELASTLOG-STARTUP-ENTERED");
 	if (!PE_parse_boot_argn("sheng-log", &enabled, (int)sizeof(enabled)) || enabled != 1) {
+		uke_last_log_beacon("UKELASTLOG-DISABLED");
 		return;
 	}
 	if (kernel_thread_start_priority(uke_last_log_writer, NULL, BASEPRI_KERNEL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
+		uke_last_log_beacon("UKELASTLOG-THREAD-STARTED");
+	} else {
+		uke_last_log_beacon("UKELASTLOG-THREAD-FAILED");
 	}
 }
 

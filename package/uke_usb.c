@@ -1346,7 +1346,7 @@ uke_usb_phy_power(vm_offset_t gcc)
 		uke_usb_busy_wait(1000);
 	}
 	if (usb_rd(gcc, 0x6a004) & (1u << 31)) {
-		uke_usb_step = 64;                    /* AHB2PHY branch never left halt */
+		uke_usb_set_step(64);                    /* AHB2PHY branch never left halt */
 		uke_usb_clk = usb_rd(gcc, 0x6a004);
 		uke_usb_smmu = usb_rd(gcc, 0x6a004);
 		uke_usb_pll = usb_rd(gcc, 0x6a000);
@@ -1360,7 +1360,7 @@ uke_usb_phy_power(vm_offset_t gcc)
 		uke_usb_busy_wait(1000);
 	}
 	if (usb_rd(gcc, 0x8c008) & (1u << 31)) {
-		uke_usb_step = 63;                    /* clkref branch stayed halted */
+		uke_usb_set_step(63);                    /* clkref branch stayed halted */
 		uke_usb_clk = usb_rd(gcc, 0x8c008);
 		return false;
 	}
@@ -1371,7 +1371,7 @@ uke_usb_phy_power(vm_offset_t gcc)
 
 	vm_offset_t phy = ml_io_map(PHY_PA, PHY_SIZE);
 	if (phy == 0) {
-		uke_usb_step = 65;
+		uke_usb_set_step(65);
 		return false;
 	}
 	static const struct { uint32_t off, value; } table[] = {
@@ -1402,7 +1402,7 @@ uke_usb_phy_power(vm_offset_t gcc)
 		}
 		uke_usb_busy_wait(1000);
 	}
-	uke_usb_step = 66;                            /* PHY programmed, PLL never locked */
+	uke_usb_set_step(66);                            /* PHY programmed, PLL never locked */
 	/* One boot, as much evidence as the panel can carry: which of the candidate PLL status
 	 * registers has bit 5 set (0 = none), the status register itself, the next one, and the
 	 * PLL_CORE_INPUT_OVERRIDE readback (bit 4/5/6 say whether the core-reset cycle stuck). */
@@ -1425,10 +1425,10 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 	uint32_t hwparams0 = usb_rd(dwc, 0xc140);
 	unsigned awidth = hwparams0 >> 24;
 	if (!uke_usb_phy_power(uke_usb_gcc_va)) {
-		uke_usb_step = 68;
+		uke_usb_set_step(68);
 		return;
 	}
-	uke_usb_step = 69;
+	uke_usb_set_step(69);
 	uint32_t gctl = usb_rd(dwc, GCTL);
 
 	ud.dwc = dwc;
@@ -1458,7 +1458,7 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 		return;
 	}
 	ud.dma_pa = pa;
-	uke_usb_step = 70;
+	uke_usb_set_step(70);
 	uke_usb_clk = dwc_rd(GCTL);
 	uke_usb_smmu = dwc_rd(DCTL);
 	uke_usb_pll = dwc_rd(DSTS);
@@ -1502,7 +1502,7 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 	if (!(dwc_rd(DSTS) & DSTS_DEVCTRLHLT)) {
 		return;
 	}
-	uke_usb_step = 71;
+	uke_usb_set_step(71);
 	uke_usb_clk = dwc_rd(GCTL);
 	uke_usb_smmu = dwc_rd(DCTL);
 	uke_usb_pll = dwc_rd(DSTS);
@@ -1522,7 +1522,7 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
 		return;
 	}
-	uke_usb_step = 72;
+	uke_usb_set_step(72);
 	uke_usb_clk = dwc_rd(GCTL);
 	uke_usb_smmu = dwc_rd(DCTL);
 	uke_usb_pll = dwc_rd(DSTS);
@@ -1531,7 +1531,7 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 	printf("UKE USB: QSCRATCH %p (wrapper map %p + 0x%x)\n",
 	    (void *)qs, (void *)dwc, QSCRATCH_OFFSET);
 	uke_usb_select_utmi_clk(qs);
-	uke_usb_step = 73;
+	uke_usb_set_step(73);
 	uke_usb_clk = dwc_rd(GCTL);
 	uke_usb_smmu = dwc_rd(DCTL);
 	uke_usb_pll = dwc_rd(DSTS);
@@ -1556,7 +1556,7 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 	if (ud_epcmd(1, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) { return; }
 	printf("UKE USB: ep0 in resources ready\n");
 	dwc_wr(DALEPENA, 0x3);
-	uke_usb_step = 74;
+	uke_usb_set_step(74);
 	uke_usb_clk = dwc_rd(GCTL);
 	uke_usb_smmu = dwc_rd(DCTL);
 	uke_usb_pll = dwc_rd(DSTS);
@@ -1571,7 +1571,7 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 	printf("UKE USB: QSCRATCH after HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x\n",
 	    usb_rd(qs, QSCRATCH_HS_PHY_CTRL),
 	    usb_rd(qs, QSCRATCH_SS_PHY_CTRL));
-	uke_usb_step = 75;
+	uke_usb_set_step(75);
 	uke_usb_clk = dwc_rd(GCTL);
 	uke_usb_smmu = dwc_rd(DCTL);
 	uke_usb_pll = dwc_rd(DSTS);
@@ -1592,7 +1592,7 @@ uke_usb_gadget_start(vm_offset_t dwc, vm_offset_t smmu)
 	printf("UKE USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n",
 	    dwc_rd(DSTS), i, ud.dma_pa);
 	ud.live = true;
-	uke_usb_step = 76;
+	uke_usb_set_step(76);
 	uke_usb_clk = dwc_rd(DSTS);
 	uke_usb_dwc = dwc_rd(DCTL);
 	uke_usb_clk = dwc_rd(GCTL);
@@ -1673,13 +1673,13 @@ uke_usb_console_start(void)
 	if (!enabled) {
 		return;
 	}
-	uke_usb_step = 1;
+	uke_usb_set_step(1);
 	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
 	if (gcc == 0) {
 		printf("UKE USB: GCC map failed\n");
 		return;
 	}
-	uke_usb_step = 2;
+	uke_usb_set_step(2);
 	uke_usb_gcc_va = gcc;
 	uint32_t gdscr = usb_rd(gcc, GCC_USB30_PRIM_GDSCR);
 	uke_usb_gcc = gdscr;
@@ -1694,7 +1694,7 @@ uke_usb_console_start(void)
 	printf("UKE USB: GCC sleep=%08x mock_utmi=%08x clkref=%08x\n",
 	    sleep, mock, clkref);
 	if (gdscr & (1u << 31)) {
-		uke_usb_step = 3;
+		uke_usb_set_step(3);
 	}
 	if (power == 11) {
 		/* Read-only identity of the controller: no GCC write, no DWC3 write, nothing but loads.
@@ -1712,7 +1712,7 @@ uke_usb_console_start(void)
 		uke_usb_clk = dwc_rd(GCTL);
 		printf("UKE USB: DWC3 id=%08x gctl=%08x dctl=%08x dsts=%08x\n",
 		    id, dwc_rd(GCTL), dwc_rd(DCTL), dwc_rd(DSTS));
-		uke_usb_step = 58;
+		uke_usb_set_step(58);
 		uke_usb_park(hold);
 		return;
 	}
@@ -1740,14 +1740,14 @@ uke_usb_console_start(void)
 		uke_usb_dwc = usb_rd(gcc, 0xf00c);
 		vm_offset_t dwc = ml_io_map(DWC3_PA, DWC3_SIZE);
 		if (dwc == 0) {
-			uke_usb_step = 55;
+			uke_usb_set_step(55);
 			uke_usb_park(hold);
 			return;
 		}
 		uke_usb_clk = usb_rd(dwc, 0xc120);   /* GSNPSID */
 		uke_usb_smmu = usb_rd(dwc, DCTL);
 		uke_usb_pll = usb_rd(dwc, DSTS);
-		uke_usb_step = 55;
+		uke_usb_set_step(55);
 		uke_usb_park(hold);
 		return;
 	}
@@ -1771,7 +1771,7 @@ uke_usb_console_start(void)
 		uke_usb_clk = usb_rd(gcc, 0x502c);
 		uke_usb_smmu = usb_rd(gcc, 0x8201c);
 		uke_usb_dwc = usb_rd(gcc, 0xf00c);
-		uke_usb_step = 54;
+		uke_usb_set_step(54);
 		uke_usb_park(hold);
 		return;
 	}
@@ -1784,7 +1784,7 @@ uke_usb_console_start(void)
 		uke_usb_pll = usb_rd(gcc, 0x5028);
 		uke_usb_dwc = usb_rd(gcc, 0xf00c);
 		uke_usb_gcc = usb_rd(gcc, GCC_USB30_PRIM_GDSCR);
-		uke_usb_step = 53;
+		uke_usb_set_step(53);
 		uke_usb_park(hold);
 		return;
 	}
@@ -1805,14 +1805,14 @@ uke_usb_console_start(void)
 		uke_usb_dwc = usb_rd(gcc, 0xf00c);
 		vm_offset_t dwc = ml_io_map(DWC3_PA, DWC3_SIZE);
 		if (dwc == 0) {
-			uke_usb_step = 52;
+			uke_usb_set_step(52);
 			uke_usb_park(hold);
 			return;
 		}
 		uke_usb_clk = usb_rd(dwc, 0xc120);   /* GSNPSID */
 		uke_usb_smmu = usb_rd(dwc, DCTL);
 		uke_usb_pll = usb_rd(dwc, DSTS);
-		uke_usb_step = 52;
+		uke_usb_set_step(52);
 		uke_usb_park(hold);
 		return;
 	}
@@ -1832,7 +1832,7 @@ uke_usb_console_start(void)
 			uke_usb_busy_wait(1000);
 		}
 		uke_usb_dwc = usb_rd(gcc, 0xf00c);
-		uke_usb_step = 51;
+		uke_usb_set_step(51);
 		uke_usb_park(hold);
 		return;
 	}
@@ -1845,7 +1845,7 @@ uke_usb_console_start(void)
 		uke_usb_clk = usb_rd(gcc, 0xf018);
 		uke_usb_smmu = usb_rd(gcc, 0xf01c);
 		uke_usb_dwc = usb_rd(gcc, 0xf00c);
-		uke_usb_step = 50;
+		uke_usb_set_step(50);
 		uke_usb_park(hold);
 		return;
 	}
@@ -1894,7 +1894,7 @@ uke_usb_console_start(void)
 		uke_usb_park(hold);
 		return;
 	}
-	uke_usb_step = 4;
+	uke_usb_set_step(4);
 	printf("UKE USB: SMMU mapped %u bytes\n", (unsigned)smmu_size);
 	if (bind_smmu == 3) {
 		ud.smmu_guard = uke_usb_smmu_probe_page(smmu);
@@ -1910,7 +1910,7 @@ uke_usb_console_start(void)
 		return;
 	}
 	ud.dwc = dwc;
-	uke_usb_step = 6;
+	uke_usb_set_step(6);
 	uke_usb_dwc = usb_rd(dwc, 0xc120);
 	uke_usb_dsts = usb_rd(dwc, DSTS);
 	printf("UKE USB: DWC3 GSNPSID 0x%08x GCTL 0x%08x DCTL 0x%08x DSTS 0x%08x DCFG 0x%08x\n",
@@ -1973,7 +1973,7 @@ uke_usb_console_start(void)
 	ud.smmu_guard = uke_usb_smmu_guard(smmu, 0, 0);
 	uke_usb_smmu = ud.smmu_guard ? 1u : 0u;
 	if (ud.smmu_guard) {
-		uke_usb_step = 5;
+		uke_usb_set_step(5);
 	}
 	if (!ud.smmu_guard) {
 		printf("UKE USB: SID e0 guard refused; controller untouched\n");
@@ -1981,12 +1981,75 @@ uke_usb_console_start(void)
 		return;
 	}
 	if (enabled >= 2) {
-		uke_usb_step = 7;
+		uke_usb_set_step(7);
 		uke_usb_gadget_start(dwc, smmu);
 	} else {
 		printf("UKE USB: route test complete; DWC3 remains halted\n");
 	}
 	uke_usb_park(hold);
+}
+
+
+/* ---------------------------------------------------------------------------------------------
+ * Pram beacon.
+ *
+ * Nothing this file prints has ever been observed on the device: every round since b66 starts the
+ * probe from a kernel thread and the output stays in msgbuf, where a boot that ends on the platform
+ * SError panic leaves it unreadable (the pram writer that should carry msgbuf is silent too). The
+ * one thing the firmware can always read is the pram window itself - it prints its first sixteen
+ * bytes and scans the rest for printable text on every start. So the driver writes its breadcrumbs
+ * there: 64 bytes of ASCII at pram+0x1000, overwritten as the probe advances. The next firmware boot
+ * then reports the last step reached, with no console, no thread and no panic involved.
+ *
+ * The window is the one the ADT gives /pram (0xFF800000, 0x380000 in scripts/make-uke-adt.py), and
+ * it is mapped write-combining exactly the way pe_init.c maps it for the kernel's own panic log.
+ * ------------------------------------------------------------------------------------------- */
+#define UKEUSB_BEACON_PA  0xFF800000ull
+#define UKEUSB_BEACON_OFF 0x1000u
+
+static vm_offset_t uke_usb_beacon_va;
+
+static void
+uke_usb_beacon_slot(char *slot, const char *text)
+{
+	unsigned i = 0;
+
+	while (i < 63 && text[i] != '\0') {
+		slot[i] = text[i];
+		i++;
+	}
+	while (i < 64) {
+		slot[i++] = 0;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+static void
+uke_usb_beacon(const char *text)
+{
+	if (uke_usb_beacon_va == 0) {
+		return;
+	}
+	uke_usb_beacon_slot((char *)(uke_usb_beacon_va + UKEUSB_BEACON_OFF), text);
+}
+
+/* Every existing breadcrumb becomes persistent: the step number is written out as text so the
+ * firmware's printable-run scan picks it up, even when nothing else survives. */
+static void
+uke_usb_set_step(unsigned step)
+{
+	char text[64];
+	unsigned i = 0;
+
+	uke_usb_step = step;
+	text[i++] = 'U'; text[i++] = 'K'; text[i++] = 'E';
+	text[i++] = 'U'; text[i++] = 'S'; text[i++] = 'B';
+	text[i++] = '-'; text[i++] = 'S'; text[i++] = 'T'; text[i++] = 'E'; text[i++] = 'P'; text[i++] = '-';
+	text[i++] = (char)('0' + (step / 100) % 10);
+	text[i++] = (char)('0' + (step / 10) % 10);
+	text[i++] = (char)('0' + step % 10);
+	text[i++] = '\0';
+	uke_usb_beacon(text);
 }
 
 /* Entry point.
@@ -2050,8 +2113,19 @@ uke_usb_startup(void)
 	int enabled = 0;
 	kern_return_t started;
 
+	/* Map the pram window first: this single store is the only evidence that this STARTUP ran at
+	 * all, and it is readable by the firmware on the next boot even when the console, the threads
+	 * and msgbuf are all unavailable. */
+	if (uke_usb_beacon_va == 0) {
+		uke_usb_beacon_va = ml_io_map_wcomb(UKEUSB_BEACON_PA, 0x2000);
+	}
+	uke_usb_beacon("UKEUSB-STARTUP-ENTERED");
+
 	PE_parse_boot_argn("uke_usb", &enabled, sizeof(enabled));
 	PE_parse_boot_argn("uke_usb_sync", &sync, sizeof(sync));
+	if (!enabled) {
+		uke_usb_beacon("UKEUSB-DISABLED");
+	}
 
 	/* Synchronous first: the thread path has run in every round since b66 without a single line of
 	 * output reaching the screen, and the boot ends on the platform SError panic before anything can
