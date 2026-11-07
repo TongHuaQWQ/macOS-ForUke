@@ -151,7 +151,7 @@ static int deadline_expired(void)
 }
 static int acquire(uint64_t *saved_daif)
 {
-    if (cpu_number() != master_cpu) return 0;
+    if (cpu_number() != boot_cpu_id) return 0;
     __asm__ volatile("mrs %0, daif\nmsr daifset, #3" : "=r"(*saved_daif) :: "memory");
     if (__atomic_exchange_n(&usb_busy, 1u, __ATOMIC_ACQUIRE)) {
         __asm__ volatile("msr daif, %0" :: "r"(*saved_daif) : "memory");

@@ -78,12 +78,49 @@ def relaxed_record(source, target):
         if not bad:
             break
         rejected = bad.group(1)
+        protected = ('--target', '-target', '-arch', '-isysroot', '-I', '-D', '-U', '-isystem', '-x')
+        if rejected.startswith(protected):
+            # Dropping the target would compile for the host triple and the archive's LC_BUILD_VERSION
+            # audit would then reject it; dropping an include or define changes what the code sees.
+            print(f'record: keeping {rejected} (protected); probe said: '
+                  f'{probe.stderr.strip().splitlines()[0][:160] if probe.stderr.strip() else "(no output)"}')
+            break
         keep = [a for a in keep if a != rejected and not a.startswith(rejected + '=')]
         print(f'record: dropped {rejected} (this compiler rejects it for a compile)')
 
     record['arguments'] = [compiler, *keep]
     target.write_text(json.dumps(record, indent=1))
     return target
+
+
+UNITS = ('kernel/QcomXnuUsbDebug.c', 'kernel/QcomUsbScreenshot.c',
+         'usb/Dwc3.c', 'soc/QcomUsbQualify.c', 'soc/QcomUsbDmaDomain.c')
+
+
+def preflight(record_path):
+    """Compile every unit with -fsyntax-only and print all errors.
+
+    The component's build.py stops at the first failing unit, so a round that hits one API rename tells
+    us about exactly one rename - and a round is 45 minutes. This pass uses the same flags and include
+    set, keeps going, and prints every diagnostic, so one round can carry the whole list.
+    """
+    record = json.loads(record_path.read_text())
+    compiler, *flags = record['arguments']
+    defines = ['-I' + str(MODULE), '-I' + str(MODULE / 'kernel'), '-I' + str(MODULE / 'include'),
+               '-DQUD_SOC_HEADER="soc/Uke.h"', '-Wno-reserved-identifier', '-Wno-pre-c11-compat']
+    problems = 0
+    for unit in UNITS:
+        source = MODULE / unit
+        if not source.is_file():
+            continue
+        run = subprocess.run([compiler, '-fsyntax-only', '-x', 'c', *flags, *defines, str(source)],
+                             cwd=record['directory'], capture_output=True, text=True)
+        errors = [l for l in run.stderr.splitlines() if ': error:' in l]
+        problems += len(errors)
+        for line in errors[:12]:
+            print(f'preflight {unit}: {line}')
+    print(f'preflight: {problems} error(s) across {len(UNITS)} units')
+    return problems
 
 
 def main():
@@ -103,6 +140,8 @@ def main():
         '--nm', tool('llvm-nm'),
         '--output', str(OUT),
     ]
+    preflight(relaxed_record(RECORD, OUT.parent / 'compile-record.json'))
+
     print(' '.join(command))
     result = subprocess.run(command, cwd=str(MODULE))
     if result.returncode != 0:

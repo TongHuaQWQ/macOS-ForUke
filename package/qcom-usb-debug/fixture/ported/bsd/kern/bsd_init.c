@@ -1318,7 +1318,7 @@ static unsigned int qcom_usb_reboot_state;
 static void
 qcom_usb_reboot_worker(void *argument __unused, wait_result_t result __unused)
 {
-	processor_t processor = cpu_to_processor(master_cpu);
+	processor_t processor = cpu_to_processor(boot_cpu_id);
 	int reboot_result;
 
 	thread_set_thread_name(current_thread(), "qcom-usb-reboot");
@@ -1328,7 +1328,7 @@ qcom_usb_reboot_worker(void *argument __unused, wait_result_t result __unused)
 	}
 	thread_bind(processor);
 	thread_block(THREAD_CONTINUE_NULL);
-	if (cpu_number() != master_cpu) {
+	if (cpu_number() != boot_cpu_id) {
 		qcom_usb_debug_control_reboot_failed(-2);
 		goto out;
 	}
@@ -1406,25 +1406,25 @@ static void
 qcom_usb_worker(void *argument __unused, wait_result_t result __unused)
 {
 	struct qcom_usb_debug_status status = {0};
-	processor_t processor = cpu_to_processor(master_cpu);
+	processor_t processor = cpu_to_processor(boot_cpu_id);
 	int control_enabled = 0;
 	int control_active = 0;
 
 	thread_set_thread_name(current_thread(), "qcom-usb-debug");
 	/* Bind the way sched_prim.c binds its master-processor threads, then
-	 * prove the migration happened: master_cpu need not be logical CPU 0.
+	 * prove the migration happened: boot_cpu_id need not be logical CPU 0.
 	 * The module serves hardware only from the CPU it captured at init.
 	 */
 	if (processor == PROCESSOR_NULL) {
 		__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
-		kprintf("QCOM USB WORKER master processor missing cpu=%d\n", master_cpu);
+		kprintf("QCOM USB WORKER master processor missing cpu=%d\n", boot_cpu_id);
 		goto stopped;
 	}
 	thread_bind(processor);
 	thread_block(THREAD_CONTINUE_NULL);
-	if (cpu_number() != master_cpu) {
+	if (cpu_number() != boot_cpu_id) {
 		__atomic_store_n(&qcom_usb_worker_state, 3u, __ATOMIC_RELEASE);
-		kprintf("QCOM USB WORKER bind failed cpu=%d master=%d\n", cpu_number(), master_cpu);
+		kprintf("QCOM USB WORKER bind failed cpu=%d master=%d\n", cpu_number(), boot_cpu_id);
 		goto stopped;
 	}
 
