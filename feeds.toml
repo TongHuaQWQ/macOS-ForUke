@@ -66,11 +66,6 @@ kind = "driver"
 local = "drivers/ArmDTPlatform"
 
 [[source]]
-name = "QcomXnuUsbDebug"
-kind = "driver"
-local = "drivers/QcomXnuUsbDebug"
-
-[[source]]
 name = "ArmCpu"
 kind = "driver"
 local = "drivers/ArmCpu"
