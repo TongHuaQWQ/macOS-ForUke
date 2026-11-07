@@ -56,11 +56,11 @@ static struct {
 /* Boot-progress evidence: the panel's console section is an early snapshot, so the driver
  * publishes its progress as globals that package/BootProgress.c draws on its own row. */
 volatile uint32_t uke_usb_step;      /* 1 enabled, 2 GCC mapped, 3 power ok, 4 SMMU mapped,
+                                      * 5 guard ok, 6 DWC3 mapped, 7 gadget started, 8 connected */
 
-/* Declared here, defined next to the startup: the step assignments below all write the pram
- * beacon before the helper's definition would be visible to them. */
+/* Defined next to the startup, but called by the step assignments above it, which also write the
+ * pram beacon: one prototype keeps every one of them visible. */
 static void uke_usb_set_step(unsigned step);
-                                         * 5 guard ok, 6 DWC3 mapped, 7 gadget started, 8 connected */
 volatile uint32_t uke_usb_gcc;       /* GCC_USB30_PRIM_GDSCR */
 volatile uint32_t uke_usb_smmu;      /* SMMU guard result, 1 = pass */
 volatile uint32_t uke_usb_dwc;       /* DWC3 GSNPSID */
