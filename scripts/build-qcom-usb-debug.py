@@ -78,15 +78,26 @@ def relaxed_record(source, target):
         if not bad:
             break
         rejected = bad.group(1)
+        index = next((i for i, a in enumerate(keep)
+                      if a == rejected or a.startswith(rejected + '=')), None)
+        # The record carries cc1 options too: '-Xclang --target=arm64e-apple-ios26.5.2' is a pair, and
+        # cc1 has no --target, so the driver refuses it for '-c'. Dropping such a pair is safe because
+        # whatever it set is already set at driver level by '-arch arm64e' (or is a cc1 default).
+        forwarded = index is not None and index > 0 and keep[index - 1] == '-Xclang'
         protected = ('--target', '-target', '-arch', '-isysroot', '-I', '-D', '-U', '-isystem', '-x')
-        if rejected.startswith(protected):
+        if rejected.startswith(protected) and not forwarded:
             # Dropping the target would compile for the host triple and the archive's LC_BUILD_VERSION
             # audit would then reject it; dropping an include or define changes what the code sees.
             print(f'record: keeping {rejected} (protected); probe said: '
                   f'{probe.stderr.strip().splitlines()[0][:160] if probe.stderr.strip() else "(no output)"}')
             break
-        keep = [a for a in keep if a != rejected and not a.startswith(rejected + '=')]
-        print(f'record: dropped {rejected} (this compiler rejects it for a compile)')
+        if index is None:
+            break
+        drop = {index, index - 1} if forwarded else {index}
+        keep = [a for i, a in enumerate(keep) if i not in drop]
+        print(f'record: dropped {rejected}' + (' with its -Xclang (forwarded to cc1, which has no such '
+                                               'option; -arch already sets the triple)' if forwarded
+                                               else ' (this compiler rejects it for a compile)'))
 
     record['arguments'] = [compiler, *keep]
     target.write_text(json.dumps(record, indent=1))
@@ -95,6 +106,9 @@ def relaxed_record(source, target):
 
 UNITS = ('kernel/QcomXnuUsbDebug.c', 'kernel/QcomUsbScreenshot.c',
          'usb/Dwc3.c', 'soc/QcomUsbQualify.c', 'soc/QcomUsbDmaDomain.c')
+
+# 'file:line:col: error: ...' from a compile, and 'error: ...' from the driver itself.
+DIAGNOSTIC = re.compile(r'(^|: )error: ')
 
 
 def preflight(record_path):
@@ -115,7 +129,11 @@ def preflight(record_path):
             continue
         run = subprocess.run([compiler, '-fsyntax-only', '-x', 'c', *flags, *defines, str(source)],
                              cwd=record['directory'], capture_output=True, text=True)
-        errors = [l for l in run.stderr.splitlines() if ': error:' in l]
+        errors = [l for l in run.stderr.splitlines() if DIAGNOSTIC.search(l)]
+        if run.returncode != 0 and not errors:
+            # A driver-level diagnostic ('error: unknown argument: ...') has no 'file:line:' prefix and
+            # used to be filtered out here - that printed "0 error(s)" for five failing units.
+            errors = [l for l in run.stderr.splitlines() if l.strip()][:4] or ['(no output)']
         problems += len(errors)
         for line in errors[:12]:
             print(f'preflight {unit}: {line}')
@@ -132,15 +150,18 @@ def main():
         # build.py refuses to overwrite; a half-written output from a killed run must not survive either.
         shutil.rmtree(OUT)
     OUT.parent.mkdir(parents=True, exist_ok=True)
+    # One relaxation pass, used by both the preflight and the component: computing it twice printed the
+    # same "dropped"/"keeping" lines twice and made the log read as though the probe had run twice.
+    record = relaxed_record(RECORD, OUT.parent / 'compile-record.json')
+    preflight(record)
     command = [
         sys.executable, '-B', str(MODULE / 'scripts/build.py'),
-        '--compile-record', str(relaxed_record(RECORD, OUT.parent / 'compile-record.json')),
+        '--compile-record', str(record),
         '--soc', 'soc/Uke.h',
         '--ar', tool('llvm-ar'),
         '--nm', tool('llvm-nm'),
         '--output', str(OUT),
     ]
-    preflight(relaxed_record(RECORD, OUT.parent / 'compile-record.json'))
 
     print(' '.join(command))
     result = subprocess.run(command, cwd=str(MODULE))
