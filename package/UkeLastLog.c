@@ -499,6 +499,10 @@ uke_last_log_beacon(const char *text)
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
+/* Defined below, but called by the external entry above it: without this prototype the call is an
+ * implicit declaration error, which is exactly how the last round's archive build failed. */
+static void uke_last_log_start(void);
+
 /* External entry, for the csr_check and bsd_init hooks: the STARTUP registration alone has never
  * produced observable output in this kernel. */
 void
