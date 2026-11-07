@@ -372,7 +372,9 @@ kernel_args = [
   # instead of hanging silently. Both are inert unless this kernel carries fileset-wait-probe.patch.
   # "fileset-wait-log=1",   (the wait names are now printed unconditionally by uke-aes-stub.patch)
   "uke-aes-stub=1",
-  "fileset-wait-cap-ms=5000",
+  # "fileset-wait-cap-ms=5000",  (dropped for the 1000-byte cap: the probe now runs synchronously
+  # at EARLY_BOOT and panics with its breadcrumbs, which is uke_usb_sync=1's whole purpose. The
+  # fileset wait names print unconditionally from uke-aes-stub.patch, so the cap is redundant.)
   # DEVELOPMENT kernels keep kprintf off unless this is set; uke has no UART,
   # so kprintf then falls back to the framebuffer video console. Graphics boot
   # suppresses text until -uketextconsole switches the console to text mode.
@@ -440,6 +442,7 @@ kernel_args = [
   "sheng-log=1",
   "uke_usb=1",
   "uke_usb_power=11",
+  "uke_usb_sync=1",
   "uke_usb_panic=1",   # probe round only: freeze the console on the numbers   # read-only: GCC power domain, DWC3 identity, SMMU stream match
   "sheng-pmgr=2",
   "sheng-lite=1",

@@ -1997,6 +1997,31 @@ uke_usb_console_start(void)
  * means the console ring is already mirroring msgbuf before the disk drivers run, which is what
  * makes a panic visible from the host.
  */
+
+/* The probe itself, plus the optional freeze. Shared by the thread path and the synchronous path
+ * below, because neither has ever produced an observable result: this kernel prints nothing of the
+ * driver's, and every round so far ended on the platform SError panic instead.
+ *
+ * uke_usb_panic=1 panics with the breadcrumb values, and a panic screen *is* visible on this board
+ * (the SError panic is), so the numbers reach a camera even when nothing else does.
+ */
+static void
+uke_usb_probe_and_freeze(void)
+{
+	unsigned freeze = 0;
+
+	uke_usb_console_start();
+	PE_parse_boot_argn("uke_usb_panic", &freeze, sizeof(freeze));
+	if (freeze != 0) {
+		panic("UKE USB PROBE: step=%u gcc=%08x dwc=%08x dsts=%08x clk=%08x smmu=%08x pll=%08x",
+		    uke_usb_step, uke_usb_gcc, uke_usb_dwc, uke_usb_dsts, uke_usb_clk, uke_usb_smmu,
+		    uke_usb_pll);
+	}
+}
+
+static void
+uke_usb_thread(void *arg __unused, wait_result_t wr __unused);
+
 static void
 uke_usb_thread(void *arg __unused, wait_result_t wr __unused)
 {
@@ -2014,30 +2039,38 @@ uke_usb_thread(void *arg __unused, wait_result_t wr __unused)
 		delay(100 * 1000);
 	}
 	printf("UKE USB: probe thread running\n");
-	uke_usb_console_start();
-	/* uke_usb_panic=1 freezes the console on the numbers instead of letting the boot scroll past
-	 * them: the SError that ends this boot arrives later, and by then an eight-second-old line is
-	 * gone. Values also go into pram through the panic record, so the next boot prints them again. */
-	{
-		unsigned freeze = 0;
-		PE_parse_boot_argn("uke_usb_panic", &freeze, sizeof(freeze));
-		if (freeze != 0) {
-			panic("UKE USB PROBE: step=%u gcc=%08x dwc=%08x dsts=%08x clk=%08x smmu=%08x pll=%08x",
-			    uke_usb_step, uke_usb_gcc, uke_usb_dwc, uke_usb_dsts, uke_usb_clk, uke_usb_smmu,
-			    uke_usb_pll);
-		}
-	}
+	uke_usb_probe_and_freeze();
 }
 
 static void
 uke_usb_startup(void)
 {
 	thread_t thread;
+	unsigned sync = 0;
+	int enabled = 0;
+	kern_return_t started;
+
+	PE_parse_boot_argn("uke_usb", &enabled, sizeof(enabled));
+	PE_parse_boot_argn("uke_usb_sync", &sync, sizeof(sync));
+
+	/* Synchronous first: the thread path has run in every round since b66 without a single line of
+	 * output reaching the screen, and the boot ends on the platform SError panic before anything can
+	 * be recovered from pram (that writer is silent too - both of them are kernel threads started
+	 * from here). Running the probe inline, in the STARTUP context, removes the scheduling question
+	 * from the experiment entirely. */
+	if (enabled && sync != 0) {
+		printf("UKE USB: synchronous probe (uke_usb_sync=1)\n");
+		uke_usb_probe_and_freeze();
+		return;
+	}
+
 	/* kernel_thread_start, not kernel_thread_start_priority: the latter takes BASEPRI_KERNEL from
-	 * <kern/sched.h> and no longer resolves in this tree, and the probe thread starts eight seconds
-	 * late anyway, so its priority is irrelevant. The same call is already used above. */
-	if (kernel_thread_start(uke_usb_thread, NULL, &thread) == KERN_SUCCESS) {
+	 * <kern/sched.h> and no longer resolves in this tree. */
+	started = kernel_thread_start(uke_usb_thread, NULL, &thread);
+	if (started == KERN_SUCCESS) {
 		thread_deallocate(thread);
+	} else if (enabled) {
+		printf("UKE USB: kernel_thread_start failed (%d)\n", (int)started);
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, uke_usb_startup);
