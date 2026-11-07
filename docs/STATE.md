@@ -3012,3 +3012,33 @@ $ zcat /proc/config.gz | grep -E "STRICT_DEVMEM|DEVKMEM"
 
 ⇒ 结论：**不拍照的日志只有 USB 一条路**（XNU 侧 `uke_usb.c`，或将来固件自写 DWC3 device 栈）。
 在那之前，面板分页是唯一能把整份日志带出来的手段。
+
+---
+
+## 61. 分页没出现的原因：我们所有面板输出走的是一条**看不见的路**
+
+用户刷 b81 后按说明翻页，但屏幕上根本没有 `--- boot log page 1 ---`，只有内核的
+`gic-probe:` 那一屏。
+
+对比两条输出通道就明白了：
+
+| 通道 | 谁在用 | 屏幕上可见？ |
+|---|---|---|
+| `DebugLib` → `FrameBufferSerialPortLib`（直接写 framebuffer） | Sec 的 banner、DxeCore 的 `Loading driver at …` | **可见** |
+| `ConOut` → `AsciiPrint` → GraphicsConsole/GOP | `UkeUsbLogDxe` 的 `Log()`、`DumpPreviousBootLog` 回显、`DumpPagedLog` | **一直不可见** |
+
+也就是说：**从 b70 到 b81，`UkeUsbLogDxe` 的每一行面板输出都没真正显示过**
+（包括那句 `--- previous boot log: first N lines ---`）—— 这也是为什么我们从来没在照片里
+看到过 pram 回显。这不是新 bug，是一开始就走错了通道。
+
+修法很简单：`UkeUsbLogDxe` 的全部面板打印（`Log()` 的镜像输出、pram 头/尾回显、分页器）
+统一改成 `DEBUG ((DEBUG_WARN, …))`，与 dispatcher 同一条路；`mLog` 缓冲照旧（USB 盘和 ramoops 还要用）。
+
+```
+work/flash/boot-round-b82-visiblelog.img   1122304 B
+sha256 678493aeab142a43fd5517f07f1a8225d19d401b9b10a9de08623e871d8de9a0
+  FD sha256 d8cd439e22700311…（模块里已无任何 AsciiPrint 调用）
+```
+
+下一轮同一个镜像启动时，`--- boot log page 1 (vol-up next, vol-down continue) ---` 应该终于出现在屏幕上，
+里面就是上一次启动的内核日志（pram 里那 192 KiB），可以按音量加翻页找 `UKE USB:`。
