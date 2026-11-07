@@ -3222,3 +3222,34 @@ UkeLastLog.c : 0xFF800000 + 0x1100，同样 64 字节
 | `... "UKEUSB-STEP-0NN"` | STARTUP 跑了、探针也跑了，卡在第 NN 步 → 直接改那一步 |
 | `... "UKELASTLOG-THREAD-FAILED"` | 线程创建失败 → pram 写者改同步 |
 | 两个都没有（仍是残留字节） | **STARTUP 根本没执行** → 那问题在 STARTUP 机制/链接（下一步查 `__startup` 段） |
+
+---
+
+## 66. 面包屑内核出来了（b87）：`uke_usb` 的 beacon 已进内核，内核会自己往 pram 写字
+
+```
+run 42363611270 (452bbf6) success
+kernel.macho sha256 145283526af5cecbd7db77b259440d13c93738899ec0c3bf138e4f368f5f78d0
+prelink stubbed 0 / stub_sites 0
+strings: "UKEUSB-STARTUP-ENTERED" ✓、"UKEUSB-STEP-001/002/003/…" 共 18 条 ✓
+```
+
+一个需要记录的偏差：`UKELASTLOG-*` 那几条**没有**进这一版内核（`strings` 里 0 条），
+而 `UKEUSB-*` 全在。同一份 `libUkeLastLog.a` 里的 `UkeLastLog.o` 确实进了内核
+（它的 `UkeLastLog: vnodes desired=` 字符串在），所以这不是"归档没链"，更像是那一个对象用了
+树里 `kits/uke/UkeLastLog.c` 的旧副本。**不影响本轮结论**：判断"STARTUP 到底跑没跑"
+只需要 `uke_usb` 这一条 beacon；如果下一轮 pram 里出现 `UKEUSB-STARTUP-ENTERED` 或
+`UKEUSB-STEP-NNN`，机制就是通的（顺带把 `UkeLastLog` 的 beacon 补进树里再验证一次）。
+
+```
+work/flash/boot-round-b87-beacon.img          1122304 B  sha256 b7a673d1017b5586…（b83 固件：pram @0xFF800000）
+work/flash/vendor_boot_round-b87-beacon.img   85782528 B  sha256 adc45b88d8c53d0a…（内核 145283526af5cecb）
+```
+
+**两段式读法**：
+
+1. 刷 + `fastboot boot` → 内核跑到 EARLY_BOOT，`uke_usb_startup` 把
+   `UKEUSB-STARTUP-ENTERED` 写进 pram 的 `0xFF800000 + 0x1000`，然后同步探针（`uke_usb_sync=1`）
+   每进一步就改写成 `UKEUSB-STEP-NNN`；
+2. **再启动一次同一对镜像** → 固件的 `--- pram 0xFF800000 (3584 KiB) from the previous boot ---`
+   与 `pram first text:` 就会把内核写进去的最后一行打出来。
