@@ -3309,3 +3309,27 @@ work/flash/boot-round-b88-slots.img   1122304 B  sha256 d86e37f0e4db96d7f1b3aa4b
 
 因为 pram 里现在存的是**刚才那次 b87 内核启动**写下的内容，所以刷 b88 **启动一次**就能读出结论，
 不需要两段式。
+
+### 66d. 固件侧再补三件"把不确定性压掉"的读法（b89）
+
+在等内核那轮 CI 的同时，固件这边加了（本机构建，不占 CI）：
+
+1. **多读一个槽位**：`pram slot 0x1200`（`csr_check` 的 beacon 写在这里）；
+2. **原始 hex**：`pram slot 0x1000 raw:` / `0x1200 raw:` 各 16 字节 —— 万一内核写进去的不是可打印文本
+   （半条记录、对齐不同、或别的路径写的），hex 是唯一能看见它的方式；
+3. **整窗搜索**：`pram find "UKEUSB"` / `pram find "UKELASTLOG"` ——
+   不再假设内核一定写在 `+0x1000`；命中就把**偏移 + 后面 40 字节文本**打出来（最多 4 处）。
+
+于是下一次启动的那一屏会同时给出：
+
+```
+pram slot 0x1000: "…"            pram slot 0x1000 raw: …
+pram slot 0x1100: "…"            pram slot 0x1200 raw: …
+pram slot 0x1200: "…"
+pram find "UKEUSB" at 0x…: "…"   pram find "UKELASTLOG": not present in 3584 KiB
+```
+
+```
+work/flash/boot-round-b89-pramscan.img   1122304 B  sha256 3f4d004bf024a46ceca22e74f4434ea0a25ff0b915f71a6ff99b0c87b2aa52e2
+  FD sha256 b364c568f203f594…
+```
