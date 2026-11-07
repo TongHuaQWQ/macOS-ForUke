@@ -2120,6 +2120,13 @@ uke_usb_startup(void)
 	int enabled = 0;
 	kern_return_t started;
 
+	/* Decisive one-line test: with uke_usb_sync=1 this panics before touching anything, so a panic
+	 * screen means the STARTUP from this archive is executed at all, and no panic screen means it
+	 * never runs (which is what the silent pram beacon and the silent probe suggest). */
+	if (PE_parse_boot_argn("uke_usb_sync", &sync, sizeof(sync)) && sync != 0) {
+		panic("UKE USB: startup entry reached (uke_usb_sync=1)");
+	}
+
 	/* Map the pram window first: this single store is the only evidence that this STARTUP ran at
 	 * all, and it is readable by the firmware on the next boot even when the console, the threads
 	 * and msgbuf are all unavailable. */

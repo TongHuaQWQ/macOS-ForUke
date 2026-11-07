@@ -40,6 +40,33 @@ csr_check(uint32_t mask)
 {
 	uint32_t config = 0;
 
+	/* This weak stub exists because the prelinked fileset calls csr_check by name, so a line here
+	 * proves the archive's code runs at all - independent of STARTUP, of the console and of msgbuf.
+	 * Same pram slot the USB breadcrumbs use (uke_usb writes UKEUSB-* there from 0xFF800000+0x1000);
+	 * this one uses +0x1200 and says so once. */
+	{
+		static int written;
+		if (!written) {
+			typedef unsigned long uke_vm_offset_t;
+			extern uke_vm_offset_t ml_io_map_wcomb(uke_vm_offset_t, unsigned long);
+			uke_vm_offset_t va = ml_io_map_wcomb(0xFF800000ull, 0x2000);
+			if (va != 0) {
+				char *slot = (char *)(va + 0x1200);
+				const char *text = "UKEUSB-VIA-CSRCHECK";
+				unsigned i = 0;
+				while (i < 63 && text[i] != '\0') {
+					slot[i] = text[i];
+					i++;
+				}
+				while (i < 64) {
+					slot[i++] = 0;
+				}
+				__asm__ volatile ("dsb sy" ::: "memory");
+			}
+			written = 1;
+		}
+	}
+
 	if (csr_get_active_config(&config) != 0) {
 		return UKE_EPERM;
 	}
