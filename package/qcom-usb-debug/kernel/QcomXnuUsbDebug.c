@@ -13,6 +13,15 @@
 #include <kern/cpu_number.h>
 #include <pexpert/pexpert.h>
 
+/* osfmk/arm/machine_routines.h declares ml_io_map only under __APPLE_API_PRIVATE, and xnu-12377's own
+ * compile record does not define that API-level macro (it carries PEXPERT_KERNEL_PRIVATE and
+ * XNU_KERNEL_PRIVATE instead), so the header's declaration is invisible here and the call below becomes
+ * "call to undeclared function". Declaring it keeps the unit at the API level the record already chose -
+ * defining the macro would pull in every other private declaration as well, and with MACH_KERNEL_PRIVATE
+ * it would also make machine_routines.h want mach_assert.h, which only exists in EXPORT_HDRS. The
+ * prototype is identical to the guarded one, so it stays correct if a future record exposes it. */
+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+
 #define NATIVE_CONTEXT_BYTES DWC3_CONTEXT_BYTES
 #define GCC_BYTES QUD_GCC_BYTES
 #define USB_BYTES QUD_DWC3_BYTES
@@ -227,7 +236,7 @@ static char *append_decimal(char *to, uint64_t value)
 /* Registers are read as words; decimal would make them unreadable against the manual. */
 static char *append_hex(char *to, uint64_t value)
 {
-    static const char digits[16] = "0123456789abcdef";
+    static const char digits[] = "0123456789abcdef";
     int shift;
     for (shift = 60; shift > 0 && !((value >> shift) & 0xfu); shift -= 4) { }
     for (; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];

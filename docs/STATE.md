@@ -3536,3 +3536,44 @@ PREFLIGHT OK: driver-level rejections are counted, clean records report 0
   下一步要读的是 preflight 的逐单元错误行与 `archive-17-build-qcom-usb-debug.log`。
 - 若这一轮 preflight 终于吐出真实的 12377 不兼容清单，那是**好消息**：一轮就能拿到全部单元的错误，
   一次性修完（这正是 preflight 存在的理由）。
+
+---
+
+## 71. 归档真正的编译阻碍（用 12377 真实头文件逐符号核对出来的）
+
+上一轮只死在参数层，五个单元一个都没编到。所以在等 CI 的时间把
+`package/qcom-usb-debug` 的五个单元对着 `work/analysis/xnu-12377/` 做了一次**逐符号**核对
+（用 clang 真实编译 + 在 12377 里 grep 声明/定义）。结论：
+
+### 真阻碍（已修，commit 见下）
+
+| 位置 | 症状 | 12377 里的事实 | 修法 |
+|---|---|---|---|
+| `kernel/QcomXnuUsbDebug.c` `ml_io_map` ×3 | `call to undeclared function 'ml_io_map'` | 声明在 `osfmk/arm/machine_routines.h:603`，被 `#ifdef __APPLE_API_PRIVATE` **且** (`PEXPERT_KERNEL_PRIVATE` \|\| `MACH_KERNEL_PRIVATE`) 两层包住 | 记录里有 `PEXPERT_KERNEL_PRIVATE`，**但没有 `__APPLE_API_PRIVATE`** → 本文件内直接 `extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);`（原型与头文件逐字相同）|
+| `scripts/build.py` 导入审计 | `RuntimeError: unexpected XNU imports: ['_boot_cpu_id']` | 12377 的启动 CPU 全局是 `boot_cpu_id`（`osfmk/kern/cpu_number.h:62`，`XNU_KERNEL_PRIVATE` 内），10063 才是 `master_cpu` | 白名单加 `_boot_cpu_id`，同时保留 `_master_cpu`（旧 profile 仍可用）|
+| 同上，`append_hex` | clang ≥19 的 `-Wunterminated-string-initialization` | 与内核无关，只是长度写死 16 | `digits[16]` → `digits[]`（唯一用途是 `& 0xfu` 下标，没有 `sizeof`）|
+
+### 已排除的两个"看起来是阻碍"的点
+
+- **`boot_cpu_id` 需要 `XNU_KERNEL_PRIVATE`？** 记录里**已经有** `-D XNU_KERNEL_PRIVATE`（实测：
+  记录中 `XNU_KERNEL_PRIVATE` ×1、`PEXPERT_KERNEL_PRIVATE` ×1、`KERNEL_PRIVATE` ×3、
+  `MACH_KERNEL_PRIVATE` ×0、`__APPLE_API_PRIVATE` ×0）。所以声明可见，只需改名不需要加宏。
+- **`<mach_assert.h> not found`？** 它只经 `osfmk/machine/machine_routines.h` 在
+  `MACH_KERNEL_PRIVATE` 下被拉到，而记录里没有这个宏 —— 我们**没有**用 `-DMACH_KERNEL_PRIVATE`
+  去修 `ml_io_map`，正是为了不踩这个坑（它只存在于 `build/xnu/ios-obj/EXPORT_HDRS`，源码树里没有）。
+  若将来某份记录真的带 `MACH_KERNEL_PRIVATE`，正确做法是补
+  `-I<tree>/build/xnu/ios-obj/EXPORT_HDRS`，而不是硬塞 API 宏。
+
+### 无需处理的告警
+
+- `boot_progress_persist` 在 12377 里不存在，是本站 display 补丁的符号，模块里以 `weak_import`
+  声明 → 链接成 NULL，代码里已判空（只是丢掉那两行报告）。
+- `-Wunsafe-buffer-usage` / `-Wshadow-header`：只在 clang ≥19 且 `-Weverything` 下出现；
+  归档用的记录 `-W` 全集已被 wrapper 丢弃，所以不会变成错误。
+
+### 顺带核对清楚的"链接契约"（省一轮"
+
+补丁调用的 13 个 `qcom_usb_debug_*` 符号，**每一个**都在 `include/QcomXnuUsbDebug.h` 声明、
+在组件某个 `.c` 里**恰好定义一次**；归档路径
+`<tree>/.cache/qcom-usb-debug/libQcomXnuUsbDebug.a` 与 `build-xnu-4k-baseline.sh` 里
+`-Wl,-force_load` 的路径一致；`Upload artifacts (always)` 保证即使归档失败日志也会回来。

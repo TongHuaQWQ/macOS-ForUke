@@ -114,7 +114,10 @@ def main():
             return {line.split()[-1] for line in lines if line.strip() and not line.endswith(':')}
         defined = symbols('--defined-only')
         external = symbols('--undefined-only') - defined
-        allowed = {'_PE_halt_restart', '_PE_parse_boot_argn', '_cpu_number', '_master_cpu',
+        allowed = {'_PE_halt_restart', '_PE_parse_boot_argn', '_cpu_number', '_boot_cpu_id',
+                   # xnu-10063 named the boot CPU master_cpu; a profile pinned to an older tree still
+                   # imports that symbol, so the audit accepts either name and the unit picks one.
+                   '_master_cpu',
                    '_ml_io_map', '_ml_static_vtop', '___stack_chk_guard', '___stack_chk_fail',
                    '_bzero', '_memcpy', '_memset',
                    # Optional: the refusal report goes to the board's diagnostic page when the
