@@ -3333,3 +3333,61 @@ pram find "UKEUSB" at 0x…: "…"   pram find "UKELASTLOG": not present in 3584
 work/flash/boot-round-b89-pramscan.img   1122304 B  sha256 3f4d004bf024a46ceca22e74f4434ea0a25ff0b915f71a6ff99b0c87b2aa52e2
   FD sha256 b364c568f203f594…
 ```
+
+---
+
+## 67. 走生态的组件（选项 A）：`QcomXnuUsbDebug` 移植到 xnu-12377.121.6
+
+### 为什么换路线
+
+自己那份 `package/uke_usb.c`（sirius 移植）从 b66 起一直**没有一行输出被观测到**：
+`STARTUP()` 注册的入口既不写 pram、也不 panic、`kernel_thread_start` 返回值也看不到 —— 说明
+"从 `package/*.c` 归档里注册的 STARTUP 在这个内核里是否执行"本身就是个未解问题。
+
+生态的组件 `QcomXnuUsbDebug`（alioth、munch 等真机在用，自带 `collect-xnu-usb.py` /
+`xnu_usb_control.py` / `screenshot.py` 与 28+20 项测试）**不依赖 STARTUP**：它的 worker 由
+
+```c
+bsd_autoconf() { kminit();
+#if XNU_QCOM_USB_DEBUG
+	qcom_usb_start_worker_once();
+#endif
+```
+
+启动 —— 一个必然执行的调用点。所以改用组件比继续调自己的驱动更快接近目标。
+
+### 版本缺口与移植（本地完成，可验证）
+
+- 组件只带 `darwin22`（xnu-8796）和 `darwin23`（xnu-10063）；本板内核是 **xnu-12377.121.6**
+  （profile pin `ac9718f`，已本地 clone 验证）。
+- 用 `patch -p1 --fuzz=5` 把 darwin23 两套补丁打到 12377 上，再 `git diff` 重新生成：
+
+```
+drivers/QcomXnuUsbDebug/patches/darwin24/0001-qcom-usb-debug-console.patch   git apply --check ✓
+drivers/QcomXnuUsbDebug/patches/darwin24/0002-qcom-usb-debug-worker.patch    git apply --check ✓
+```
+
+- 落点已核对：console tee 在 `pe_kprintf.c`/`debug.c`/`printf.c`/`serial_console.c`/`serial_general.c`；
+  worker 函数在 `bsd_init.c` 文件作用域，`kminit()` 之后调用。
+
+### 接入改动
+
+```
+feeds.toml                         登记 QcomXnuUsbDebug 为板级 local 源（树里才有 drivers/QcomXnuUsbDebug）
+patches/xnu/zzzzzzzzzzzzzzzzzz-…   darwin24 两份补丁 + series 条目（放在最后）
+configs/uke-macos_defconfig        CONFIG_XNU_QCOM_USB_DEBUG=y
+board.toml                         重新启用 build-qcom-usb-debug.py；参数加 qcom-usb-debug=1、
+                                   去掉 uke_usb_power=11（固件已证明时钟/GDSC 是好的）
+patches/xnu/zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch   备选挂点（#if XNU_QCOM_USB_DEBUG 守住的弱调用）
+```
+
+### 这几轮 CI 上踩的四个坑（全部是编辑级错误，不是设计问题）
+
+| run | 错误 | 正解 |
+|---|---|---|
+| 42369432329 | 手写补丁 hunk 行数错 → `corrupt patch at line 20` | 按 body 实际行数重算 `@@` |
+| 42371643241 | `__attribute__((weak))` 函数在 **arm64e** 上仍要 `l_…$auth_ptr$ia$` 符号 | 不能靠 weak 跨 pass |
+| 42373133806 | `uke_last_log_start` 未先声明 → 归档编译失败 → 链接缺 `corecrypto_kext_start`/`mockfs_*` | 加前置声明（一个因、两个错）|
+| 42375406774 | `module missing: <tree>/drivers/QcomXnuUsbDebug` | feeds.toml 必须登记 `local = "drivers/QcomXnuUsbDebug"` |
+
+现在跑的是 `de5c79c`（run `42377211143`）。
