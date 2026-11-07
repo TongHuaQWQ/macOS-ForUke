@@ -3182,3 +3182,43 @@ UKE USB PROBE: step=N gcc=… dwc=… dsts=… clk=… smmu=… pll=…
 |---|---|---|
 | `UKE USB PROBE: step=N …` | 探针跑通了，卡在第 N 步 | 直接改那一步（PF 表/PHY/DWC3 初始化）|
 | `UKE USB: kernel_thread_start failed (…)` 或什么都不出现，仍是 SError panic | 同步路径也被更早的东西挡住 | 说明 STARTUP 阶段本身有问题，下一步把探针挪到更早/换上下文 |
+
+---
+
+## 65. b84：同步探针也没留下任何痕迹 —— 于是改成"往 pram 里写字"，让内核自己报告
+
+b84 实拍（视频逐帧）里只有这些：
+
+- 固件侧一切正常（`UKE-GCC: gdsc_powered=1 … usb_clocks_running=3/3`、`UKEMEM:`、DarwinBoot 交接、Apple logo + UniXNU）；
+- 内核侧 `gic-probe:` 一屏 + `Exiting boot services. A green bar across the top marks the loader handoff before the kernel branch.`；
+- **没有出现 `UKE USB PROBE:` 的 panic 屏**；
+- pram 依然是 `0 KiB of text kept in 24 lines`、头部还是那串残留 `10 30 A0 C0 86 40 00 00 …`。
+
+⇒ 这一轮排除掉的正是"线程没被调度"这个假设：**改成同步调用后依然什么都没有**。
+于是怀疑对象再往下一层：**`STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, …)` 注册的函数到底跑没跑**。
+（`uke_usb` 和 `UkeLastLog` 两个都是这样注册的，两个都没有任何可观测输出。）
+
+### 解法：不再依赖 console / 线程 / panic，直接往 pram 写 ASCII
+
+内核里唯一**必然可被固件读到**的东西就是 pram 那块内存 —— 固件每次启动都会打印它的头 16 字节，
+并把整块扫描成可打印文本。所以内核现在把面包屑直接写进去（提交 `2fec95e`，CI run `42360110438`）：
+
+```
+uke_usb.c    : 0xFF800000 + 0x1000，64 字节 ASCII
+  "UKEUSB-STARTUP-ENTERED"         ← STARTUP 一开始就写
+  "UKEUSB-STEP-NNN"                ← 29 处 uke_usb_step 赋值全部改成写这行
+  "UKEUSB-DISABLED"                ← uke_usb 没解析到时
+
+UkeLastLog.c : 0xFF800000 + 0x1100，同样 64 字节
+  "UKELASTLOG-STARTUP-ENTERED" / "-DISABLED" / "-THREAD-STARTED" / "-THREAD-FAILED"
+```
+
+映射方式和 `pe_init.c` 里映射 pram 一样（`ml_io_map_wcomb`），写完 `dsb sy`。
+下一轮启动时，固件的 `--- pram … ---` 与 `pram first text:` 就会把**内核自己写的最后一行**打出来：
+
+| 固件屏上出现 | 结论 |
+|---|---|
+| `pram first text: "UKEUSB-STARTUP-ENTERED"` | STARTUP 跑了，但 `uke_usb` 参数没解析到 → 查 boot-arg |
+| `... "UKEUSB-STEP-0NN"` | STARTUP 跑了、探针也跑了，卡在第 NN 步 → 直接改那一步 |
+| `... "UKELASTLOG-THREAD-FAILED"` | 线程创建失败 → pram 写者改同步 |
+| 两个都没有（仍是残留字节） | **STARTUP 根本没执行** → 那问题在 STARTUP 机制/链接（下一步查 `__startup` 段） |
