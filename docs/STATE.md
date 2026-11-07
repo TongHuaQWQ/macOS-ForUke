@@ -3253,3 +3253,31 @@ work/flash/vendor_boot_round-b87-beacon.img   85782528 B  sha256 adc45b88d8c53d0
    每进一步就改写成 `UKEUSB-STEP-NNN`；
 2. **再启动一次同一对镜像** → 固件的 `--- pram 0xFF800000 (3584 KiB) from the previous boot ---`
    与 `pram first text:` 就会把内核写进去的最后一行打出来。
+
+### 66b. 现在可以"读视频"了：`ffmpeg` 在本机，抽帧 + 读图
+
+用户把 51 秒 4K/120fps 的录屏 `VID_20261107_190413.mp4` 放进项目根目录。我这边用
+`ffmpeg` 按时间抽帧、裁剪、缩放，再把帧当图片读，等价于"看视频"：
+
+```bash
+ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 VID_*.mp4
+ffmpeg -i VID_*.mp4 -an -vf "fps=1,scale=1280:-1" frames/s%02d.png          # 全片导览
+ffmpeg -ss 9.35 -t 0.9 -i VID_*.mp4 -an -vf "fps=10,scale=1920:-1" e%02d.png  # 精确定位关键 0.9 秒
+ffmpeg -i VID_*.mp4 -an -vf "select='gt(scene,0.03)',metadata=print:file=-" -f null -  # 场景切换时刻
+```
+
+（本机没有 tesseract/gocr，所以是"人眼读帧"而不是 OCR；4K 帧足够看清状态栏级别的字。）
+
+从这段视频里读到的关键一帧（t≈9.6 s）：
+
+```
+UKE-LOG: ready-to-boot hold=20
+--- pram 0xFF800000 (3584 KiB) from the previous boot ---
+pram head: 10 30 A0 C0 86 40 00 00  04 00 81 00 10 00 00 22
+--- pram end: 0 KiB of text kept in 24 lines ---
+pram first text: <none: DRAM did not survive, or the kernel never wrote>
+--- previous boot log: first 12 lines ---
+```
+
+这段视频是**刷入 b87 后的第一次启动**，所以它读到的 pram 还是上一版（无 beacon）留下的；
+而 b87 内核的 beacon 是在**这次启动**里才写进去的。⇒ 还差**第二次启动**才能读到。
