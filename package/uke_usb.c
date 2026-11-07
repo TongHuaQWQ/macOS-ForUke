@@ -2112,6 +2112,29 @@ uke_usb_thread(void *arg __unused, wait_result_t wr __unused)
 	uke_usb_probe_and_freeze();
 }
 
+/* Called from outside this file when the STARTUP route cannot be trusted: the prelinked fileset's
+ * csr_check reaches us directly (MissingKernelSymbols.c), and a patched bsd_init() can call it too.
+ * Both write a distinct beacon first, so the firmware can tell which hook fired. */
+void
+uke_usb_hook_entry(const char *who)
+{
+	int enabled = 0;
+	int hook = 0;
+
+	if (uke_usb_beacon_va == 0) {
+		uke_usb_beacon_va = ml_io_map_wcomb(UKEUSB_BEACON_PA, 0x2000);
+	}
+	uke_usb_beacon(who);
+
+	PE_parse_boot_argn("uke_usb", &enabled, sizeof(enabled));
+	PE_parse_boot_argn("uke_usb_hook", &hook, sizeof(hook));
+	if (!enabled || !hook) {
+		return;
+	}
+
+	uke_usb_probe_and_freeze();
+}
+
 static void
 uke_usb_startup(void)
 {

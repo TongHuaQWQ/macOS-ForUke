@@ -47,6 +47,10 @@ csr_check(uint32_t mask)
 	{
 		static int written;
 		if (!written) {
+			extern void uke_usb_hook_entry(const char *);
+			extern void uke_last_log_hook_entry(const char *);
+			uke_usb_hook_entry("UKEUSB-HOOK-CSRCHECK");
+			uke_last_log_hook_entry("UKELASTLOG-HOOK-CSRCHECK");
 			typedef unsigned long uke_vm_offset_t;
 			extern uke_vm_offset_t ml_io_map_wcomb(uke_vm_offset_t, unsigned long);
 			uke_vm_offset_t va = ml_io_map_wcomb(0xFF800000ull, 0x2000);

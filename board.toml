@@ -443,6 +443,7 @@ kernel_args = [
   "uke_usb=1",
   "uke_usb_power=11",
   "uke_usb_sync=1",
+  "uke_usb_hook=1",
   "uke_usb_panic=1",   # probe round only: freeze the console on the numbers   # read-only: GCC power domain, DWC3 identity, SMMU stream match
   "sheng-pmgr=2",
   "sheng-lite=1",

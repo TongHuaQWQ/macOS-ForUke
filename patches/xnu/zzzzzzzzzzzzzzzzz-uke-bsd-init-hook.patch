@@ -1,0 +1,19 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -506,6 +506,14 @@ bsd_init(void)
+ 	throttle_init();
+ 
+ 	printf(copyright);
++	{
++		/* Board hooks that do not depend on the STARTUP() mechanism: this kernel has never
++		 * shown a single line from the archive functions registered that way, while patched
++		 * call sites (uke-stage-last-panic, uke-heartbeat) are known to run. Each hook writes
++		 * its own pram beacon and, with uke_usb_hook=1, runs the USB probe and freezes. */
++		extern void uke_usb_hook_entry(const char *);
++		extern void uke_last_log_hook_entry(const char *);
++		uke_usb_hook_entry("UKEUSB-HOOK-BSDINIT");
++		uke_last_log_hook_entry("UKELASTLOG-HOOK-BSDINIT");
++	}
+ 
+ #if CONFIG_DEV_KMEM
+ 	bsd_init_kprintf("calling dev_kmem_init\n");

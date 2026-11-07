@@ -134,3 +134,9 @@ uke-aes-stub.patch
 # driver (package/uke_usb.c, which reads msgbuf and needs no XNU patch) is the USB console.
 # zzzzzzzzzzzzzzz-uke-usb-console.patch
 # zzzzzzzzzzzzzzz-uke-usb-worker.patch
+
+# Board hooks straight from bsd_init(): the STARTUP()-registered entries in package/*.c have never
+# produced observable output in this kernel (silent pram beacon, silent probe, no panic), while the
+# patched call sites above demonstrably run. csr_check calls the same hooks, so whichever fires is
+# visible in the pram beacon string.
+zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch

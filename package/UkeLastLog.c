@@ -499,6 +499,15 @@ uke_last_log_beacon(const char *text)
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
+/* External entry, for the csr_check and bsd_init hooks: the STARTUP registration alone has never
+ * produced observable output in this kernel. */
+void
+uke_last_log_hook_entry(const char *who)
+{
+	uke_last_log_beacon(who);
+	uke_last_log_start();
+}
+
 static void
 uke_last_log_start(void)
 {
