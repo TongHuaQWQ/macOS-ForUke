@@ -51,6 +51,21 @@ def tool(name):
     raise SystemExit(f'{name} not found (xcrun -f {name} failed)')
 
 
+def relaxed_record(source, target):
+    """The record's own warning flags are dropped, exactly as scripts/build-uke-usb.py does for its object.
+
+    The kernel build compiles those units with its own -W set, which includes flags a newer clang does
+    not know (the workflow even patches -Wno-unknown-warning-option into two archive recipes for that
+    reason) and -Werror, under which an out-of-tree revision's warning becomes a build failure. The
+    component appends its own -Wno-* after the record's flags and expects the rest untouched.
+    """
+    record = json.loads(source.read_text().rstrip().rstrip(','))
+    arguments = [a for a in record['arguments'] if not a.startswith('-W')]
+    record['arguments'] = arguments
+    target.write_text(json.dumps(record, indent=1))
+    return target
+
+
 def main():
     if not (MODULE / 'scripts/build.py').is_file():
         raise SystemExit(f'module missing: {MODULE}')
@@ -59,16 +74,27 @@ def main():
     if OUT.exists():
         # build.py refuses to overwrite; a half-written output from a killed run must not survive either.
         shutil.rmtree(OUT)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable, '-B', str(MODULE / 'scripts/build.py'),
-        '--compile-record', str(RECORD),
+        '--compile-record', str(relaxed_record(RECORD, OUT.parent / 'compile-record.json')),
         '--soc', 'soc/Uke.h',
         '--ar', tool('llvm-ar'),
         '--nm', tool('llvm-nm'),
         '--output', str(OUT),
     ]
     print(' '.join(command))
-    subprocess.run(command, check=True, cwd=str(MODULE))
+    result = subprocess.run(command, cwd=str(MODULE))
+    if result.returncode != 0:
+        # The component sends each compiler's output to that object's .log file, so a failing compile
+        # leaves nothing on this stream. Print them, or the next round only says "returned 1".
+        for log in sorted(OUT.glob('*.log')):
+            print(f'--- {log.name} ---')
+            text = log.read_text(errors='replace').splitlines()
+            print('\n'.join(text[:120]))
+            if len(text) > 120:
+                print(f'... {len(text) - 120} more lines')
+        raise SystemExit(f'{Path(__file__).name}: component build failed (exit {result.returncode})')
     report = json.loads((OUT / 'build-report.json').read_text())
     print(f"QcomXnuUsbDebug: {report.get('archive_sha256', '?')[:16]} soc={report.get('soc')}")
 
