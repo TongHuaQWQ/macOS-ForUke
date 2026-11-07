@@ -191,6 +191,44 @@ class Layout:
         segment = matches[0]
         return self.placements[segment['name']] - self.cache.base + old_offset - segment['fileoff']
 
+    def overlap_report(self, segment):
+        """Name the shortfall, not just the collision.
+
+        The native kernel is placed into the range Apple's own kernel used to occupy inside each
+        mapping (com.apple.kernel is deliberately left out of the retained set), so the number that
+        matters when this fails is how much room that range leaves against what the rebuilt kernel
+        asks for. Without it the message is a bare "overlaps a retained segment" and the reader has to
+        rebuild to learn a single byte count - a 45-minute round (STATE 75).
+        """
+        name = segment['name']
+        begin, end = self.placements[name], self.end(name)
+        report = (f'Native {name} overlaps a retained segment: placed {begin:#x}..{end:#x}, '
+                  f'needs {segment["size"]:#x} bytes')
+        root = next((r for r in self.roots.values()
+                     if r['va'] <= begin < r['va'] + r['size']), None)
+        if root is None:
+            return report
+        limit = root['va'] + root['size']
+        cursor, free = root['va'], []
+        for retain_begin, retain_end in sorted(self.occupied):
+            if retain_end <= root['va'] or retain_begin >= limit:
+                continue
+            if retain_begin > cursor:
+                free.append((cursor, retain_begin))
+            cursor = max(cursor, retain_end)
+        if limit > cursor:
+            free.append((cursor, limit))
+        if free:
+            report += f'; {name} mapping {root["va"]:#x}..{limit:#x} free: ' + ', '.join(
+                f'{a:#x}..{b:#x} ({b - a:#x})' for a, b in free[:4])
+            home = next(((a, b) for a, b in free if a <= begin < b), None)
+            if home is not None:
+                report += (f'; the range the placement landed in holds {home[1] - home[0]:#x} bytes, '
+                           f'so the kernel exceeds it by {segment["size"] - (home[1] - home[0]):#x}')
+        else:
+            report += f'; {name} mapping {root["va"]:#x}..{limit:#x} has no free range at all'
+        return report
+
     def validate(self):
         placed = []
         for segment in self.native.segments:
@@ -200,7 +238,7 @@ class Layout:
             if begin % PAGE:
                 raise ValueError('Unaligned native segment')
             if any(begin < e and b < end for b, e in self.occupied + placed):
-                raise ValueError(f'Native {segment["name"]} overlaps a retained segment')
+                raise ValueError(self.overlap_report(segment))
             if not any(s['va'] <= begin and end <= s['va'] + s['size'] for s in self.roots.values()):
                 raise ValueError(f'Native {segment["name"]} is outside collection mappings')
             placed.append((begin, end))

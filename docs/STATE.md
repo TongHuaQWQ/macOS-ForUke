@@ -3766,3 +3766,74 @@ boot_progress_persist(const char *text, uint32_t colour) { (void)text; (void)col
 
 内核编译 + 链接。归档契约已逐符号核对（13 个 `qcom_usb_debug_*` 各有唯一定义），
 `boot_progress_persist` 现在有定义，剩下的未定义集会由 `-k` 一次报全。
+
+---
+
+## 75. 内核**链接成功**了；卡在 prelink：4 MiB 的日志环把 `__DATA` 撑出了"苹果内核数据区"
+
+run `42392182678`（`90d0872`）是到目前为止最好的一轮：
+
+```
+built kernel at …/DEVELOPMENT_ARM64_BCM2837//mach.development.bcm2837
+Source kernel POST integrity field populated
+```
+
+**`mach.development.bcm2837` 生成成功** —— `_boot_progress_persist` 的 weak 定义解决了问题，
+`-force_load` 的归档、六个 hook 单元、`-Werror` 全都过了。失败点往后移到了 **prelink**：
+
+```
+ValueError: Native __DATA overlaps a retained segment
+  kits/XnuPrelink/fileset_layout.py:203 in validate()
+```
+
+### 原因：`Layout` 把我们的 `__DATA` 放进"苹果内核原来占的那块"，而这块装不下 4 MiB
+
+读 `fileset_layout.py` 就清楚：`Layout.__init__` 里
+
+```python
+self.roots = {s['name']: dict(s) for s in cache.segments}     # 苹果 kernelcache 的映射
+for name, (_, offset) in cache.entries.items():
+    if name == 'com.apple.kernel' or …:  continue             # 苹果内核本身不算"保留段"
+    …self.occupied.append((segment['va'], segment['va']+segment['size']))   # 被保留的 kext 段
+…
+self.reserve('__DATA', self.roots['__DATA']['va'])            # 我们的 __DATA 放在映射开头
+```
+
+也就是说：**原生内核的 `__DATA` 必须塞进"苹果内核数据原来占的那段空隙"**，一页之后就可能是
+第一个被保留的 kext 的 `__DATA`。而组件里有：
+
+```
+SOC_USB_LOG_BUFFER_BYTES = 4 MiB      ← kernel/QcomUsbBuffer.h 里的静态日志环
+usb_dma        32 KiB  (DWC3_DMA_BYTES)
+usb_tables     12 KiB  (QUSB_DOMAIN_PT_BYTES)
+usb_context    20 KiB  (DWC3_CONTEXT_BYTES)
+```
+
+4 MiB 的环直接把原生 `__DATA` 从"刚好装得下"推到溢出。参考数值：b87（还没有组件）emit 出来的
+collection 其 `__DATA` 是 **4,849,664 B**，说明这段空隙至少这么大 —— 4 MiB 的环几乎等于再塞一个内核数据段。
+
+### 修法
+
+1. **环从 4 MiB 降到 64 KiB**（`kernel/QcomUsbBuffer.h`）。归档全部静态数据因此约 128 KiB：
+   64 + 32 + 12 + 20。并在宏上方写清"这个大小是 __DATA 预算，不是随便调的" ——
+   它受 prelink 空隙约束，overflow 有计数、不静默丢。CDC-ACM 一起来 worker 就持续排空，
+   容量只需要覆盖"传输通道还不存在"的那段窗口。
+2. **把失败信息变成数字**：`fileset_layout.py` 新增 `overlap_report()`，冲突时直接打印
+   放置区间、需要的字节数、该映射的空闲区间列表，以及"超了多少字节"。示例（合成 layout 实测）：
+
+   ```
+   Native __DATA overlaps a retained segment: placed 0x70000000..0x70140000, needs 0x140000 bytes;
+   __DATA mapping 0x70000000..0x70200000 free: 0x70000000..0x70010000 (0x10000),
+   0x70018000..0x70020000 (0x8000), 0x70030000..0x70200000 (0x1d0000);
+   the range the placement landed in holds 0x10000 bytes, so the kernel exceeds it by 0x130000
+   ```
+
+   下次若还装不下，日志会直接告诉我们要么还要再缩多少、要么空隙有多大。
+
+### 备选方案（先不用，但已经能看到）
+空闲区间列表里通常**还有别的空隙**（上例尾部有 0x1d0000），机械上完全可以把原生 `__DATA`
+放进后面的空隙。但 XNU 会从原生数据段的起始推导 kext 数据范围（对照 `__TEXT_EXEC` 那段注释），
+换位置属于"能过 prelink 但语义变了的改动"，要花一次真机验证。**优先收缩，不换语义。**
+
+### 现在的位置
+从"归档能不能编"一路推进到：归档 ✅ → 内核编译 ✅ → 内核链接 ✅ → **只剩 prelink 的布局约束**。

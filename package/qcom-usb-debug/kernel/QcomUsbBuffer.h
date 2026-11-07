@@ -8,8 +8,19 @@
  * taking this nonspinning guard, including for drain/snapshot operations.
  * A recursive/competing producer returns immediately and counts lost bytes.
  * Preserve oldest bytes: an unavailable host must not overwrite early panic
- * or startup evidence. Finite capacity is reported, never called lossless. */
-#define SOC_USB_LOG_BUFFER_BYTES (4u * 1024u * 1024u)
+ * or startup evidence. Finite capacity is reported, never called lossless.
+ *
+ * The size is a kernel-__DATA budget, not a free choice. This is a static in
+ * the kernel image, and prelink places the native kernel's data inside the
+ * range Apple's own kernel data occupies (com.apple.kernel is the one entry
+ * fileset_layout.py leaves out of the retained set), so the rebuilt kernel's
+ * __DATA has to fit that range. A 4 MiB ring pushed it past the first retained
+ * kext and failed prelink with "Native __DATA overlaps a retained segment"
+ * (run 42392182678). 64 KiB keeps this archive's whole static footprint near
+ * 110 KiB, and the worker drains continuously once CDC-ACM is up, so capacity
+ * only has to cover the window before the transport exists; overflow is
+ * counted and reported, never silent. */
+#define SOC_USB_LOG_BUFFER_BYTES (64u * 1024u)
 #define SOC_USB_LOG_WRITE_BUDGET 16384u
 #define SOC_USB_LOG_DRAIN_BUDGET 4096u
 struct soc_usb_buffer {
