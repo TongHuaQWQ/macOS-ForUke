@@ -3809,8 +3809,30 @@ usb_tables     12 KiB  (QUSB_DOMAIN_PT_BYTES)
 usb_context    20 KiB  (DWC3_CONTEXT_BYTES)
 ```
 
-4 MiB 的环直接把原生 `__DATA` 从"刚好装得下"推到溢出。参考数值：b87（还没有组件）emit 出来的
-collection 其 `__DATA` 是 **4,849,664 B**，说明这段空隙至少这么大 —— 4 MiB 的环几乎等于再塞一个内核数据段。
+4 MiB 的环直接把原生 `__DATA` 从"刚好装得下"推到溢出。
+
+### 75b. 用 b87 的产物把"空隙到底多大"量出来（结果：64 KiB 装得下，余量约 100 KiB）
+
+上一段里我写的"b87 的 `__DATA` 是 4,849,664 B"其实是 **顶层 `__DATA` 映射**的大小，不是原生内核数据段。
+把 `work/ci-artifacts/b87/kernel.macho`（上一版能过的 collection，MH_FILESET）逐条 fileset entry 解开后：
+
+```
+顶层 __DATA 映射          0xfffffff00c54c000 .. 0xfffffff00c9ec000   (0x4a0000)
+原生内核 __DATA（本条）    0xfffffff00c54c000 + 0x248000              → 0x248000 = 2,392,064 B
+第一个被保留 kext 的 __DATA 0xfffffff00c7cb8b0 + 0x13f9
+                             ⇒ 空隙 = 0xc7cb8b0 − 0xc792000 = 0x398b0 = 236,720 B
+```
+
+也就是说原生内核 `__DATA` 必须 ≤ **2,628,784 B**（2,392,064 + 236,720）。本组件的静态数据：
+
+```
+64 KiB 日志环 + 32 KiB DMA + 12 KiB SMMU 表 + 20 KiB DWC3 上下文 ≈ 128 KiB
+⇒ 2,392,064 + ~130 KiB ≈ 2.52 MB < 2.63 MB        余量 ≈ 100 KiB  ✓
+4 MiB 环时代：2.39 MB + 4.26 MB ≈ 6.65 MB ≫ 2.63 MB  超出 ≈ 4 MB  ✗（与报错一致）
+```
+
+量法本身也记下来（以后要复核就用它）：解析顶层 `LC_SEGMENT_64` 拿到映射，再用 `LC_FILESET_ENTRY`
+（0x80000035）逐条解析嵌套 Mach-O 的 `__DATA`，取"第一个 ≥ 原生数据起始地址的 kext 段"。
 
 ### 修法
 
