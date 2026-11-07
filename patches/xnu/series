@@ -140,3 +140,11 @@ uke-aes-stub.patch
 # patched call sites above demonstrably run. csr_check calls the same hooks, so whichever fires is
 # visible in the pram beacon string.
 zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch
+
+# USB log console, the core component drivers/QcomXnuUsbDebug (same one alioth and munch ship).
+# Its own patch sets stop at xnu-10063; drivers/QcomXnuUsbDebug/patches/darwin24/README.md records the
+# rebase onto this kernel's xnu-12377.121.6 (ac9718f) and both files here are byte-identical copies of
+# that rebased pair. The worker starts from bsd_autoconf() right after kminit(), which always runs -
+# unlike the STARTUP() route the board's own driver uses. Runtime is opt-in: qcom-usb-debug=1.
+zzzzzzzzzzzzzzzzzz-qcom-usb-debug-console.patch
+zzzzzzzzzzzzzzzzzz-qcom-usb-debug-worker.patch

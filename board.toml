@@ -166,10 +166,9 @@ archives = [
   # The CDC-ACM log console over DWC3 (package/uke_usb.c, ported from the sirius port). Its object
   # joins libUkeLastLog.a, so this must come after build-boot-log.py.
   "build-uke-usb.py",
-  # libQcomXnuUsbDebug.a (drivers/QcomXnuUsbDebug) is prepared but not built: its two XNU patches
-  # target xnu-10063 while this kernel builds xnu-12377.121.6, so the config is off and nothing links
-  # the archive. scripts/build-qcom-usb-debug.py and soc/Uke.h stay in place for that port.
-  # "build-qcom-usb-debug.py",
+  # libQcomXnuUsbDebug.a (drivers/QcomXnuUsbDebug), built against this tree's own compile records with
+  # soc/Uke.h. The kernel links it when CONFIG_XNU_QCOM_USB_DEBUG is on, which it now is.
+  "build-qcom-usb-debug.py",
   # The comparison kernel the fileset prelink reads, last, as upstream's 26/27 archives do:
   #   "The 27 kernel archives end with build-fileset-release-reference.py --tree ., the comparison
   #    kernel the prelink step reads." (docs/devices/sheng.md)
@@ -441,10 +440,12 @@ kernel_args = [
   # "sheng-staged-apps=1",   (see the note above: dropped for the 1000-byte command-line cap)
   "sheng-log=1",
   "uke_usb=1",
-  "uke_usb_power=11",
+  # "uke_usb_power=11",  (dropped for the 1000-byte cap: the firmware readout shows the USB clocks and
+  # GDSC are already up, so the driver's default "no power writes" is the correct behaviour.)
   "uke_usb_sync=1",
   "uke_usb_hook=1",
-  "uke_usb_panic=1",   # probe round only: freeze the console on the numbers   # read-only: GCC power domain, DWC3 identity, SMMU stream match
+  "uke_usb_panic=1",
+  "qcom-usb-debug=1",   # probe round only: freeze the console on the numbers   # read-only: GCC power domain, DWC3 identity, SMMU stream match
   "sheng-pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",
