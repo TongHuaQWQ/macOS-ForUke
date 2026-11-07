@@ -3042,3 +3042,67 @@ sha256 678493aeab142a43fd5517f07f1a8225d19d401b9b10a9de08623e871d8de9a0
 
 下一轮同一个镜像启动时，`--- boot log page 1 (vol-up next, vol-down continue) ---` 应该终于出现在屏幕上，
 里面就是上一次启动的内核日志（pram 里那 192 KiB），可以按音量加翻页找 `UKE USB:`。
+
+---
+
+## 62. b82 真机：固件终于会说话了，而且一屏回答了三个关键问题
+
+### (1) USB 的继承状态是**好的**
+
+```
+UKE-GCC: bcr=00000000 cfg_gdscr=04070000 cbcr 00000001 00000001 00000001 00000001 00000001
+UKE-GCC: gdsc_powered=1 reset_deasserted=1 usb_clocks_running=3/3
+UKE-GCC: dwc3 gsnpsid=…31… gctl=00100201 phycfg=00102400 dcfg=0048082c dctl=… dsts=…
+UKE-QUD: halt 0 ms dctl=… dsts=… halted=1
+```
+
+- `BCR = 0` ⇒ USB 复位已释放；
+- `CFG_GDSCR = 0x04070000` ⇒ bit16（POWER_UP_COMPLETE）已置 ⇒ **GDSC 已上电**；
+- 五个 CBCR 全是 `0x00000001`（CLK_OFF 位为 0）⇒ **五个 USB 时钟全部在跑**；
+- DWC3 窗口可读（GSNPSID/GCTL/PHYCFG/DCFG/DCTL/DSTS 都拿到了值）⇒ 控制器是活的。
+
+⇒ **bootloader 已经把 USB 的电源与时钟全部留好了。** `uke_usb.c` 完全不需要自己开时钟/GDSC，
+只要做 PHY + DWC3 初始化即可（`uke_usb_power=11` 那条"只读取证"路径正好）。
+
+### (2) pram 一直是空的 —— 因为我们**读错了地址**
+
+面板上每一轮都重复这几行：
+
+```
+--- pram 0x9FFE00000 (2048 KiB) from the previous boot ---
+pram head: 00 00 00 00 00 00 00 00 ...
+--- pram end: 0 KiB of text kept in 0 lines ---
+pram first text: <none: DRAM did not survive, or the kernel never wrote>
+```
+
+而 `scripts/make-uke-adt.py` 里写死的是：
+
+```python
+PANIC_LOG_BASE = 0xFF800000     # llcc_lpi_region@ff800000（live DT 里就有，UEFI 内存图也按这个名字保留）
+PANIC_LOG_SIZE = 0x00380000
+...
+node('pram', [('reg', struct.pack('<QQ', PANIC_LOG_BASE, PANIC_LOG_SIZE))]),
+('embedded-panic-log-size', struct.pack('<I', PANIC_LOG_SIZE)),
+```
+
+**XNU 写的是 `0xFF800000`（0x380000 字节），固件读的是 `0x9FFE00000`（0x200000）** ——
+`board.toml` 里的 `panic_region` 根本没有被生成器使用。所以"内核从没写过"是假象，我们一直在看空地。
+
+修法：把固件的 `PcdUkePramBase`/`PcdUkePramSize` 改成 `0xFF800000` / `0x00380000`，
+与 ADT 常量、以及内存图里的 `llcc_lpi_region@ff800000` 三者一致（地址本来就在内存图里，
+`GetMemorySpaceDescriptor` 也不会失败）。
+
+### (3) 固件输出通道修好了
+
+`--- previous boot log: first N lines ---`、`UKE-QUD:`、`UKE-GCC:`、ramoops 发布、
+`--- boot log page 1 (vol-up next, vol-down continue) ---` 全部真的出现在屏幕上了
+（`ramoops: publishing 605 of 605 bytes at 0xA7000000` 也确认执行）。
+
+```
+work/flash/boot-round-b83-pramfix.img   1122304 B
+sha256 b7a673d1017b5586ddfb9daf7f8f29a7a8cab3fc8df0a036516481cec0e1c5c6
+  FD sha256 a56c702ee2eb260a…（pram 指向 0xFF800000/0x380000）
+```
+
+下一轮的流程：刷 b83 → 内核跑（这次会真的往 pram 写）→ 再启动一次 b83 → 分页里就能看到
+**上一次内核日志**，包括 `UKE USB:` 那几行。
