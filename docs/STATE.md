@@ -3709,3 +3709,60 @@ sha256 与组件里的原件不同 —— 也就是说我修的是**永远不会
    而不是 8 分钟（YAML 已用 `yaml.safe_load` 校验，步骤位置与 `working-directory: UniXNU-uke` 都确认过）。
 
 教训写在这里：**"补丁改在哪一份"必须每次核对 sha256**，不能凭路径相似就假设是同一条链。
+
+---
+
+## 74. 补丁全过了，内核编到链接 —— 死在 `_boot_progress_persist`（`weak_import` 在 LTO/arm64e 下不够）
+
+run `42389591998`（`c89b8b1`）：新增的补丁副本一致性检查（step 5）**通过**，归档与内核编译全部走完
+（link 步跑了 **21 分钟**，不再是一开始就炸），然后链接只剩一个符号：
+
+```
+Undefined symbols for architecture arm64e.kernel:
+  "_boot_progress_persist", referenced from:
+      _qcom_usb_debug_init in lto.o
+      _fail in lto.o
+      l_boot_progress_persist$auth_ptr$ia$54535 in lto.o
+```
+
+### 为什么 `weak_import` 没能让它"可选"
+
+组件里原本写的是：
+
+```c
+extern void boot_progress_persist(const char *, uint32_t) __attribute__((weak_import));
+if (&boot_progress_persist) { … }
+```
+
+`weak_import` 在普通 Mach-O 里确实会"找不到就绑成 0"，但这里有两个前提不成立：
+
+1. **LTO**（本分支内核就是 LTO）：调用点从 bitcode 降级时才落成引用，ld 看到的是一个普通未定义符号；
+2. **arm64e**：引用被物化成**带 PAC 的指针 stub**（`l_boot_progress_persist$auth_ptr$ia$54535`），
+   这个 stub 本身是普通符号，`weak_import` 的语义没有传到它身上。
+
+而且这个符号在**本仓库里根本没有提供者**：`boot_progress_persist` 属于显示补丁（`uke-nodisplay`
+那套图形归档在这个配置里是关掉的），`grep -rn boot_progress_persist patches/ package/` 除组件自身外为空。
+所以它永远解析不到，必须让"可选"变成"有定义"。
+
+### 修法：一个 weak **定义**（不是声明）
+
+```c
+__attribute__((weak)) void
+boot_progress_persist(const char *text, uint32_t colour) { (void)text; (void)colour; }
+```
+
+- 这正是本仓库已经验证可行的手法：`package/MissingKernelSymbols.c` 里 `csr_check` /
+  `csr_get_active_config` 就是 weak 定义，`-force_load` 进内核后一直链接正常；
+- 显示补丁一旦回来，内核实实现会**覆盖**这个空实现，不会产生重复符号；
+- 顺带删掉两处已经恒真的 `if (&boot_progress_persist)` 守卫并订正注释；花括号计数前后都是
+  168→167（两侧同步减一）；组件里已无任何 `weak_import`。
+
+### 顺带说明：`kernel-bootstrap.log` 里的 corecrypto/mockfs 未定义符号**不是**新问题
+
+那是 bootstrap 配置（不带任何归档）**按设计**会链接失败的结果，workflow 的 step 13 一直容忍它；
+失败报告步骤只是把每个日志里的 error 行都列出来，所以它和真正的失败出现在同一屏。
+
+### 下一轮只剩一件事要验证
+
+内核编译 + 链接。归档契约已逐符号核对（13 个 `qcom_usb_debug_*` 各有唯一定义），
+`boot_progress_persist` 现在有定义，剩下的未定义集会由 `-k` 一次报全。

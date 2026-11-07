@@ -233,6 +233,19 @@ static char *append_hex(char *to, uint64_t value)
     for (; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
     return to;
 }
+/* boot_progress_persist is this board's display-patch symbol, and a stock kernel has no such
+ * symbol at all. A weak *definition* is what makes the reference optional here: a weak *import* is
+ * not enough once LTO lowers the call on arm64e, because the reference is then materialised as an
+ * authenticated-pointer stub that ld reports as a plain undefined symbol - run 42389591998 failed
+ * with "_boot_progress_persist, referenced from l_boot_progress_persist$auth_ptr$ia$54535". A kernel
+ * that does provide the symbol overrides this empty body; otherwise the two rows are simply lost,
+ * which is what happened to them before they could link at all. */
+__attribute__((weak)) void
+boot_progress_persist(const char *text, uint32_t colour)
+{
+    (void)text;
+    (void)colour;
+}
 /* Small in-band accounting records use no printf/console recursion. */
 static size_t loss_record(char *text, int final)
 {
@@ -265,15 +278,14 @@ static void fail(unsigned int error, int core_result)
     /* Say which check refused, on the panel. The module otherwise gives up silently: no USB
      * device appears and nothing anywhere says why, because the console it would have reported
      * on is the one that failed. boot_progress_stage writes into the diagnostic page the board
-     * already draws, so one photograph names the failing precondition. Weak, so a board without
-     * that page still links and simply loses the line. */
+     * already draws, so one photograph names the failing precondition. The persist entry point is a
+     * weak definition at the top of this file, so a board without that page links and loses the row. */
     /* A persistent row, not boot_progress_stage: that ring keeps six lines, and this runs at
      * time=0s, so the exit log overwrites the line within seconds and a refused controller then
      * looks exactly like one that never ran. boot_progress_persist redraws every frame.
      * Built by hand: the module's import audit allows only a fixed set of XNU symbols and
      * snprintf is not one of them, so the in-band append helpers format the line. */
-    extern void boot_progress_persist(const char *, uint32_t) __attribute__((weak_import));
-    if (&boot_progress_persist) {
+    {
         char line[192];
         char *p = append_text(line, "QCOM USB REFUSED error=");
         p = append_decimal(p, error);
@@ -859,11 +871,7 @@ int qcom_usb_debug_init(void)
     /* The success counterpart of fail()'s persistent row. Without it a working controller and a
      * controller that never ran both leave the row empty, which is the ambiguity this whole
      * change exists to remove. */
-    {
-        extern void boot_progress_persist(const char *, uint32_t) __attribute__((weak_import));
-        if (&boot_progress_persist)
-            boot_progress_persist("QCOM USB ACTIVE (CDC-ACM up)", 0xff00ff88u);
-    }
+    boot_progress_persist("QCOM USB ACTIVE (CDC-ACM up)", 0xff00ff88u);
     ret = 1;
 out:
     buffer_status_owned();
