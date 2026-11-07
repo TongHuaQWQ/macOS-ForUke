@@ -6,7 +6,7 @@ never guesses a toolchain. On the macOS runner both come from Xcode, so this wra
 `xcrun -f` and passes the board profile (`soc/Uke.h`) plus the record of the unit the module measures
 itself against (pe_kprintf.o.json).
 
-The archive lands in build/qcom-usb-debug/, which scripts/build-xnu-4k-baseline.sh force-loads when
+The archive lands in .cache/qcom-usb-debug/, which scripts/build-xnu-4k-baseline.sh force-loads when
 XNU_QCOM_USB_DEBUG=1 (see the CONFIG_XNU_QCOM_USB_DEBUG block there).
 """
 import json
@@ -17,7 +17,10 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'build/qcom-usb-debug'
+# The component's build.py refuses an --output that is inside the module source or outside a tmp/ or
+# .cache/ path ("output must be outside source and under tmp/ or .cache/"), so the archive lives under
+# the tree's .cache/ and build-xnu-4k-baseline.sh looks for it there.
+OUT = ROOT / '.cache/qcom-usb-debug'
 # The component rides in the device repository's package/ directory, which the tree links as kits/uke
 # (board.toml: kit = "uke"). The archive scripts run with the tree as ROOT, so the module is under
 # kits/uke/qcom-usb-debug there and under package/qcom-usb-debug in the device checkout - the same

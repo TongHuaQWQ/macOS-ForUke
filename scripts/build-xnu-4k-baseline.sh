@@ -888,7 +888,7 @@ PY_BINDINGS
     # script $ROOT is whichever tree is being built, so try the kit path first and the checkout second.
     QUD_MODULE="$ROOT/kits/uke/qcom-usb-debug"
     test -d "$QUD_MODULE/include" || QUD_MODULE="$ROOT/package/qcom-usb-debug"
-    QUD_ARCHIVE="$ROOT/build/qcom-usb-debug/libQcomXnuUsbDebug.a"
+    QUD_ARCHIVE="$ROOT/.cache/qcom-usb-debug/libQcomXnuUsbDebug.a"
     test -d "$QUD_MODULE/include"
     test -f "$QUD_ARCHIVE"
     EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_QCOM_USB_DEBUG=1 -I$QUD_MODULE/include"
