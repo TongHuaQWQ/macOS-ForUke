@@ -3577,3 +3577,50 @@ PREFLIGHT OK: driver-level rejections are counted, clean records report 0
 在组件某个 `.c` 里**恰好定义一次**；归档路径
 `<tree>/.cache/qcom-usb-debug/libQcomXnuUsbDebug.a` 与 `build-xnu-4k-baseline.sh` 里
 `-Wl,-force_load` 的路径一致；`Upload artifacts (always)` 保证即使归档失败日志也会回来。
+
+---
+
+## 72. 归档第一次真的编完了五个单元 —— 死于导入审计（`_boot_cpu_id`），已修
+
+run `42386664238`（`c952140`，只带参数修正、不带单符号修正）的实测结果，是到目前为止最有信息量的一轮：
+
+```
+preflight: 0 error(s) across 5 units          ← 这次是真的 0
+== kernel: archive-17-build-qcom-usb-debug
+  Dwc3.c:299/300/409: warning: implicit conversion changes signedness [-Wsign-conversion]
+  QcomUsbQualify.c:145:19: warning: variable 's2cr' may be uninitialized [-Wconditional-uninitialized]
+  build-qcom-usb-debug.py: component build failed (exit 1)
+  File "kits/uke/qcom-usb-debug/scripts/build.py", line 125, in main
+  RuntimeError: unexpected XNU imports: ['_boot_cpu_id']
+```
+
+也就是说：**五个翻译单元全部编译成功**（只剩两条 warning），卡在 `build.py` 自己的导入审计 ——
+白名单里还是 10063 的 `_master_cpu`，而这台内核导出的是 `_boot_cpu_id`。这正是子代理审计预测的
+那一条，`d77649e` 已经把它修掉（两个名字都接受）。
+
+### 对 §71 的两处更正（以实测为准）
+
+1. **`ml_io_map` 不需要在本文件里 extern。** §71 把它列为"真阻碍"，实测是**误报**：
+   `__APPLE_API_PRIVATE` 是在 `bsd/sys/appleapiopts.h:52` 无条件（除非
+   `__APPLE_API_STRICT_CONFORMANCE`）定义的，而 `<mach/message.h>` 会包含它 —— 内核里的每次编译
+   都天然有这个宏。`c952140` 里**没有**那句 extern，五个单元照样编译通过。
+   所以 `d77649e` 里加的那句成了冗余声明（同型、无害），已在下一个 commit 里删掉；
+   附带的好处是 §71 里那条 `<mach_assert.h>` 的隐忧也随之消失。
+2. 真正必要的只有两处：`scripts/build.py` 的导入白名单（`_boot_cpu_id`）和
+   `digits[16]` → `digits[]`（clang ≥19 的 `-Wunterminated-string-initialization`）。
+
+### `s2cr` 那条 warning 是误报，但值得记下来
+
+`QcomUsbQualifyIdentityDma`：`extended` 分支在 `:129` 读 `s2cr`（失败即 return），非 extended 分支
+在 `:140` 读（失败即 return），两条路径到 `:145` 的 `state->s2cr = s2cr;` 之前都赋过值；clang 的流分析
+不认这种"逗号条件里的 read32 失败即返回"，于是报可能未初始化。**不改代码**（归档现在能编，动它是无收益的风险）。
+
+### 这轮还确认了一个流程事实
+
+`uke-macos_defconfig` 走的是 driver 自己构建归档的路径：workflow 的 step 14/15
+（`Pass 2`、`Build the first-console archives`）只对 `uke_defconfig`/`uke-nodisplay_defconfig` 生效，
+对 `uke-macos_defconfig` 是 **skipped**；板级 `[kernel] archives` 那 17 个归档在
+**step 17「Link the kernel」内部**构建，然后才链接。所以：
+
+- 归档失败会在 step 17 开始后**约 8 分钟**就暴露（`archive-17-…log`），不用等满 45 分钟；
+- 反过来，step 17 跑过 10 分钟还在继续，就说明归档已经过了。
