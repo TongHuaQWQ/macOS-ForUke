@@ -3149,3 +3149,36 @@ pram first text: <none: DRAM did not survive, or the kernel never wrote>
 - 为腾命令行空间，删掉 `fileset-wait-cap-ms=5000`（它的作用已被 `uke-aes-stub.patch` 的无条件打印取代）。
 
 提交 `486f48e`，CI 已触发（约 45 分钟）。产物出来后配 b83 固件即可。
+
+---
+
+## 64. 同步探针的内核已出（b84）：这次 panic 会把 USB 面包屑直接打到屏幕上
+
+```
+run 42356668405 (486f48e) success
+kernel.macho sha256 de75832d2b50f20b68db45971379f2fba9c7273bb764a52ddc06f965437014bb
+prelink stubbed 0 / stub_sites 0
+strings: "uke_usb_sync" / "UKE USB: synchronous probe (uke_usb_sync=1)" /
+         "UKE USB: kernel_thread_start failed (%d)" 全部在；"UKE USB" 共 128 处
+args: … uke_usb=1 uke_usb_power=11 uke_usb_sync=1 uke_usb_panic=1 …（fileset-wait-cap-ms 已让位）
+```
+
+配好的镜像对（固件仍是 b83 那版，即 pram 指向 0xFF800000 的）：
+
+```
+work/flash/boot-round-b84-syncprobe.img          1122304 B  sha256 b7a673d1017b5586…（= b83 固件）
+work/flash/vendor_boot_round-b84-syncprobe.img   85782528 B  sha256 fef39fbff7d3fcd4…（内核 de75832d）
+```
+
+预期：内核在 EARLY_BOOT 的 STARTUP 里**同步**跑探针，然后立刻 panic：
+
+```
+UKE USB PROBE: step=N gcc=… dwc=… dsts=… clk=… smmu=… pll=…
+```
+
+三种结果分别意味着：
+
+| 屏幕上出现 | 含义 | 下一步 |
+|---|---|---|
+| `UKE USB PROBE: step=N …` | 探针跑通了，卡在第 N 步 | 直接改那一步（PF 表/PHY/DWC3 初始化）|
+| `UKE USB: kernel_thread_start failed (…)` 或什么都不出现，仍是 SError panic | 同步路径也被更早的东西挡住 | 说明 STARTUP 阶段本身有问题，下一步把探针挪到更早/换上下文 |
