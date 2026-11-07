@@ -12,6 +12,7 @@ XNU_QCOM_USB_DEBUG=1 (see the CONFIG_XNU_QCOM_USB_DEBUG block there).
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -52,16 +53,35 @@ def tool(name):
 
 
 def relaxed_record(source, target):
-    """The record's own warning flags are dropped, exactly as scripts/build-uke-usb.py does for its object.
+    """A record the component can compile with: no warning flags, and no flag this compiler rejects.
 
-    The kernel build compiles those units with its own -W set, which includes flags a newer clang does
-    not know (the workflow even patches -Wno-unknown-warning-option into two archive recipes for that
-    reason) and -Werror, under which an out-of-tree revision's warning becomes a build failure. The
-    component appends its own -Wno-* after the record's flags and expects the rest untouched.
+    Two things in a kernel compile record break an out-of-tree archive build, and both have now cost a
+    round. The warning set carries flags a newer clang does not know (the workflow patches
+    -Wno-unknown-warning-option into two archive recipes for the same reason) and -Werror, under which a
+    foreign revision's warning becomes a failure; and the record is the *kernel link* unit's line, so it
+    carries link-only options - '-mlinker-version=1267' was the first one clang refused for '-c'.
+    Rather than hard-code a deny list that the next kernel revision will outgrow, drop the -W set and
+    then ask this very compiler which remaining flags it accepts, one rejection at a time.
     """
     record = json.loads(source.read_text().rstrip().rstrip(','))
-    arguments = [a for a in record['arguments'] if not a.startswith('-W')]
-    record['arguments'] = arguments
+    arguments = record['arguments']
+    compiler, rest = arguments[0], [a for a in arguments[1:] if not a.startswith('-W')]
+    source_file = record['file']
+    keep = [a for a in rest if a not in ('-c', '-fsyntax-only', source_file)]
+
+    for _ in range(16):
+        probe = subprocess.run([compiler, '-fsyntax-only', '-x', 'c', *keep, os.devnull],
+                               capture_output=True, text=True)
+        if probe.returncode == 0:
+            break
+        bad = re.search(r"unknown argument: '([^']+)'", probe.stderr)
+        if not bad:
+            break
+        rejected = bad.group(1)
+        keep = [a for a in keep if a != rejected and not a.startswith(rejected + '=')]
+        print(f'record: dropped {rejected} (this compiler rejects it for a compile)')
+
+    record['arguments'] = [compiler, *keep]
     target.write_text(json.dumps(record, indent=1))
     return target
 
