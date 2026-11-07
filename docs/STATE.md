@@ -3281,3 +3281,31 @@ pram first text: <none: DRAM did not survive, or the kernel never wrote>
 
 这段视频是**刷入 b87 后的第一次启动**，所以它读到的 pram 还是上一版（无 beacon）留下的；
 而 b87 内核的 beacon 是在**这次启动**里才写进去的。⇒ 还差**第二次启动**才能读到。
+
+### 66c. 第二段录像 + 让固件直接把 beacon 槽位读出来（b88）
+
+第二段录像 `VID_20261107_191325.mp4`（48.7 s）同样是**一次启动**，pram 头部与上一段逐字节相同：
+
+```
+--- pram 0xFF800000 (3584 KiB) from the previous boot ---
+pram head: 10 30 A0 C0 86 40 00 00  04 00 81 00 10 00 00 22
+```
+
+`pram first text:` 那行在 9.5–9.9 秒之间一闪而过，逐帧找代价太大。于是改成**让固件直接报**：
+`DumpPreviousBootLog()` 现在在 `pram head:` 之后多打两行，直接把两个 beacon 槽位按可打印文本读出来：
+
+```
+pram slot 0x1000: "UKEUSB-STEP-0NN"      ← uke_usb 的面包屑
+pram slot 0x1100: "UKELASTLOG-..."       ← UkeLastLog 的
+```
+
+这样"内核的 STARTUP 到底跑没跑 / 探针到第几步"就是**一行确定的字**，不再依赖整窗扫描的阈值，
+也不需要在录像里找那一帧 —— 拍一张 ReadyToBoot 那屏就够。
+
+```
+work/flash/boot-round-b88-slots.img   1122304 B  sha256 d86e37f0e4db96d7f1b3aa4b4eff7a931292564699a6e5a1a1c44f04d2a56ac9
+  FD sha256 fa2508eb1cd0f50d…（在 b87 固件基础上加了 LogPramSlot）
+```
+
+因为 pram 里现在存的是**刚才那次 b87 内核启动**写下的内容，所以刷 b88 **启动一次**就能读出结论，
+不需要两段式。
