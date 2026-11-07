@@ -3686,3 +3686,26 @@ darwin23 原补丁的意图是：在两个 fan-out 里，给 **`PE_kputc(c);`** 
 只剩"内核编译 + 链接"要过：归档已在（同一次构建里会重建），`-force_load` 的契约已核对，
 `boot_progress_persist` 是 weak（顶多是丢两行报告）。若还失败，错误一定在**别的补丁落点**或链接符号，
 而 `-k` 会让一轮就把它们全报出来。
+
+### 73b. 差点又被同一个坑咬一次：`patches/xnu/` 里放的是**副本**
+
+修好 `package/qcom-usb-debug/patches/darwin24/` 的两份补丁并推上去之后，立刻核对了一件本该更早核对的事：
+**树的 `patches/xnu/series` 应用的是 `patches/xnu/zzzz…-qcom-usb-debug-*.patch` 这两份"副本"**，
+sha256 与组件里的原件不同 —— 也就是说我修的是**永远不会被应用的那一份**，而 run `42389458330` 会拿旧的
+（含 `master_cpu`、含错位 guard 的）副本再失败一次。
+
+```
+83d4907…  patches/xnu/zzzzzzzzzzzzzzzzzz-qcom-usb-debug-console.patch   ← 树应用这份
+43d4907…  package/qcom-usb-debug/patches/darwin24/0001-…console.patch    ← 组件持有这份
+```
+
+处理：
+
+1. 两份副本改成与组件原件**逐字节相同**（`cp` 覆盖），两份都在干净 12377 树上
+   `git apply --check` 通过；
+2. 新增 `scripts/check-patch-copies.py`：比对两份副本与组件原件、并检查 `series` 里确实列了它们，
+   不一致就 `exit 1` 并直接打印该执行的 `cp` 命令；已实测"一致→通过、加一行→报错"；
+3. 把它挂到 workflow 的**第 3 步**（checkout 之后、一切构建之前），漂移从此在 30 秒内暴露，
+   而不是 8 分钟（YAML 已用 `yaml.safe_load` 校验，步骤位置与 `working-directory: UniXNU-uke` 都确认过）。
+
+教训写在这里：**"补丁改在哪一份"必须每次核对 sha256**，不能凭路径相似就假设是同一条链。

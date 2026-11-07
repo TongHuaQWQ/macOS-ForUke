@@ -101,6 +101,14 @@ jobs:
           ref: ${{ env.UKE_CORE_REF }}
           path: UniXNU
 
+      # Cheap guard against an expensive failure: patches/xnu/series applies the *copies* in patches/xnu/,
+      # while the component owns the originals under package/qcom-usb-debug/patches/. A fix written in one
+      # place only is invisible until the kernel compile dies on it, eight minutes into the link step
+      # (STATE 73). This runs before any build work, so drift costs seconds instead of a round.
+      - name: Check the component patch copies against the component
+        working-directory: UniXNU-uke
+        run: python3 scripts/check-patch-copies.py
+
       - name: Record revisions
         run: |
           set -x
