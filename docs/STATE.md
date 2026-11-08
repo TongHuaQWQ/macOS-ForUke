@@ -4404,3 +4404,41 @@ work/flash/boot-round-b95B-panicreq.img         1122304 B   sha256 6bab1734de52b
 | **b95B** | `qcom-usb-debug=1`（无 panic 参数） | 编译内置默认 2 生效：第一个控制请求即 panic，把 `rt/rq/v/i/l` 打到屏上 |
 
 先刷 A；若仍失败再刷 B 取请求字节。两者共用同一份固件，`vendor_boot` 各自刷一次即可。
+
+---
+
+## 82. 面板上直接画字（内核侧的"二维码通道"，不需要 QR 编码器）
+
+用户提到 `unixnu.com/zh/porting/log-capture#qr-logs`。读完整页后结论很明确：
+
+- **QR/OneSend 那段只覆盖固件阶段**：`AdvancedLogDxe` + `QrEncoderLib` 在 **boot services 可用时**
+  读 Advanced Logger 缓冲，菜单 `Tools → Advanced Logger` 轮播二维码，手机扫走。
+  文档自己写着"ExitBootServices 之后的 XNU 执行使用步骤 3 的抓取方式"，即 UART 或屏拍 panic/检查点；
+  再往后才是"预留区域 + 内核写入器 + Linux/recovery 读取器"。
+- 所以它能给我们的是**固件日志**（我们固件本来就往屏上打，收益有限），**不能**给内核日志。
+- 相关代码在我们树里是有的：`work/push/UniXNU/package/UniXNUPkg/Driver/AdvancedLogDxe`（依赖 `QrEncoderLib`）、
+  固件侧 `Common/Mu/AdvLoggerPkg`；`board.toml` 目前没有 `[payload] tools`。要走这条路需要把 UniXNUPkg
+  接进 DSC/FDF 并映射 `QrEncoderLib`（文档步骤 1），属于固件侧工程。
+
+**真正有用的是同一个思路的内核版**：内核导出 `PE_state.video`（`v_baseAddr` 是物理地址，
+显示 kext 用它和 mapping 的物理地址比对），而组件本来就会 `ml_io_map`。于是直接往 framebuffer 画字：
+
+```
+QCOMUSB INIT
+WORKER REACHED QCOM INIT
+--- 之后每次控制请求 ---
+QCOMUSB REQ rt8000 rq0006 v0100 i0000 l0040 n1
+--- 每次状态刷新 ---
+QCOMUSB PHASE=12 ERR=0 TR=345 P=1024 LAST=7
+```
+
+实现要点（`kernel/QcomXnuUsbDebug.c`）：
+
+- 3×5 点阵字库（0-9 A-Z 加 `/ : - .` 空格，41 个字形），`fb_index()` 把字符映射到字形；
+- `fb_ready()` 只在 `v_depth == 32` 且宽高合理时 `ml_io_map(v_baseAddr, v_rowBytes*256)`（只映射顶部 256 行）；
+- `fb_text()` 按 scale=6 画（字形 18×30 px），`fb_report()` 先清一条黑带再画两行；
+- **不 panic、不阻塞**：只在 init / 拒绝 / 控制请求 / 每 256 次轮询时画一次，几十微秒量级，
+  枚举照常进行 —— 这一点比 panic 通道好得多（panic 会把枚举打断）。
+
+新增代码用 gcc 与 clang 的 `-Wall -Wextra -Werror` 各自编译通过，字形表也用 ASCII art 验证过
+（`RT=8000` 五个字形逐个确认）。

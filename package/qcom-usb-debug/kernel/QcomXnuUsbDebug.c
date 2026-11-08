@@ -290,6 +290,100 @@ boot_progress_persist(const char *text, uint32_t colour)
     (void)text;
     (void)colour;
 }
+/* Draw the diagnostic state straight onto the panel.
+ *
+ * The firmware reaches the panel, the kernel's own console does not (every attempt since b61 has been
+ * invisible), the pram window does not retain (STATE 80) and USB is the thing being debugged. What is
+ * left is the framebuffer itself: PE_state.video is exported by the kernel, v_baseAddr is a physical
+ * address (the display kexts compare it with a mapping's physical address), so this maps it and
+ * writes pixels. The same idea as the firmware's OneSend QR export, without needing a QR encoder -
+ * short ASCII lines are enough for phase and request bytes, and two lines are readable in a photo.
+ *
+ * Drawing happens on transitions only (init, refusal, a control request, the periodic state refresh),
+ * costs tens of microseconds, and never panics, so enumeration keeps running. */
+#define QCOM_USB_FB_ROWS 256u
+static volatile uint32_t *qcom_usb_fb;
+static uint32_t qcom_usb_fb_stride, qcom_usb_fb_width;
+
+/* 3x5 glyphs, bit 2 = leftmost column: 0-9, A-Z, space, '/', ':', '-', '.' */
+static const uint8_t fb_font[][5] = {
+    {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 7, 1, 7}, {5, 5, 7, 1, 1},
+    {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 1, 1}, {7, 5, 7, 5, 7}, {7, 5, 7, 1, 7},
+    {7, 5, 7, 5, 5}, {6, 5, 6, 5, 6}, {7, 4, 4, 4, 7}, {6, 5, 5, 5, 6}, {7, 4, 7, 4, 7},
+    {7, 4, 7, 4, 4}, {7, 4, 5, 5, 7}, {5, 5, 7, 5, 5}, {7, 2, 2, 2, 7}, {1, 1, 1, 5, 7},
+    {5, 5, 6, 5, 5}, {4, 4, 4, 4, 7}, {5, 7, 7, 5, 5}, {5, 7, 7, 7, 5}, {7, 5, 5, 5, 7},
+    {7, 5, 7, 4, 4}, {7, 5, 5, 7, 1}, {7, 5, 6, 5, 5}, {7, 4, 7, 1, 7}, {7, 2, 2, 2, 2},
+    {5, 5, 5, 5, 7}, {5, 5, 5, 5, 2}, {5, 5, 7, 7, 5}, {5, 5, 2, 5, 5}, {5, 5, 2, 2, 2},
+    {7, 1, 2, 4, 7},
+    {0, 0, 0, 0, 0}, {1, 1, 2, 4, 4}, {0, 2, 0, 2, 0}, {0, 0, 7, 0, 0}, {0, 0, 0, 0, 2},
+};
+static int fb_index(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'Z') return 10 + (c - 'A');
+    if (c >= 'a' && c <= 'z') return 10 + (c - 'a');
+    if (c == ' ') return 36;
+    if (c == '/') return 37;
+    if (c == ':') return 38;
+    if (c == '-') return 39;
+    if (c == '.') return 40;
+    return -1;
+}
+static int fb_ready(void)
+{
+    vm_offset_t mapped;
+    if (qcom_usb_fb != 0) return 1;
+    if (PE_state.video.v_baseAddr == 0 || PE_state.video.v_depth != 32 ||
+        PE_state.video.v_rowBytes < 4 * 16 || PE_state.video.v_width < 16 ||
+        PE_state.video.v_height == 0) return 0;
+    mapped = ml_io_map((vm_offset_t)PE_state.video.v_baseAddr,
+                       (vm_size_t)PE_state.video.v_rowBytes * QCOM_USB_FB_ROWS);
+    if (mapped == 0) return 0;
+    qcom_usb_fb = (volatile uint32_t *)mapped;
+    qcom_usb_fb_stride = (uint32_t)(PE_state.video.v_rowBytes / 4u);
+    qcom_usb_fb_width = (uint32_t)PE_state.video.v_width;
+    return 1;
+}
+static void fb_text(uint32_t x, uint32_t y, uint32_t scale, const char *text, uint32_t rgb)
+{
+    uint32_t atx = x, row, col, dy, dx;
+    if (!fb_ready()) return;
+    for (; *text; ++text) {
+        int glyph = fb_index(*text);
+        if (glyph < 0) {
+            atx += 4u * scale;
+            continue;
+        }
+        if (atx + 4u * scale >= qcom_usb_fb_width) return;
+        for (row = 0; row < 5u; ++row) {
+            uint8_t bits = fb_font[glyph][row];
+            for (col = 0; col < 3u; ++col) {
+                volatile uint32_t *line;
+                uint32_t py = y + row * scale;
+                if (!(bits & (4u >> col)) || py >= QCOM_USB_FB_ROWS) continue;
+                for (dy = 0; dy < scale && py + dy < QCOM_USB_FB_ROWS; ++dy) {
+                    line = qcom_usb_fb + (size_t)(py + dy) * qcom_usb_fb_stride + atx + col * scale;
+                    for (dx = 0; dx < scale; ++dx) line[dx] = rgb;
+                }
+            }
+        }
+        atx += 4u * scale;
+    }
+}
+/* Two lines in the top band, white over a black backing: the firmware's own output lives further down,
+ * and the video console the payload draws is not this kernel's. */
+static void fb_report(const char *first, const char *second)
+{
+    uint32_t py, i;
+    if (!fb_ready()) return;
+    for (py = 4u; py < 100u; ++py) {
+        volatile uint32_t *line = qcom_usb_fb + (size_t)py * qcom_usb_fb_stride;
+        for (i = 0; i < qcom_usb_fb_width; ++i) line[i] = 0;
+    }
+    fb_text(8u, 8u, 6u, first, 0x00ffffffu);
+    if (second != 0) fb_text(8u, 52u, 6u, second, 0x0000ffffu);
+}
+
 /* The pram records themselves. Written once per transition, not per byte: a single non-cached store
  * run plus a barrier, so this is safe in any context including before the scheduler exists. */
 static void pram_write(unsigned int offset, const char *text, size_t length)
@@ -330,6 +424,7 @@ static void pram_state(void)
     p = append_text(p, " LAST=");
     p = append_decimal(p, native.status.last_trace);
     pram_write(QCOM_USB_PRAM_STATE, text, (size_t)(p - text));
+    fb_report(text, 0);
 }
 /* Four hex digits, fixed width: a field that shortens when its value is small makes two records
  * impossible to compare at a glance. */
@@ -361,6 +456,7 @@ static void pram_setup(uint32_t a, uint32_t b)
     p = append_text(p, " n");
     p = append_decimal(p, ++setups);
     pram_write(QCOM_USB_PRAM_SETUP, text, (size_t)(p - text));
+    fb_report(text, 0);
 }
 /* Small in-band accounting records use no printf/console recursion. */
 static size_t loss_record(char *text, int final)
@@ -794,8 +890,9 @@ int qcom_usb_debug_init(void)
     /* First record of the round: it says the worker reached us at all, which is the difference between
      * "the component never ran" and "it ran and stopped at phase N" without any console. sizeof keeps
      * the length exact instead of a hand-counted constant. */
-    static const char reached[] = "QCOMUSB INIT (worker reached init)";
+    static const char reached[] = "QCOMUSB INIT";
     pram_write(QCOM_USB_PRAM_SETUP, reached, sizeof(reached) - 1u);
+    fb_report(reached, "WORKER REACHED QCOM INIT");
     if (native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
         int diagnostic = 0;
         int panic_mode = 0;
