@@ -448,11 +448,14 @@ kernel_args = [
   # uke_usb=0 alone disables the old probe driver (it returns before touching anything), so sync/hook/
   # panic are dropped rather than carried as zeros - the 1000-byte command line is full.
   "uke_usb=0",
+  # Control experiment (STATE 81): with the component disabled too, nothing in this kernel touches
+  # DWC3 - so a USB device that still appears and answers GET_DESCRIPTOR would be the firmware's
+  # gadget left connected at handover, not ours.
+  "qcom-usb-debug=0",
   # Panic as soon as the controller hands us a control request, printing the request bytes and the
   # phase reached. The panel is the only console that has ever shown anything here, and the pram window
   # does not survive reliably (STATE 80), so one photograph replaces a blind round.
   "qcom-usb-panic=2",
-  "qcom-usb-debug=1",   # the CDC-ACM log console over DWC3 (package/qcom-usb-debug)
   "sheng-pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",
