@@ -4283,3 +4283,22 @@ framebuffer** 然后停机。它的迷你 printf 支持 `%s/%x/%X/%u/%d/%p`（�
 `qcom,iommu-dma-addr-pool = <0x90000000 0x60000000>` 起点一致，`QUD_STREAM_ID = 0x40`
 与 `dwc3@a600000` 的 `iommus = <0x129 0x40 0x00>` 一致 —— 若 b93 显示 SETUP 是垃圾字节，
 问题就不在这些常量上，而在域安装/一致性细节（`soc/QcomUsbDmaDomain.c` 的 CB 与 SMR/S2CR 编程）。
+
+### 80f. b93 就位（收请求即 panic，屏上直接给答案）
+
+```
+work/flash/vendor_boot_round-b93-panicreq.img  85782528 B  sha256 3f0130b9374a7f92…
+    ← CI run 42474768766 全绿，内核 34bad0851937f557…（内含 "QCOMUSB request rt"/"refused err"/"poll64" 三条）
+work/flash/boot-round-b93-panicreq.img          1122304 B  sha256 6bab1734de52bcbb…（= b92b 固件）
+```
+
+内核命令行关键两项：`uke_usb=0`（旧探针驱动惰性）、`qcom-usb-panic=2`、`qcom-usb-debug=1`。
+
+判读表（同 §80）：
+
+| 屏上 | 结论 |
+|---|---|
+| `QCOMUSB request rt8000 rq0006 v0100 i0000 l0040` | 请求正常到达 ⇒ 问题在应答/传输完成 |
+| 字段乱码/全 0 | SETUP 读到垃圾 ⇒ 域安装/一致性问题（常量已核对无误，见 §80e）|
+| 没有这行、但主机仍看到 high-speed | 事件没投递 ⇒ 事件环 |
+| `QCOMUSB refused err=…` | 预检被拒（本轮 N=2 不该出现，若出现说明 init 提前失败）|
