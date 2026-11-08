@@ -4386,3 +4386,21 @@ ret = dwc3_poll(native.core, 1); /* 每次只取 1 个事件 */
 |---|---|---|
 | **b95A**（测枚举） | `qcom-usb-debug=1 qcom-usb-panic=0` | 带轮询修复，正常跑；成功就会在主机上出现 `1209:316d` + `/dev/ttyACM*` |
 | **b95B**（测渲染/取请求） | `qcom-usb-debug=1`（不传 panic 参数 → 默认 2） | 第一个控制请求即 panic；用来确认 panic 屏能显示、并读出 `rt/rq/v/i/l` |
+
+### 81d. b95A / b95B 两组镜像（同一颗内核，两个开关）
+
+```
+work/flash/vendor_boot_round-b95A-enum.img      85782528 B  sha256 e32ce30b8993ee76…   ← 测枚举
+work/flash/vendor_boot_round-b95B-panicreq.img  85782528 B  sha256 84187224ff673bce…   ← 测 panic 屏
+work/flash/boot-round-b95A-enum.img             1122304 B   sha256 6bab1734de52bcbb…（同一份固件）
+work/flash/boot-round-b95B-panicreq.img         1122304 B   sha256 6bab1734de52bcbb…
+```
+
+内核都是 CI run `42479858867`（`ba98a35`）的 `9dfd9fd6efdd3bee…`：**轮询一次排空 128 事件 + burst 循环 + 空闲 1 ms**。
+
+| 组 | 关键参数 | 用途 |
+|---|---|---|
+| **b95A** | `qcom-usb-debug=1 qcom-usb-panic=0` | 关掉诊断 panic，正常枚举；成功即出现 `1209:316d` + `/dev/ttyACM*` |
+| **b95B** | `qcom-usb-debug=1`（无 panic 参数） | 编译内置默认 2 生效：第一个控制请求即 panic，把 `rt/rq/v/i/l` 打到屏上 |
+
+先刷 A；若仍失败再刷 B 取请求字节。两者共用同一份固件，`vendor_boot` 各自刷一次即可。
