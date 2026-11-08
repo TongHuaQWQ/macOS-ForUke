@@ -4791,3 +4791,21 @@ frame = "OS", ver 2, session "UKE1", sequence, block count, block length, payloa
 - 内容变了（新的诊断行）才重建载荷并回到第 1 块，否则一直循环现有块。
 
 二维码 scale **8 → 10**（v5 = 370 px），映射带 420 → **640 行**。
+
+### 87b. b99 就位：**总线复位后重发 `DEPSTARTCFG`** 的第一个镜像
+
+```
+work/flash/vendor_boot_round-b99-startcfg.img  85782528 B  sha256 625a2590bafe46e5…
+    ← CI run 42493179299 全绿，内核 124d3e4989679ea1…（DEPSTARTCFG 修复 + 8 帧 QR + CR/G/EV/TA/TB）
+work/flash/boot-round-b99-startcfg.img         1122304 B  sha256 6bab1734de52bcbb…（同一份固件）
+```
+
+这一轮要回答的唯一问题：**端点 0 拿到传输资源了吗？** 判读方式有两种，任选其一或都看：
+
+1. **主机日志**（最直接）：`sudo dmesg -w`，期待出现
+   `New USB device found, idVendor=1209, idProduct=316d` 以及 `cdc_acm` / `ttyACM0`；
+   若失败点后移到 `GET_DESCRIPTOR(18)` / `SET_CONFIGURATION` / `GET_STRING`，也说明修复生效。
+2. **屏幕二维码**：若仍失败，帧里会给出新的 `CR/TA/TB` —— 例如 `CR=-4 TA=10003 TB=…`（端点 3 的通知端点）
+   或 `CR=-8`（传输完成状态错误，指向 DMA/TRB）。
+
+只有"主机行为完全没变且屏上 `CR/TA/TB` 与 b98 一致"才算修复没生效。
