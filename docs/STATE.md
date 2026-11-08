@@ -4270,3 +4270,16 @@ RuntimeError: unexpected XNU imports: ['_panic']
 `package/qcom-usb-debug/scripts/build.py` 的白名单里没有 `_panic`，加上即可（`panic` 是真导出符号，
 内核里必然存在）。这条审计本意是防止意外引入外部符号，这次它按设计工作了 —— 只是新增的**有意的**依赖
 也要同步登记。
+
+### 80e. 确认 panic 屏这条路是成立的（b93 的前提）
+
+`work/push/UniXNU/scripts/xnu-panic-screen.c` 是一段**freestanding 渲染器**，由 payload 构建时
+（`patch-xnu-entry-probe.py --panic-screen --no-reset`）打进内核副本，把 `panic()` 的消息**直接画到
+framebuffer** 然后停机。它的迷你 printf 支持 `%s/%x/%X/%u/%d/%p`（含 0 标志、宽度、精度、
+`l/ll/z` 长度修饰），所以 `panic("QCOMUSB request rt=%x rq=%x … phase=%u")` 会原样显示在屏上。
+
+这条通道不依赖 pram（已判死）、也不依赖 USB 枚举，是目前唯一可靠的内核 → 人 的输出。
+另外核对过 SMMU 参数：`QUD_DMA_IOVA = 0x90000000` 与 live DT 的
+`qcom,iommu-dma-addr-pool = <0x90000000 0x60000000>` 起点一致，`QUD_STREAM_ID = 0x40`
+与 `dwc3@a600000` 的 `iommus = <0x129 0x40 0x00>` 一致 —— 若 b93 显示 SETUP 是垃圾字节，
+问题就不在这些常量上，而在域安装/一致性细节（`soc/QcomUsbDmaDomain.c` 的 CB 与 SMR/S2CR 编程）。
