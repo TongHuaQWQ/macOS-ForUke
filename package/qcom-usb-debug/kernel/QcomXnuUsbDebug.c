@@ -138,7 +138,9 @@ static vm_offset_t qcom_usb_pram_va;
 #define QCOM_USB_PANIC_REQUEST  2
 #define QCOM_USB_PANIC_POLLS    3
 static unsigned int usb_panic_mode;
-extern void panic(const char *format, ...);
+/* panic() is a macro in this kernel (osfmk/kern/panic_call.h), already visible to this translation
+ * unit, so it must not be declared here: an extern declaration is expanded by the macro into syntax
+ * errors ("expected identifier or '('"), which is exactly how the round that added this failed. */
 static void pram_state(void);
 static void pram_setup(uint32_t a, uint32_t b);
 static void pram_write(unsigned int offset, const char *text, size_t length);

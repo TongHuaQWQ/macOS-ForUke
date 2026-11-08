@@ -4243,3 +4243,18 @@ work/flash/vendor_boot_round-b92b-hexdump.img 85782528 B  sha256 …
 
 这一组和下一组的分工：b92b 用来**判定 pram 保留性**（hex 里能不能看到 `51 43 4F 4D 55 53 42`＝"QCOMUSB"）；
 真正能回答"ep0 为什么 stall"的是 b93（内核带 `qcom-usb-panic=2`，一收到控制请求就在屏上 panic 打印请求字节）。
+
+### 80c. 被 `panic` 是宏这件事绊了一次（run `42472454743`）
+
+```
+kits/uke/qcom-usb-debug/kernel/QcomXnuUsbDebug.c:141:13: error: expected identifier or '('
+kits/uke/qcom-usb-debug/kernel/QcomXnuUsbDebug.c:141:13: error: expected ')'
+```
+
+原因：xnu 里 **`panic` 是宏**（`osfmk/kern/panic_call.h:46`），
+`#define panic(ex, ...) ({ __asm__("" ::: "memory"); (panic)(ex " @%s:%d", …, __FILE_NAME__, __LINE__); })`。
+我加的 `extern void panic(const char *format, ...);` 也被这个宏展开，自然变成语法垃圾。
+而在**真实**的头文件顺序里，函数先声明（`panic_call.h:35`）、宏随后才定义，所以**调用**是没问题的 ——
+只有"自己再声明一次"会炸。删掉那行 extern、直接调用即可（本地用 gcc + clang 把宏展开过的三种调用各编译过一遍）。
+
+顺带记住：panic 的消息会自动带上 ` @文件:行` 后缀，这反而对判读有利。
