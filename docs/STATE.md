@@ -4560,3 +4560,21 @@ qcomusb init: worker reached init -> mask 0 OK
 
 所以内核侧沿用同一种"多帧轮播"思路（§84c），把真正需要的**内核/USB 状态**扫出来。
 如果之后仍要固件侧的 QR，再单独做，并先在本地确认 `DebugLib` 替换后面板输出没丢。
+
+### 84e. b96 就位（关键修复 + 面板二维码，单帧）
+
+```
+work/flash/vendor_boot_round-b96-qr.img  85782528 B  sha256 1de56deecb406878…
+    ← CI run 42484733234 全绿，内核 c070798ace4c6a49…（SET_ADDRESS 顺序修复 + 面板二维码/文字）
+work/flash/boot-round-b96-qr.img         1122304 B  sha256 6bab1734de52bcbb…（同一份固件）
+```
+
+参数：`uke_usb=0 qcom-usb-debug=1 qcom-usb-panic=0`（不 panic，正常枚举）。
+
+两处读数同时进行：
+
+1. **主机**：`sudo dmesg -w`，找 `1209:316d` / `cdc_acm` / `ttyACM0`；
+2. **屏幕**：白底卡片上有二维码 + 右侧同文本（例如 `QCOMUSB REQ rt8000 rq0006 v0100 i0000 l0040 n1`），
+   扫一下即得精确字节。
+
+多帧轮播那颗（`a1079b2`）还在 CI 里，出来后作为 b97 备用；b96 用来先验证 SET_ADDRESS 修复是否生效。
