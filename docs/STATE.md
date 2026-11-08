@@ -4096,3 +4096,65 @@ pram slot 0x37F100: "QCOMUSB REQ rt8106 rq0006 v0100 i0000 l0040 n1 …"
 
 新增代码用 `gcc` 与 `clang` 的 `-Wall -Wextra -Werror` 各自编译过（把 arm64 的 `dsb sy` 在探针里
 省掉）。下一步：固件把这两个槽位打印出来并搜索 `QCOMUSB`（本机构建，不占 CI）。
+
+### 79b. 读这两个槽位用的对照表（拍下来直接查）
+
+`QCOMUSB PHASE=n` 对应组件内部的相位（`diag_checkpoint()` 的枚举顺序）：
+
+| 相位 | 名称 |
+|---|---|
+| 1 | BEFORE_ACQUIRE |
+| 2 | AFTER_ACQUIRE |
+| 3 | COUNTER_CACHE |
+| 4 | DATA_VTOP |
+| 5 | TABLE_VTOP |
+| 6 | MAP_GCC |
+| 7 | MAP_USB |
+| 8 | MAP_SMMU |
+| 9 | INSPECT |
+| 10 | GATES_WIDTH |
+| 11 | HALT |
+| 12 | DOMAIN |
+| 13 | VERIFY_DOMAIN |
+| 14 | VBUS |
+| 15 | CORE_INIT |
+| 16 | CORE_START |
+| 17 | CORE_STARTED |
+| 18 | FIRST_POLL |
+| 19 | ENUM_DONE |
+
+`QCOMUSB ... ERR=n` 对应拒绝码（`enum qcom_usb_debug_error`）：
+
+| 值 | 名称 |
+|---|---|
+| 0 | `QCOM_USB_DEBUG_OK` |
+| 1 | `QCOM_USB_DEBUG_CONTEXT_TOO_SMALL` |
+| 2 | `QCOM_USB_DEBUG_BAD_COUNTER` |
+| 3 | `QCOM_USB_DEBUG_CACHE_GRANULE_UNSUPPORTED` |
+| 4 | `QCOM_USB_DEBUG_DMA_NOT_CONTIGUOUS` |
+| 5 | `QCOM_USB_DEBUG_MAP_FAILED` |
+| 6 | `QCOM_USB_DEBUG_INHERITED_STATE_REFUSED` |
+| 7 | `QCOM_USB_DEBUG_UNSTABLE_POWER_STATE` |
+| 8 | `QCOM_USB_DEBUG_CORE_NOT_DEVICE` |
+| 9 | `QCOM_USB_DEBUG_HALT_TIMEOUT` |
+| 10 | `QCOM_USB_DEBUG_DMA_REFUSED` |
+| 11 | `QCOM_USB_DEBUG_CORE_INIT_FAILED` |
+| 12 | `QCOM_USB_DEBUG_CORE_START_FAILED` |
+| 13 | `QCOM_USB_DEBUG_CORE_POLL_FAILED` |
+| 14 | `QCOM_USB_DEBUG_DEADLINE_EXPIRED` |
+| 15 | `QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED` |
+| 16 | `QCOM_USB_DEBUG_RESTORE_FAILED` |
+| 17 | `QCOM_USB_DEBUG_VBUS_FAILED` |
+| 18 | `QCOM_USB_DEBUG_DMA_WIDTH_UNSUPPORTED` |
+| 19 | `QCOM_USB_DEBUG_TABLES_NOT_CONTIGUOUS` |
+| 20 | `QCOM_USB_DEBUG_DOMAIN_STATE_INVALID` |
+| 21 | `QCOM_USB_DEBUG_ACQUIRE_REFUSED` |
+| 22 | `QCOM_USB_DEBUG_PHY_LEASE_FAILED` |
+
+判读要点：
+
+- **没有 `QCOMUSB INIT`** ⇒ worker 根本没调用到 `qcom_usb_debug_init()`（问题在 `bsd_init.c` 的 worker 起点）；
+- **有 INIT、`PHASE` 停在 12 之前** ⇒ 卡在预检（GCC/DWC3 映射、SMMU 域名、继承状态），`ERR` 会给出具体项；
+- **`PHASE>=17` 且 `TR=0`** ⇒ 控制器初始化成功但**事件一个都没投递**（事件环/DMA 地址问题）；
+- **`TR>0` 但有 `REQ`** ⇒ 主机的 SETUP 到了我们手上，问题在应答路径（描述符/传输完成）；
+- **`P` 不再增长** ⇒ worker 的 `qcom_usb_debug_poll()` 循环已停。
