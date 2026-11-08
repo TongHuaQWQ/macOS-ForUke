@@ -4677,3 +4677,24 @@ PH=18 E=13 CR=-4 G=64 TA=10001 TB=1a0003 TR=7 LT=3
 | -6 | `CONNECTDONE` 报告的速率异常 |
 | -7 | `GEVNTCOUNT > EVENT_RING`（事件环尺寸/地址不对）|
 | -8 | 传输完成但状态错误（TRB 状态 / BUSERR / residual 过大）|
+
+### 85d. b98 就位：8 帧二维码 + `CR/G/EV/TA/TB`
+
+```
+work/flash/vendor_boot_round-b98-frames.img  85782528 B  sha256 21cd6d293573cbff…
+    ← CI run 42488801306 全绿，内核 ab85ca2f618b4308…（SET_ADDRESS 修复 + 8 帧 QR + CR/G/EV/TA/TB）
+work/flash/boot-round-b98-frames.img         1122304 B  sha256 6bab1734de52bcbb…（同一份固件）
+```
+
+面板行为：卡片在**屏幕高度 1/3 处水平居中**（避开 payload 的绿色进度条），白底黑码，
+二维码 scale 8（v2=200 px、v3=232 px、v4=264 px），下方是同一行文字与 `FRAME n/N`；
+**帧每 ~2 秒轮换**，最多 8 帧，重复内容不占帧位。
+
+第一帧应当形如：
+
+```
+PH=18 E=13 CR=-4 G=64 TA=10001 TB=1a0003 TR=7 LT=3
+```
+
+判读顺序（§85c 的表）：先看 `CR` → 再看 `TA`（哪个端点 + 哪条命令）→ 最后看 `TB` 的 `(v>>12)&0xf`（命令状态码）。
+若 `TA` 的高 16 位是 `4`，就是 USB **OUT** 端点的 `SETEPCONFIG` 被拒；是 `5` 则是 **IN** 端点。
