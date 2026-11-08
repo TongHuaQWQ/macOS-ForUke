@@ -4158,3 +4158,32 @@ pram slot 0x37F100: "QCOMUSB REQ rt8106 rq0006 v0100 i0000 l0040 n1 …"
 - **`PHASE>=17` 且 `TR=0`** ⇒ 控制器初始化成功但**事件一个都没投递**（事件环/DMA 地址问题）；
 - **`TR>0` 但有 `REQ`** ⇒ 主机的 SETUP 到了我们手上，问题在应答路径（描述符/传输完成）；
 - **`P` 不再增长** ⇒ worker 的 `qcom_usb_debug_poll()` 循环已停。
+
+### 79c. b92 镜像已就位（这一轮第一次能"读到组件自己的说法"）
+
+```
+work/flash/vendor_boot_round-b92-pramq.img  85782528 B  sha256 f4e2f00efd4ce007…
+    ← CI run 42451159858 全绿的内核 f13ef454bd5c3073…（136,577,024 B），组件带 pram 上报
+work/flash/boot-round-b92-pramq.img          1122304 B  sha256 f950c7a4d8855751…
+    ← 新固件：多读 pram slot 0x37F000 / 0x37F100，并搜 "QCOMUSB"
+```
+
+（b92 的 boot.img 与 b89 不再逐字节相同，正是固件改动生效的证明；`QCOMUSB` 字面量在
+boot.img 里搜不到是正常的 —— UEFI FV 是压缩后塞进 boot 分区的。）
+
+刷 + 启动两次（第一次让内核写，第二次让固件读）：
+
+```sh
+adb reboot bootloader
+fastboot flash vendor_boot_a work/flash/vendor_boot_round-b92-pramq.img
+fastboot boot work/flash/boot-round-b92-pramq.img          # 第一次：内核跑，写 pram
+# 等它起来/挂掉，然后再来一次，让固件打印上一次的 pram：
+fastboot boot work/flash/boot-round-b92-pramq.img          # 第二次：读 pram
+```
+
+照片只需要这两行（在 `pram first text:` 之后新增的两行）：
+
+```
+pram slot 0x37F000: "QCOMUSB PHASE=… ERR=… TR=… P=… LAST=…"
+pram slot 0x37F100: "QCOMUSB REQ rt… rq… v… i… l… n…"   或 "QCOMUSB INIT (worker reached init)"
+```
