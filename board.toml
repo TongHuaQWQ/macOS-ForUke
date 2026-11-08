@@ -449,10 +449,10 @@ kernel_args = [
   # panic are dropped rather than carried as zeros - the 1000-byte command line is full.
   "uke_usb=0",
   "qcom-usb-debug=1",  # the CDC-ACM log console over DWC3 (the control experiment in STATE 81 is read)
-  # Panic as soon as the controller hands us a control request, printing the request bytes and the
-  # phase reached. The panel is the only console that has ever shown anything here, and the pram window
-  # does not survive reliably (STATE 80), so one photograph replaces a blind round.
-  "qcom-usb-panic=2",
+  # The panel now paints the request and a QR of it without panicking (STATE 82/84), so the diagnostic
+  # panic stays off: with it on, the first control request stops the machine and enumeration can never
+  # be tested. qcom-usb-panic=0 overrides the compiled-in default of 2.
+  "qcom-usb-panic=0",
   "sheng-pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",
