@@ -119,6 +119,11 @@ def main():
                    # imports that symbol, so the audit accepts either name and the unit picks one.
                    '_master_cpu',
                    '_ml_io_map', '_ml_static_vtop', '___stack_chk_guard', '___stack_chk_fail',
+                   # panic() is a macro in the kernel (osfmk/kern/panic_call.h) whose expansion calls
+                   # the function of that name. The diagnostic boot-arg qcom-usb-panic uses it to put
+                   # the phase and the control request on the panel, which is this board's only console
+                   # (STATE 80).
+                   '_panic',
                    '_bzero', '_memcpy', '_memset',
                    # Optional: the refusal report goes to the board's diagnostic page when the
                    # kernel has one. It is a weak_import, so a kernel without boot progress still

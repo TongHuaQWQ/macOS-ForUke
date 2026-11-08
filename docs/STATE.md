@@ -4258,3 +4258,15 @@ kits/uke/qcom-usb-debug/kernel/QcomXnuUsbDebug.c:141:13: error: expected ')'
 只有"自己再声明一次"会炸。删掉那行 extern、直接调用即可（本地用 gcc + clang 把宏展开过的三种调用各编译过一遍）。
 
 顺带记住：panic 的消息会自动带上 ` @文件:行` 后缀，这反而对判读有利。
+
+### 80d. 再加一个自造障碍：导入审计不认识 `_panic`
+
+run `42473522667`：这次**编译全过**（`preflight: 0 error(s) across 5 units`），死在我自己写的导入审计上：
+
+```
+RuntimeError: unexpected XNU imports: ['_panic']
+```
+
+`package/qcom-usb-debug/scripts/build.py` 的白名单里没有 `_panic`，加上即可（`panic` 是真导出符号，
+内核里必然存在）。这条审计本意是防止意外引入外部符号，这次它按设计工作了 —— 只是新增的**有意的**依赖
+也要同步登记。
