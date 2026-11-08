@@ -3910,3 +3910,80 @@ preflight 与组件 `build.py` 都从这份记录取参数（已用 `compile_fla
 ### 一句话现状
 `fileset_layout.py` 的 `overlap_report()` 只花了一次构建就把"到底差多少字节"变成确定的数字 ——
 这是这几轮里投入产出比最高的一处改动。
+
+---
+
+## 77. ✅ CI 全绿：带 `QcomXnuUsbDebug` 的 prelinked 内核出来了（run `42447661352`，commit `80dbaf1`）
+
+```
+step 18  Link the kernel (prelink included)   success
+== kernel: prelink
+== kernel: …/uke-macos/kernel/kernel.macho sha256 4f6f0d654e29dfef9d09fedc66a77dd5e81e0381454b6e580d7691e01822f485
+-rw-------  1 runner  staff  136577024 Nov  8 05:12 kernel.macho
+RUN 42447661352 success
+```
+
+- 产物：`work/ci-artifacts/b90/kernel.macho`，**136,577,024 B**，
+  sha256 `4f6f0d654e29dfef9d09fedc66a77dd5e81e0381454b6e580d7691e01822f485`
+  （配对数据 `kernel.map.json` 也在同一目录）
+- **组件确实在集合里**（直接在 kernel.macho 里数出现次数）：
+
+```
+"QCOM XNU USB CDC ACM v1"        1
+"QCOM USB ACTIVE (CDC-ACM up)"   1
+qcom_usb_debug_write             1
+QcomXnuUsbDebug                  2
+```
+
+### 这条链现在全通（每一环都有 CI 证据）
+
+| 环节 | 证据 |
+|---|---|
+| 组件归档 `libQcomXnuUsbDebug.a` | `QcomXnuUsbDebug: fdf4ca14fac52ddc soc=soc/Uke.h` |
+| 六个 hook 单元（console tee / worker） | 内核编译通过（`kernel.log` 无 error） |
+| 归档符号契约（13 个 `qcom_usb_debug_*`） | 链接通过；唯一遗留 `boot_progress_persist` 用 weak 定义解决 |
+| prelink 布局（`__DATA` 预算） | 32 KiB 截图上限 + 64 KiB 日志环 → 2,555,904 ≤ 2,619,568 |
+| 最终集合 | 136,577,024 B，组件字符串在里面 |
+
+### 接下来是真机（b90）
+
+payload 已用 b90 内核重建（`boot.img` + `vendor_boot_uke.img`）。真机这一轮的看点：
+
+1. **主机侧**：`lsusb` / `dmesg` 是否出现 **CDC-ACM 设备**；`/dev/ttyACM*` 是否存在；
+   若有，`cat /dev/ttyACM0`（或 `work/analysis/collect-xnu-usb.py`）就能**不拍屏幕**读到内核日志 ——
+   这是本项目的原始目标。
+2. **若枚举失败**：屏幕/固件里 `QCOM USB REFUSED error=N` 会直接点名是哪一项预检没过
+   （`fail()` 会把原因画到板上 diagnostic page，走 `boot_progress_persist`；本板没有显示驱动，
+   所以更可能是固件侧 `pram slot` 与我们自己的 beacon 兜底）。
+3. 固件侧（b89 pram 扫描）仍会给 `pram slot 0x1000/0x1100/0x1200`、`pram find "UKEUSB"`、
+   `UKE-GCC:` —— 内核崩溃时这些是唯一证据。
+
+### 77b. b90 镜像已就位（可直接刷）
+
+```
+work/flash/vendor_boot_round-b90-usbcdc.img  85782528 B  sha256 b7fe516d078624f7…
+    ← CI 全绿内核 4f6f0d654e29dfef…（136,577,024 B，内含 QcomXnuUsbDebug）打成的 80 MiB payload
+work/flash/boot-round-b90-usbcdc.img          1122304 B  sha256 3f4d004bf024a46c…
+    ← 与 b89 pramscan 固件**逐字节相同**（同一次 payload 构建顺带产出，省得再等一次）
+```
+
+刷法（两段式，和之前一样）：
+
+```sh
+adb reboot bootloader
+fastboot flash vendor_boot_a work/flash/vendor_boot_round-b90-usbcdc.img   # 写 flash 分区
+fastboot boot work/flash/boot-round-b90-usbcdc.img                          # 只进 RAM，UEFI 临时启动
+```
+
+**这一轮第一次有"不需要拍屏幕"的读法**：主机侧同时观察
+
+```sh
+lsusb                       # 期待出现 CDC-ACM（或 Qualcomm/DWC3 相关）设备
+dmesg | tail -30            # 期待 cdc_acm 绑定：ttyACM0
+ls /dev/ttyACM*             # 存在即成功枚举
+cat /dev/ttyACM0            # 内核日志通道（也可用 work/analysis/collect-xnu-usb.py）
+```
+
+若枚举不出来，证据链仍然是：固件的 `pram slot 0x1000 / 0x1100 / 0x1200`、`pram find "UKEUSB"`、
+`UKE-GCC:` 三段读数，以及面板上的 `QCOM USB REFUSED error=N`（`fail()` 的唯一出口；
+本板没有显示驱动，这一行更可能表现为 pram 里的 beacon）。
