@@ -124,6 +124,9 @@ def main():
                    # the phase and the control request on the panel, which is this board's only console
                    # (STATE 80).
                    '_panic',
+                   # PE_state.video carries the framebuffer address the panel diagnostics draw into
+                   # (STATE 82); the symbol is exported unconditionally by the kernel.
+                   '_PE_state',
                    '_bzero', '_memcpy', '_memset',
                    # Optional: the refusal report goes to the board's diagnostic page when the
                    # kernel has one. It is a weak_import, so a kernel without boot progress still

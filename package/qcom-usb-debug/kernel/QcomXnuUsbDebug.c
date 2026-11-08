@@ -9,6 +9,7 @@
 #include "../usb/Dwc3.h"
 #include "../soc/QcomUsbQualify.h"
 #include "../soc/QcomUsbDmaDomain.h"
+#include "QcomUsbQr.h"
 #include <machine/machine_routines.h>
 #include <kern/cpu_number.h>
 #include <pexpert/pexpert.h>
@@ -301,7 +302,7 @@ boot_progress_persist(const char *text, uint32_t colour)
  *
  * Drawing happens on transitions only (init, refusal, a control request, the periodic state refresh),
  * costs tens of microseconds, and never panics, so enumeration keeps running. */
-#define QCOM_USB_FB_ROWS 256u
+#define QCOM_USB_FB_ROWS 392u
 static volatile uint32_t *qcom_usb_fb;
 static uint32_t qcom_usb_fb_stride, qcom_usb_fb_width;
 
@@ -372,16 +373,39 @@ static void fb_text(uint32_t x, uint32_t y, uint32_t scale, const char *text, ui
 }
 /* Two lines in the top band, white over a black backing: the firmware's own output lives further down,
  * and the video console the payload draws is not this kernel's. */
+/* The symbol is what makes the reading exact; the text beside it is the fallback for a photo that is
+ * too blurry to scan but good enough to read. */
+static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_t scale)
+{
+    uint32_t row, col, dy, dx;
+    for (row = 0; row < qr->size; ++row) {
+        for (col = 0; col < qr->size; ++col) {
+            uint32_t py, px;
+            if (!qr->modules[row * qr->size + col]) continue;
+            py = y + row * scale;
+            px = x + col * scale;
+            for (dy = 0; dy < scale && py + dy < QCOM_USB_FB_ROWS; ++dy) {
+                volatile uint32_t *line = qcom_usb_fb + (size_t)(py + dy) * qcom_usb_fb_stride + px;
+                for (dx = 0; dx < scale && px + dx < qcom_usb_fb_width; ++dx) line[dx] = 0x00000000u;
+            }
+        }
+    }
+}
 static void fb_report(const char *first, const char *second)
 {
-    uint32_t py, i;
+    struct qr_code qr;
+    uint32_t py, i, text_x = 16u;
     if (!fb_ready()) return;
-    for (py = 4u; py < 100u; ++py) {
+    for (py = 4u; py < 232u; ++py) {
         volatile uint32_t *line = qcom_usb_fb + (size_t)py * qcom_usb_fb_stride;
-        for (i = 0; i < qcom_usb_fb_width; ++i) line[i] = 0;
+        for (i = 0; i < qcom_usb_fb_width; ++i) line[i] = 0xffffffffu;   /* white card for the code */
     }
-    fb_text(8u, 8u, 6u, first, 0x00ffffffu);
-    if (second != 0) fb_text(8u, 52u, 6u, second, 0x0000ffffu);
+    if (qr_encode(first, &qr)) {
+        fb_draw_qr(&qr, 24u, 20u, 6u);
+        text_x = 24u + (uint32_t)qr.size * 6u + 24u;
+    }
+    fb_text(text_x, 24u, 6u, first, 0x00000000u);
+    if (second != 0) fb_text(text_x, 76u, 6u, second, 0x00800000u);
 }
 
 /* The pram records themselves. Written once per transition, not per byte: a single non-cached store

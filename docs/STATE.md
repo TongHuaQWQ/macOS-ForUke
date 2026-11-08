@@ -4478,3 +4478,45 @@ DWC3 在 `DCFG.DevAddr` 写入的**瞬间**就采用新地址，于是状态阶�
 `usb/Dwc3.c` 是 freestanding 的，所以这次**在主机上直接编译验证**：
 `gcc -std=c11 -Wall -Wextra -Werror` 与 `clang` 均干净；`soc/QcomUsbQualify.c`、
 `soc/QcomUsbDmaDomain.c`、`kernel/QcomUsbScreenshot.c` 也一并编译通过。
+
+---
+
+## 84. 面板上给二维码（`#qr-logs` 的内核版），并用 qrencode 逐模块验证过
+
+用户提出 `#qr-logs` 后，先把固件侧那份看清楚（§82），然后按同样的**思路**在内核侧实现：
+
+- 组件把诊断文本画到 framebuffer（§82），现在**同时画一个二维码**，内容就是同一行 ASCII；
+- 手机直接扫码得到**精确字节**，不再依赖"拍小字 + 人眼"；文字仍然画在旁边，作为扫不出来时的兜底。
+
+### 编码器
+
+`kernel/QcomUsbQr.h`：byte 模式、纠错等级 L、版本 1–3（L 级在这三个版本都是**单块**，没有交织），
+自带 GF(256) 表、RS 纠错、格式信息 BCH、8 种掩码与惩罚规则。
+
+**验证方式（关键）**：主机上有 `qrencode 4.1.1`，于是对每段文本把我算出的 8 个掩码矩阵与它的输出逐模块比对，
+要求"至少有一个掩码完全一致"——这同时钉死了 RS 码字、模块摆放、格式信息和掩码。
+
+```
+rt8000                        -> mask 0    OK
+qcomusb: phase=12             -> mask 7    OK
+rt=8000 rq=0006               -> mask 5    OK
+HELLO                          -> mask 0    OK
+A                              -> mask 0    OK
+err=0 core=0 phase=17 tr=345  -> mask 2    OK
+qcom usb refused: err=9 ...   -> mask 2    OK
+RQ06 V0100 I0000 L0040        -> mask 4    OK
+qcomusb init: worker reached init -> mask 0 OK
+                                 9 / 9 一致
+```
+
+过程中真抓到两个 bug：
+
+1. **版本索引差一**（`qr_ecc_length[version]` 应为 `[version-1]`）—— 结果 22 字节的文本被当成 v1 编码；
+2. **degree-7 生成多项式写错**（`{87,229,…}` → 正确的是 `{127,122,154,164,11,68,117}`，用 GF(256) 现场推导确认）——
+   所以 v2/v3 的文本能对上、v1 的全挂。这两类错误如果直接进 CI，就是两轮 50 分钟。
+
+面板布局：白底卡片（黑字需要反色，屏幕上以白底黑码最稳），v2 符号 25 模块 × scale 6 = 150 px，
+文字在其右侧；`QCOM_USB_FB_ROWS` 提到 392 行以容纳静区。
+
+另外把导入审计再补一条 `_PE_state`（`PE_state.video` 是 framebuffer 地址的来源），
+这是本轮 CI 失败的唯一原因（`preflight: 0 error(s)` 之后被自己的白名单拦下）。
