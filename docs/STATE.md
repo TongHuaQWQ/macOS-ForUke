@@ -3859,3 +3859,54 @@ usb_context    20 KiB  (DWC3_CONTEXT_BYTES)
 
 ### 现在的位置
 从"归档能不能编"一路推进到：归档 ✅ → 内核编译 ✅ → 内核链接 ✅ → **只剩 prelink 的布局约束**。
+
+---
+
+## 76. 真正的元凶是**16 MiB 的截图缓冲**（不是 4 MiB 的日志环）；两个都缩，`__DATA` 才落进空隙
+
+run `42396020234`（`3ccca8d`，把日志环从 4 MiB 缩到 64 KiB）**还是**同样的错，但这一轮我上一段加的诊断
+把数字直接打出来了 —— 于是我第一次拿到了真实账本：
+
+```
+Native __DATA overlaps a retained segment: placed 0xfffffff00c54c000..0xfffffff00d7b4000,
+needs 0x1268000 bytes; __DATA mapping 0xfffffff00c54c000..0xfffffff00c9ec000 free:
+0xfffffff00c54c000..0xfffffff00c7cb8b0 (0x27f8b0), … ; the range the placement landed in holds
+0x27f8b0 bytes, so the kernel exceeds it by 0xfe8750
+```
+
+- **原生 `__DATA` 需要 0x1268000 = 19,300,352 B（18.4 MiB）**
+- **空隙只有 0x27f8b0 = 2,619,568 B（2.5 MiB）**，超出 0xfe8750 ≈ 16 MiB
+
+把 19,300,352 减去组件的静态数据（16 MiB 截图缓冲 + 64 KiB 环 + 32 KiB DMA + 12 KiB SMMU 表 +
+20 KiB DWC3 上下文 = 16,908,288），剩下的正是 **2,392,064 = 0x248000** —— 与 b87 那次能过的
+原生 `__DATA` **一模一样**。也就是说：基础内核没变，全部增量都来自组件，而其中 **16 MiB 是
+`kernel/QcomUsbScreenshot.c:5` 的 `static uint8_t pixels[QUD_SCREENSHOT_MAX_BYTES]`**（默认 16 MiB），
+4 MiB 的环只是第二号。（§75 把环当成唯一原因，这里更正。）
+
+### 修法：32 KiB 截图上限，且用"共享编译记录"同时喂给 preflight 和归档编译
+
+`include/QcomUsbScreenshot.h` 本来就是 `#ifndef QUD_SCREENSHOT_MAX_BYTES` 设计，板级可以覆盖。
+但**必须保证 preflight 与归档编译看到同一个值**，否则 preflight 就是在骗人。做法是把它作为
+`BOARD_DEFINES` 追加进 `scripts/build-qcom-usb-debug.py` 写出的**那份 compile record** ——
+preflight 与组件 `build.py` 都从这份记录取参数（已用 `compile_flags()` 实测该 `-D` 不被丢弃）。
+
+```
+-DQUD_SCREENSHOT_MAX_BYTES=32768
+```
+
+预算（现在全部对得上）：
+
+```
+基础内核 __DATA            2,392,064
+组件静态（32 KiB 像素 + 64 KiB 环 + 32 KiB DMA + 12 KiB 表 + 20 KiB 上下文）  163,840
+合计                       2,555,904   <  空隙 2,619,568   余量 63,664 B  ✓
+（若像素留 64 KiB：2,588,672，余量 30,896 B —— 也能过，但余量只有一半）
+```
+
+代价说清楚：32 KiB 的 RGB888 只够 ~104×104 的帧，**这个板子现在也根本没有显示驱动**，所以截屏
+功能等于保留接口、实际拒绝大帧。真要截屏，正确做法是先把 prelink 的数据区间放宽（或者让截图缓冲
+改成运行时分配），而不是把 16 MiB 静态塞进内核 `__DATA`。
+
+### 一句话现状
+`fileset_layout.py` 的 `overlap_report()` 只花了一次构建就把"到底差多少字节"变成确定的数字 ——
+这是这几轮里投入产出比最高的一处改动。

@@ -99,13 +99,25 @@ def relaxed_record(source, target):
                                                'option; -arch already sets the triple)' if forwarded
                                                else ' (this compiler rejects it for a compile)'))
 
-    record['arguments'] = [compiler, *keep]
+    record['arguments'] = [compiler, *keep, *BOARD_DEFINES]
     target.write_text(json.dumps(record, indent=1))
     return target
 
 
 UNITS = ('kernel/QcomXnuUsbDebug.c', 'kernel/QcomUsbScreenshot.c',
          'usb/Dwc3.c', 'soc/QcomUsbQualify.c', 'soc/QcomUsbDmaDomain.c')
+
+# Board sizing that has to reach both the preflight and the component's own compile line, so it goes
+# into the compile record they share rather than into one of the two.
+#
+# QUD_SCREENSHOT_MAX_BYTES is a kernel-__DATA budget, and __DATA is the scarce resource here: prelink
+# places the native kernel's data inside the range Apple's own kernel data occupied
+# (fileset_layout.py), and on this board that range is 0x27f8b0 bytes while the rebuilt kernel without
+# this archive is 0x248000 - about 223 KiB to spare. The component's 16 MiB default for the screenshot
+# capture buffer plus a 4 MiB log ring asked for 4x that, and prelink refused with "Native __DATA
+# overlaps a retained segment" (STATE 76). 32 KiB brings the archive's whole footprint to 160 KiB,
+# leaving ~62 KiB of margin; real screenshots need the prelink data range widened first.
+BOARD_DEFINES = ('-DQUD_SCREENSHOT_MAX_BYTES=32768',)
 
 # 'file:line:col: error: ...' from a compile, and 'error: ...' from the driver itself.
 DIAGNOSTIC = re.compile(r'(^|: )error: ')

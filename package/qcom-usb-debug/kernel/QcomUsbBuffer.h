@@ -16,10 +16,12 @@
  * fileset_layout.py leaves out of the retained set), so the rebuilt kernel's
  * __DATA has to fit that range. A 4 MiB ring pushed it past the first retained
  * kext and failed prelink with "Native __DATA overlaps a retained segment"
- * (run 42392182678). 64 KiB keeps this archive's whole static footprint near
- * 110 KiB, and the worker drains continuously once CDC-ACM is up, so capacity
- * only has to cover the window before the transport exists; overflow is
- * counted and reported, never silent. */
+ * (run 42392182678). The far larger offender was the screenshot capture buffer
+ * (16 MiB), now capped from the board's compile record too, so the whole
+ * footprint is 160 KiB; STATE 76 has the arithmetic. 64 KiB of backlog is left
+ * because the worker drains continuously once CDC-ACM is up, so capacity only
+ * has to cover the window before the transport exists; overflow is counted and
+ * reported, never silent. */
 #define SOC_USB_LOG_BUFFER_BYTES (64u * 1024u)
 #define SOC_USB_LOG_WRITE_BUDGET 16384u
 #define SOC_USB_LOG_DRAIN_BUDGET 4096u
