@@ -4232,3 +4232,14 @@ boot-arg `qcom-usb-panic=N`：
 
 固件侧同时升级：`pram slot 0x37F000/0x37F100` 现在除了文本还打 **4 行 × 16 字节的 hex**，
 这样"记录在但前缀被覆盖"也能看出来（本机已编译通过，等下一组镜像）。
+
+### 80b. b92b：只想先确认"pram 到底留不留得住"
+
+```
+work/flash/boot-round-b92b-hexdump.img        1122304 B  sha256 …
+work/flash/vendor_boot_round-b92b-hexdump.img 85782528 B  sha256 …
+    ← 内核仍是 b92（带 pram 上报），固件升级为：0x37F000/0x37F100 除文本外再打 4×16 字节 hex
+```
+
+这一组和下一组的分工：b92b 用来**判定 pram 保留性**（hex 里能不能看到 `51 43 4F 4D 55 53 42`＝"QCOMUSB"）；
+真正能回答"ep0 为什么 stall"的是 b93（内核带 `qcom-usb-panic=2`，一收到控制请求就在屏上 panic 打印请求字节）。
