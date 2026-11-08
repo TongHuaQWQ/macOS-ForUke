@@ -4929,3 +4929,39 @@ work/flash/boot-round-b102-stable.img         1122304 B  sha256 6bab1734de52bcbb
 
 - 看到 `REQ rt=0000 rq=0005 v=0001 i=0000 l=0000` ⇒ 请求到了，问题在**两段式控制的状态阶段**；
 - 只看到 `rq=0006` 而没有 `rq=0005` ⇒ 描述符之后 ep0 没重新挂好，问题在 `setup_phase()` 的重挂。
+
+### 88f. b102 真机：**`SET_ADDRESS` 根本没到** ⇒ ep0 在第一次传输后没重新挂起
+
+屏上帧（`OS B1/2 LEN 65/85/41`）读到：
+
+```
+PH 16 E 0 CR 0 G 0 EV 0 TA 33313130 TB 0        ← 状态行（停在 CORE_START 相位快照）
+QCOMUSB REQ RT0080                              ← 只有 GET_DESCRIPTOR，**没有 RQ0005**
+QCOM XNU USB CDC AC                             ← 载荷里的日志尾部（组件 banner）
+```
+
+主机侧仍是 `Device not responding to setup address` + `-71`。
+
+**结论**：请求历史里只有 `rq=0006`（GET_DESCRIPTOR），**没有 `rq=0005`（SET_ADDRESS）** ——
+主机发出地址设置时，我们的 ep0 已经不在等待 SETUP 的状态了。也就是说：
+**第一次控制传输之后 `setup_phase()` 没有被调用**（它的调用点是状态阶段完成回调
+`control_complete(CTRL_STATUS_*)`），所以 ep0 一直空着。
+
+### 88g. 于是给载荷加"事件历史"
+
+`handle_event()` 每条 `core_trace()` 都会进一个 4 格的小环，写进载荷（紧凑格式）：
+
+```
+T4 2 0              ← DEVICE_EVENT，参数 2 = CONNECTDONE
+T5 80000100 40      ← SETUP：rt=80 rq=06 v=0100，index=0 length=0x40
+T3 …                ← COMMAND（仅当端点命令失败时才记录）
+T8 0 0              ← READY
+```
+
+载荷顺序最终为：`状态行 → 最近 4 条事件 → 最近 4 条请求 → 控制台日志尾部`（本地探针：典型内容 117 字节 / 2 块）。
+
+下一轮只要看事件序列停在哪一条，就能确定状态机断点：
+
+- `T5`（SETUP）之后**没有**任何事件 ⇒ 数据阶段没完成 → 查 ep0 IN 的 TRB/完成事件；
+- 有数据完成、但**没有** `T5` 之前的状态阶段事件 ⇒ 两段式/三段式状态阶段没被触发 → 查 `control_not_ready()`；
+- 事件齐全但仍无 `RQ0005` ⇒ 主机侧没发（回到 descriptor/配置语义）。

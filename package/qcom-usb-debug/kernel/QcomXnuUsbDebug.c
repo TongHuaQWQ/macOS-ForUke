@@ -430,6 +430,11 @@ static char fb_state_line[QCOM_USB_FB_WIDTH + 1u];
 #define QCOM_USB_FB_REQUESTS 4u
 static char fb_request_lines[QCOM_USB_FB_REQUESTS][QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_request_count;
+/* The last few core reports (event or command), so a stuck ep0 flow says where it stopped rather than
+ * only that it stopped. Compact: "T5 80000100 40" is trace SETUP with its two arguments. */
+#define QCOM_USB_FB_TRACES 4u
+static char fb_trace_lines[QCOM_USB_FB_TRACES][28];
+static unsigned fb_trace_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
 static int mem_equal(const uint8_t *a, const uint8_t *b, size_t length)
@@ -530,6 +535,11 @@ static void fb_build_payload(void)
     used = 0;
     {
         const char *line = fb_state_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    for (i = 0; i < fb_trace_count && used + 1u < capacity; ++i) {
+        const char *line = fb_trace_lines[i];
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
         if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
     }
@@ -1026,6 +1036,23 @@ static void core_trace(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t
     /* Every trace is evidence that the controller posted an event and the core drained it, so the
      * count in the phase record answers "is the event path alive" on its own. The setup packet gets
      * its own slot; a periodic refresh keeps the count current without writing on every event. */
+    {
+        char line[28];
+        char *p = append_text(line, "T");
+        p = append_decimal(p, (uint64_t)event);
+        *p++ = ' ';
+        p = append_hex(p, a);
+        *p++ = ' ';
+        p = append_hex(p, b);
+        *p = 0;
+        if (fb_trace_count == 0 || !fb_same(fb_trace_lines[0], line)) {
+            unsigned i;
+            for (i = QCOM_USB_FB_TRACES - 1; i > 0; --i) fb_copy(fb_trace_lines[i], fb_trace_lines[i - 1]);
+            fb_copy(fb_trace_lines[0], line);
+            if (fb_trace_count < QCOM_USB_FB_TRACES) ++fb_trace_count;
+            fb_payload_dirty = 1;
+        }
+    }
     if (event == DWC3_TRACE_SETUP) {
         pram_setup(a, b);
         if (usb_panic_mode == QCOM_USB_PANIC_REQUEST)
