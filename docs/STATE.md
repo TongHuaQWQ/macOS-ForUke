@@ -4616,3 +4616,27 @@ QCOMUSB PHASE=18 ERR=13 TR=7 P=0 LAST=3
 3. **位置**：卡片从屏幕最顶端移到**高度 1/3** 处（避开 payload 的绿色进度条），水平居中，
    二维码取 scale 8（v2=200 px、v3=232 px），`FRAME n/N` 移到卡片下缘。
    映射只覆盖该带（按页对齐 + skew 校正），不再整屏映射。
+
+### 85b. 每帧容量加大 + 关于 OneSend 的取舍
+
+用户提到 "OneSend 不是可以筛下更多日志数据" —— 对，它是**连续多帧装配**的设计。查了它的实际帧格式
+（`package/UniXNUPkg/.../AdvancedLogDxe.c`）：
+
+```c
+#define ONESEND_BLOCK_LENGTH  720
+#define ONESEND_HEADER_LENGTH 28
+#define ONESEND_CRC_LENGTH    4      /* 帧 = 'OS',版本,SessionId,Sequence,BlockCount,PayloadLen,
+                                        PayloadCRC32 + 720 字节块 + 帧CRC32 = 752 字节 */
+```
+
+752 字节 ≈ **QR version 22 以上**，需要多块交织 + version info，把整套 QR 规范搬进内核不成比例。
+所以按"同样的效果、可控的代价"来做：
+
+- 编码器扩到 **version 1–5**（4/5 仍是 level L 的**单块**，新增 gen20/gen26 两个生成多项式，
+  用 GF(256) 现场推导），并用 `qrencode` 逐模块验证：
+  - 49 字符 → v3 ✓、60 字符 → **v4 ✓**、100 字符 → **v5 ✓**（都是"某个掩码与 qrencode 完全一致"）；
+- 面板帧宽 47 → **60 字符**，帧数 5 → **8**，长行自动换小号字（>40 字符用 scale 4）；
+- 于是单次扫描能拿到的证据约 **8 × 60 ≈ 480 字符**，足够放：状态行 + 最近几次请求 + 若干日志行。
+
+如果之后确实需要真·OneSend 兼容（让 App 自动装配），那就得在核心里实现 v22 级别的编码器，
+代价和收益要重新评估 —— 现阶段"8 帧 × 60 字符 + 任意扫码 App"已经比之前多了一个数量级。

@@ -14,9 +14,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define QR_MAX_VERSION  3
-#define QR_MAX_SIZE     29                /* 17 + 4 * 3 */
-#define QR_MAX_CODEPTS  70                /* version 3-L: 55 data + 15 ecc */
+#define QR_MAX_VERSION  5
+#define QR_MAX_SIZE     37                /* 17 + 4 * 5 */
+#define QR_MAX_CODEPTS  140               /* version 5-L: 108 data + 26 ecc */
 
 struct qr_code {
     uint8_t size;                         /* modules per side: 21, 25 or 29 */
@@ -25,8 +25,8 @@ struct qr_code {
     uint8_t modules[QR_MAX_SIZE * QR_MAX_SIZE];   /* 1 = dark, row major */
 };
 
-static const uint8_t qr_ecc_length[4] = { 7, 10, 15, 20 };      /* versions 1..3, level L */
-static const uint8_t qr_codewords[4]  = { 26, 44, 70, 100 };     /* total codewords, versions 1..4 */
+static const uint8_t qr_ecc_length[5] = { 7, 10, 15, 20, 26 };  /* versions 1..5, level L */
+static const uint8_t qr_codewords[5]  = { 26, 44, 70, 100, 134 };  /* total codewords, versions 1..5 */
 
 static uint8_t qr_gf_exp[512];
 static uint8_t qr_gf_log[256];
@@ -58,8 +58,11 @@ static void qr_ecc(const uint8_t *data, unsigned length, unsigned count, uint8_t
     static const uint8_t gen7[7]   = { 127, 122, 154, 164, 11, 68, 117 };
     static const uint8_t gen10[10] = { 216, 194, 159, 111, 199, 94, 95, 113, 157, 193 };
     static const uint8_t gen15[15] = { 29, 196, 111, 163, 112, 74, 10, 105, 105, 139, 132, 151, 32, 134, 26 };
-    const uint8_t *gen = count == 7 ? gen7 : (count == 10 ? gen10 : gen15);
-    uint8_t rem[20];
+    static const uint8_t gen20[20] = { 152, 185, 240, 5, 111, 99, 6, 220, 112, 150, 69, 36, 187, 22, 228, 198, 121, 121, 165, 174 };
+    static const uint8_t gen26[26] = { 246, 51, 183, 4, 136, 98, 199, 152, 77, 56, 206, 24, 145, 40, 209, 117, 233, 42, 135, 68, 70, 144, 146, 77, 43, 94 };
+    const uint8_t *gen = count == 7 ? gen7 : count == 10 ? gen10 : count == 15 ? gen15 :
+                         count == 20 ? gen20 : gen26;
+    uint8_t rem[32];
     unsigned i, j;
 
     for (i = 0; i < count; ++i) rem[i] = 0;
@@ -96,7 +99,7 @@ static void qr_reserve(struct qr_code *qr, uint8_t *reserved)
         reserved[i * qr->size + 6] = 1;
     }
     if (qr->version >= 2) {
-        center = qr->size - 7;                 /* 18 for version 2, 22 for version 3 */
+        center = qr->size - 7;                 /* 18,22,26,30 for versions 2..5 */
         for (r = center - 2; r <= center + 2; ++r)
             for (c = center - 2; c <= center + 2; ++c) reserved[r * qr->size + c] = 1;
     }
@@ -280,7 +283,7 @@ static int qr_encode_mask(const char *text, struct qr_code *qr, int forced_mask)
 
     qr_gf_init();
     while (text[length] != '\0') ++length;
-    if (length > 60) return 0;
+    if (length > 106) return 0;         /* version 5-L byte capacity: (108*8 - 12) / 8 */
 
     for (version = 1; version <= QR_MAX_VERSION; ++version) {
         qr->size = (uint8_t)(17 + 4 * version);

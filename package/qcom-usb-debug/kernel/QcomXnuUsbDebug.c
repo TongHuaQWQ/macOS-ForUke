@@ -414,8 +414,8 @@ static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_
 /* Several frames, shown one at a time, because a single symbol cannot carry the whole picture and one
  * line is rarely the whole answer. A phone scanning the panel collects them one by one - the same idea
  * as the firmware's OneSend paging, applied to the kernel side where the logs actually are. */
-#define QCOM_USB_FB_FRAMES 5
-#define QCOM_USB_FB_WIDTH  47u          /* fits a version-2 symbol at scale 8 beside the text */
+#define QCOM_USB_FB_FRAMES 8
+#define QCOM_USB_FB_WIDTH  60u          /* up to a version-4 symbol at scale 8, text below */
 static char fb_frames[QCOM_USB_FB_FRAMES][QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_frame_count, fb_frame_show, fb_frame_tick;
 
@@ -448,7 +448,12 @@ static void fb_paint(void)
     if (side != 0) fb_draw_qr(&qr, x0, 8u, QCOM_USB_QR_SCALE);
     text_x = x0;
     text_y = 8u + side + 16u;
-    fb_text(text_x, text_y, 5u, text, 0x00000000u);
+    /* longer lines need a smaller glyph pitch or they run off the panel */
+    {
+        unsigned length = 0;
+        while (text[length] != 0) ++length;
+        fb_text(text_x, text_y, length > 40u ? 4u : 5u, text, 0x00000000u);
+    }
     label_y = text_y + 40u;
     if (label_y + 30u > card_h) label_y = card_h > 30u ? card_h - 30u : 0u;
     label[0] = 'F'; label[1] = 'R'; label[2] = 'A'; label[3] = 'M'; label[4] = 'E'; label[5] = ' ';
