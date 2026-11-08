@@ -4640,3 +4640,40 @@ QCOMUSB PHASE=18 ERR=13 TR=7 P=0 LAST=3
 
 如果之后确实需要真·OneSend 兼容（让 App 自动装配），那就得在核心里实现 v22 级别的编码器，
 代价和收益要重新评估 —— 现阶段"8 帧 × 60 字符 + 任意扫码 App"已经比之前多了一个数量级。
+
+### 85c. `LAST=3`（TRACE_COMMAND）其实已经锁定了失败点
+
+读 `usb/Dwc3.c` 的 `ep_command()`：
+
+```c
+    if (wait_mask(d, DWC3_DEPCMD(ep), DWC3_DEPCMD_CMDACT, 0)) { ret = -3; goto out; }   /* 命令未完成 */
+    result = rd(d, DWC3_DEPCMD(ep));
+    if ((result >> 12) & 15u) {
+        trace(d, DWC3_TRACE_COMMAND, (ep << 16) | cmd, result);   /* ★ 只有命令“失败”时才 trace */
+        ret = -4; goto out;
+    }
+```
+
+也就是 **`TRACE_COMMAND` 只在端点命令返回非零状态时才会被记录**。所以 b96 那条
+`LAST=3 TR=7` 的含义是：**某个端点命令被控制器拒绝了**（`CR` 应当是 -4），
+而不是"随机报错"。
+
+`trace_a` = `(ep << 16) | cmd`，`trace_b` = `DEPCMD` 寄存器原值（低 4 位是命令状态、
+高位是资源索引）。这两个数直接点名**哪条命令、被拒绝的原因码**。
+
+所以本轮把 `TA=`/`TB=` 也放进记录（面板行示例，50 字符，仍在 60 字符帧预算内）：
+
+```
+PH=18 E=13 CR=-4 G=64 TA=10001 TB=1a0003 TR=7 LT=3
+```
+
+`CR` 的取值对照（来自 `dwc3_poll`/`ep_command`/`handle_event`）：
+
+| CR | 含义 |
+|---|---|
+| -1 | 核心未运行或已标记失败 |
+| -3 | 端点命令 `CMDACT` 一直不落（命令没完成）|
+| -4 | 端点命令返回非零状态（或 `pump` 的传输失败）|
+| -6 | `CONNECTDONE` 报告的速率异常 |
+| -7 | `GEVNTCOUNT > EVENT_RING`（事件环尺寸/地址不对）|
+| -8 | 传输完成但状态错误（TRB 状态 / BUSERR / residual 过大）|

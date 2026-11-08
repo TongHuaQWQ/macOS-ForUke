@@ -528,7 +528,7 @@ static char *append_signed(char *to, int value)
 }
 static void pram_state(void)
 {
-    char text[96], panel[96];
+    char text[128], panel[128];
     char *p = append_text(text, "QCOMUSB PH=");
     char *q = append_text(panel, "PH=");
     p = append_decimal(p, native.status.diag_checkpoint);
@@ -549,6 +549,18 @@ static void pram_state(void)
     q = append_text(q, " EV=");
     p = append_hex(p, native.status.core_last_event);
     q = append_hex(q, native.status.core_last_event);
+    /* The core only traces a COMMAND when the endpoint command *failed*, and trace_a carries
+     * (ep << 16) | cmd while trace_b carries the DEPCMD result with its status field - so these two
+     * name the exact command and its refusal, which is what a CORE_POLL_FAILED after TRACE_COMMAND
+     * needs (STATE 86). */
+    p = append_text(p, " TA=");
+    q = append_text(q, " TA=");
+    p = append_hex(p, native.status.trace_a);
+    q = append_hex(q, native.status.trace_a);
+    p = append_text(p, " TB=");
+    q = append_text(q, " TB=");
+    p = append_hex(p, native.status.trace_b);
+    q = append_hex(q, native.status.trace_b);
     p = append_text(p, " TR=");
     q = append_text(q, " TR=");
     p = append_decimal(p, native.status.traces);
