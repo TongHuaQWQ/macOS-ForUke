@@ -799,8 +799,11 @@ int qcom_usb_debug_init(void)
     if (native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
         int diagnostic = 0;
         int panic_mode = 0;
+        /* 0 means off, and it has to be accepted explicitly: the board compiles a default mode in
+         * (QCOM_USB_PANIC_DEFAULT), so without an off switch every payload built from that kernel
+         * would panic on the first control request and enumeration could never be tested. */
         if (PE_parse_boot_argn("qcom-usb-panic", &panic_mode, sizeof(panic_mode)) &&
-            panic_mode >= QCOM_USB_PANIC_REFUSAL && panic_mode <= QCOM_USB_PANIC_POLLS) {
+            panic_mode >= 0 && panic_mode <= QCOM_USB_PANIC_POLLS) {
             usb_panic_mode = (unsigned int)panic_mode;
         }
         if (QUD_PSCI_SMC_RESET &&

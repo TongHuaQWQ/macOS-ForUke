@@ -4372,3 +4372,17 @@ ret = dwc3_poll(native.core, 1); /* 每次只取 1 个事件 */
 
 两份补丁副本已同步（`scripts/check-patch-copies.py` 通过），`git apply --check` 在干净 12377 树上通过。
 另外 `board.toml` 把 `qcom-usb-debug` 改回 `1`（对照实验已读完），参数 967 B。
+
+### 81c. 两个小补丁，都在为 b95 做准备
+
+1. **轮询**：见 §81b（budget 128 + burst 排空 + 空闲 1 ms）。
+2. **boot-arg 可以关掉编译默认值**：板级编译记录里内置了 `QCOM_USB_PANIC_DEFAULT=2`，
+   而原先的范围检查只接受 1–3，于是"关掉"这件事做不到 —— 那 b95 一上电就会被第一个控制请求
+   panic，枚举永远测不了。现在 `qcom-usb-panic=0` 显式表示关闭。
+
+这样同一颗内核可以出两种 payload：
+
+| payload | 参数 | 用途 |
+|---|---|---|
+| **b95A**（测枚举） | `qcom-usb-debug=1 qcom-usb-panic=0` | 带轮询修复，正常跑；成功就会在主机上出现 `1209:316d` + `/dev/ttyACM*` |
+| **b95B**（测渲染/取请求） | `qcom-usb-debug=1`（不传 panic 参数 → 默认 2） | 第一个控制请求即 panic；用来确认 panic 屏能显示、并读出 `rt/rq/v/i/l` |
