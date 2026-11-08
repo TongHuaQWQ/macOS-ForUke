@@ -439,13 +439,17 @@ kernel_args = [
   "sheng-data-persist=2",
   # "sheng-staged-apps=1",   (see the note above: dropped for the 1000-byte command-line cap)
   "sheng-log=1",
-  "uke_usb=1",
-  # "uke_usb_power=11",  (dropped for the 1000-byte cap: the firmware readout shows the USB clocks and
-  # GDSC are already up, so the driver's default "no power writes" is the correct behaviour.)
-  "uke_usb_sync=1",
-  "uke_usb_hook=1",
-  "uke_usb_panic=1",
-  "qcom-usb-debug=1",   # probe round only: freeze the console on the numbers   # read-only: GCC power domain, DWC3 identity, SMMU stream match
+  # The old probe driver (package/uke_usb.c) is now inert, on purpose. Three of its switches would
+  # each stop the boot before QcomXnuUsbDebug's worker runs: uke_usb_sync=1 panics inside its
+  # STARTUP by design ("uke_usb_sync=1's whole purpose"), uke_usb_hook=1 reaches
+  # uke_usb_probe_and_freeze(), and uke_usb=1 with no uke_usb_power writes the GDSC and all five USB
+  # branch clocks - the same DWC3 the component owns. Its STARTUP still writes the UKEUSB-DISABLED
+  # beacon into pram before returning, which is the one piece of evidence worth keeping.
+  "uke_usb=0",
+  "uke_usb_sync=0",
+  "uke_usb_hook=0",
+  "uke_usb_panic=0",
+  "qcom-usb-debug=1",   # the CDC-ACM log console over DWC3 (package/qcom-usb-debug)
   "sheng-pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",

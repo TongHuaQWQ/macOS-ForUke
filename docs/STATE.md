@@ -3987,3 +3987,60 @@ cat /dev/ttyACM0            # 内核日志通道（也可用 work/analysis/colle
 若枚举不出来，证据链仍然是：固件的 `pram slot 0x1000 / 0x1100 / 0x1200`、`pram find "UKEUSB"`、
 `UKE-GCC:` 三段读数，以及面板上的 `QCOM USB REFUSED error=N`（`fail()` 的唯一出口；
 本板没有显示驱动，这一行更可能表现为 pram 里的 beacon）。
+
+---
+
+## 78. b90 真机没有 CDC-ACM 的原因找到了：**内核参数让旧探针驱动故意 panic**（b91 已修）
+
+真机结果（用户的 `dmesg`/`lsusb`）：主机看到 Android/fastboot 设备（`18d1:d00d`）一次次来去，
+**没有任何 `1209:316d`**（组件的 VID/PID：`QUD_USB_VID 0x1209` / `QUD_USB_PID 0x316d`，
+Manufacturer "UniXNU"、Product "Qualcomm XNU Debug"、Serial "QcomXnuUsbDebug"），也没有 `/dev/ttyACM*`。
+
+不是枚举时序问题，是**这一版 payload 的内核参数根本不允许启动走到那一步**。`payload.kernel_args`
+里还留着上一阶段的三个"决定性试验"开关：
+
+| 参数 | 代码行为 |
+|---|---|
+| `uke_usb_sync=1` | `uke_usb_startup()` 里**第一件事就是 panic**："UKE USB: startup entry reached (uke_usb_sync=1)"。STARTUP 在 `bsd_autoconf` 之前跑，所以**组件 worker 永远轮不到** |
+| `uke_usb_hook=1` + `uke_usb=1` | 走到 `uke_usb_probe_and_freeze()`，配 `uke_usb_panic=1` 再 panic 一次 |
+| `uke_usb=1`（无 `uke_usb_power`） | 默认路径把 GDSC + 五个 USB 分支时钟全部打开并初始化 DWC3 —— 和组件抢同一个控制器 |
+
+三条任何一个都足以让 CDC-ACM 不可能出现；它们同时开着。
+
+### 修法（本机重建 payload，6 分钟，不用 CI）
+
+`board.toml` 的 `payload.kernel_args`：
+
+```diff
+-  "uke_usb=1",
+-  "uke_usb_sync=1",
+-  "uke_usb_hook=1",
+-  "uke_usb_panic=1",
++  "uke_usb=0",
++  "uke_usb_sync=0",
++  "uke_usb_hook=0",
++  "uke_usb_panic=0",
+   "qcom-usb-debug=1",
+```
+
+- 旧驱动从此**完全惰性**（`if (!enabled) return;` 之前只做一次 pram 写：
+  `UKEUSB-STARTUP-ENTERED` / `UKEUSB-DISABLED`，这是**保留下来**的有用证据，不碰 DWC3、不 panic）；
+- 组件独占 DWC3；
+- 参数总长 978 B（+`native-ufs-root=0` = 996 B），仍在 1000 B 上限内（已用 `tomllib` 复核）。
+
+```
+work/flash/vendor_boot_round-b91-cdcacm.img  85782528 B  sha256 092f784b8de788dd…
+work/flash/boot-round-b91-cdcacm.img          1122304 B  sha256 3f4d004bf024a46c…（= b89 固件）
+```
+
+b90 那组标记为**已被取代**（`work/flash/INDEX.md`）。
+
+### 这一轮的判读方法（第一次真正"不拍屏幕"）
+
+1. 刷 b91 前，先在主机开一个抓包终端：`sudo dmesg -C && sudo dmesg -w | tee /tmp/usb-boot.log`；
+2. 刷 + `fastboot boot`，等 60–90 秒；
+3. 在日志里找 **`1209:316d`**，或 `New USB device found … idVendor=1209, idProduct=316d`，
+   以及 `cdc_acm` / `ttyACM0`。出现 → `cat /dev/ttyACM0` 就能读内核日志（本项目的原始目标）。
+4. 若仍不出现，下一份证据是**固件读 pram**（第二次启动）：`UKEUSB-STARTUP-ENTERED` 在 → 内核确实
+   跑到 STARTUP；配合主机侧"有没有 `new high-speed USB device` 事件"就能分清"内核没跑到组件"还是
+   "组件跑了但 gadget 没上来"。
