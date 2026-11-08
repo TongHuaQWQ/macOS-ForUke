@@ -110,11 +110,34 @@ static int qcom_usb_control_halt_restart(unsigned int type)
         platform_smc_reset();
     return -1;
 }
+/* Out-of-band status, because on this board the console is the thing being built.
+ *
+ * Nothing here can reach the host yet and the panel has no driver, so the one channel that survives a
+ * reboot is the reserved window the firmware reads back on its next start: make-uke-adt.py hands it
+ * over as /chosen/pram at 0xFF800000 for 0x380000 bytes, and UkeUsbLogDxe prints fixed slots of it as
+ * `pram slot 0x....`. Records are plain ASCII, overwritten in place, so the last state reached before
+ * the kernel died is what the next boot shows. Offsets 0x1400/0x1500 are this component's; the older
+ * probe driver owns 0x1000/0x1100/0x1200 (STATE 79). */
+#define QCOM_USB_PRAM_PA     0xFF800000ull
+/* The window's first 0x380000-less-header bytes are XNU's own msgbuf ring (debug_log_init puts
+ * debug_buf_base at gPanicBase + sizeof(struct embedded_panic_header)), so a record near the start
+ * would be overwritten by kernel log text - and would corrupt the log it is meant to explain. The ring
+ * grows forward from the start and never wraps, so the last page is the one place a record survives. */
+#define QCOM_USB_PRAM_STATE  0x37F000u
+#define QCOM_USB_PRAM_SETUP  0x37F100u
+static vm_offset_t qcom_usb_pram_va;
+static void pram_state(void);
+static void pram_setup(uint32_t a, uint32_t b);
+static void pram_write(unsigned int offset, const char *text, size_t length);
+
 static void diag_checkpoint(unsigned int checkpoint)
 {
+    /* The phase number is the first thing the next boot needs, so it is recorded whether or not the
+     * diag boot-arg is on; diag_reset's side effects stay gated below. */
+    native.status.diag_checkpoint = checkpoint;
+    pram_state();
     if (!usb_diag_enabled) return;
     usb_diag_checkpoint = checkpoint;
-    native.status.diag_checkpoint = checkpoint;
     __asm__ volatile("dsb ishst" ::: "memory");
     if (usb_diag_target == checkpoint) diag_reset(0);
 }
@@ -246,6 +269,78 @@ boot_progress_persist(const char *text, uint32_t colour)
     (void)text;
     (void)colour;
 }
+/* The pram records themselves. Written once per transition, not per byte: a single non-cached store
+ * run plus a barrier, so this is safe in any context including before the scheduler exists. */
+static void pram_write(unsigned int offset, const char *text, size_t length)
+{
+    volatile char *slot;
+    size_t i;
+    if (qcom_usb_pram_va == 0) {
+        /* Map only the tail page: the rest belongs to the msgbuf ring and mapping 3.5 MiB of DRAM as
+         * device memory for two 64-byte records would be wasteful. */
+        qcom_usb_pram_va = ml_io_map((vm_offset_t)(QCOM_USB_PRAM_PA + 0x37F000ull), 0x1000);
+        if (qcom_usb_pram_va != 0) qcom_usb_pram_va -= QCOM_USB_PRAM_STATE;
+    }
+    if (qcom_usb_pram_va == 0) return;
+    if (length > 63u) length = 63u;
+    slot = (volatile char *)(qcom_usb_pram_va + offset);
+    for (i = 0; i < length; ++i) slot[i] = text[i];
+    /* Pad with spaces, not NULs: a stale tail from an earlier boot must not read as part of this
+     * record, and the firmware's printable-run scan stops at the first non-printable byte. */
+    for (; i < 63u; ++i) slot[i] = ' ';
+    slot[i] = '\0';
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+/* Phase, refusal code, and how much of the USB event machinery has actually run. traces counts
+ * core_trace() calls, which only happen if the controller posts events; last_trace is the most recent
+ * dwc3_trace value, so "events never arrived" and "events arrived but were not served" look different. */
+static unsigned int pram_polls;
+static void pram_state(void)
+{
+    char text[64];
+    char *p = append_text(text, "QCOMUSB PHASE=");
+    p = append_decimal(p, native.status.diag_checkpoint);
+    p = append_text(p, " ERR=");
+    p = append_decimal(p, native.status.error);
+    p = append_text(p, " TR=");
+    p = append_decimal(p, native.status.traces);
+    p = append_text(p, " P=");
+    p = append_decimal(p, pram_polls);
+    p = append_text(p, " LAST=");
+    p = append_decimal(p, native.status.last_trace);
+    pram_write(QCOM_USB_PRAM_STATE, text, (size_t)(p - text));
+}
+/* Four hex digits, fixed width: a field that shortens when its value is small makes two records
+ * impossible to compare at a glance. */
+static char *append_hex16(char *to, uint32_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    int shift;
+    for (shift = 12; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
+    return to;
+}
+/* The last control request the controller delivered: request type, request, value, index, length.
+ * dwc3 packs exactly these into the SETUP trace (a = rt<<24 | rq<<16 | wValue, b = wIndex<<16 |
+ * wLength), so nothing in usb/Dwc3.c has to change. This record is what separates "the host never
+ * asked" from "we were asked and answered wrongly" without a working console. */
+static void pram_setup(uint32_t a, uint32_t b)
+{
+    static unsigned int setups;
+    char text[64];
+    char *p = append_text(text, "QCOMUSB REQ rt");
+    p = append_hex16(p, a >> 24);
+    p = append_text(p, " rq");
+    p = append_hex16(p, (a >> 16) & 0xffu);
+    p = append_text(p, " v");
+    p = append_hex16(p, a & 0xffffu);
+    p = append_text(p, " i");
+    p = append_hex16(p, b >> 16);
+    p = append_text(p, " l");
+    p = append_hex16(p, b & 0xffffu);
+    p = append_text(p, " n");
+    p = append_decimal(p, ++setups);
+    pram_write(QCOM_USB_PRAM_SETUP, text, (size_t)(p - text));
+}
 /* Small in-band accounting records use no printf/console recursion. */
 static size_t loss_record(char *text, int final)
 {
@@ -275,6 +370,7 @@ static void fail(unsigned int error, int core_result)
     native.status.core_result = core_result;
     native.status.phase = QCOM_USB_DEBUG_REFUSED;
     native.status.dma_lease_active = native.lease.active;
+    pram_state();
     /* Say which check refused, on the panel. The module otherwise gives up silently: no USB
      * device appears and nothing anywhere says why, because the console it would have reported
      * on is the one that failed. boot_progress_stage writes into the diagnostic page the board
@@ -499,6 +595,14 @@ static void core_trace(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t
     native.status.last_trace = (uint32_t)event;
     native.status.trace_a = a; native.status.trace_b = b;
     native.status.traces++;
+    /* Every trace is evidence that the controller posted an event and the core drained it, so the
+     * count in the phase record answers "is the event path alive" on its own. The setup packet gets
+     * its own slot; a periodic refresh keeps the count current without writing on every event. */
+    if (event == DWC3_TRACE_SETUP) {
+        pram_setup(a, b);
+    } else if ((native.status.traces & 63u) == 0u) {
+        pram_state();
+    }
 }
 static int halt_inherited(void)
 {
@@ -658,6 +762,11 @@ int qcom_usb_debug_init(void)
     static const struct dwc3_identity identity = {
         QUD_USB_VID, QUD_USB_PID, "UniXNU", QUD_USB_PRODUCT, QUD_USB_SERIAL
     };
+    /* First record of the round: it says the worker reached us at all, which is the difference between
+     * "the component never ran" and "it ran and stopped at phase N" without any console. sizeof keeps
+     * the length exact instead of a hand-counted constant. */
+    static const char reached[] = "QCOMUSB INIT (worker reached init)";
+    pram_write(QCOM_USB_PRAM_SETUP, reached, sizeof(reached) - 1u);
     if (native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
         int diagnostic = 0;
         if (QUD_PSCI_SMC_RESET &&
@@ -1300,6 +1409,7 @@ void qcom_usb_debug_putc(char c) { (void)qcom_usb_debug_write(&c, 1); }
 void qcom_usb_debug_poll(void)
 {
     uint64_t flags;
+    if ((++pram_polls & 255u) == 1u) pram_state();
     uint8_t control_bytes[SXNU_CONTROL_WORK_BYTES];
     struct qcom_usb_debug_status control_status = {0};
     uint32_t generation = 0;

@@ -4044,3 +4044,55 @@ b90 那组标记为**已被取代**（`work/flash/INDEX.md`）。
 4. 若仍不出现，下一份证据是**固件读 pram**（第二次启动）：`UKEUSB-STARTUP-ENTERED` 在 → 内核确实
    跑到 STARTUP；配合主机侧"有没有 `new high-speed USB device` 事件"就能分清"内核没跑到组件"还是
    "组件跑了但 gadget 没上来"。
+
+---
+
+## 79. b91 真机：gadget 上来了但 ep0 STALL —— 于是把相位/拒绝码/收到的 SETUP 写进 pram
+
+### 主机侧证据（这一轮第一次有）
+
+```
+13:22:19  new full-speed USB device number 10/11
+13:22:19  device descriptor read/64, error -32        ← -32 = EPIPE：我们回了 STALL，不是超时
+13:22:23  #12 → 18d1:d00d Android（设备回到 Android/fastboot）
+13:24:07  #15 new high-speed … 之后再无任何行
+```
+
+- **high-speed 能协商成功** ⇒ 上拉/PHY/时钟都是好的；而固件交接时 DWC3 是 `halted=1` 且没有上拉，
+  所以这次的上拉只能来自组件 ⇒ **`qcom_usb_debug_init` 真的跑了，soft-connect 成功**。
+- `-32` 说明主机的 **GET_DESCRIPTOR 到达了我们的 gadget**，而且我们回了 STALL（或超时后 stall），
+  即事件环至少被处理过一次、ep0 分支走到了。剩下的是 ep0 那一小段的问题。
+
+### pram 读数（b91 第二次启动，固件读上一次启动的窗口）
+
+`pram slot 0x1000/0x1100/0x1200` 从 **全 00 变成非零**（b90 时是全 00），说明内核这次走得更远、
+确实写进了这块窗口；但 `pram find "UKEUSB"` 仍是 not present，且 `pram head` 的 magic
+`0xC0A03010` **不是** xnu 的 `0x46554E4B`（"FUNK"）—— 也就是 panic 头从未被写过（正常：它只在
+`PESavePanicInfo` 里写），所以不能靠它判断内核日志。
+
+顺带弄清了这块窗口的真正归属：`pexpert/arm/pe_init.c:check_for_panic_log()` 用
+`pram` 节点 + `/chosen/embedded-panic-log-size` 映射它，`debug_log_init()` 把
+`debug_buf_base` 设在 `gPanicBase + sizeof(struct embedded_panic_header)` —— **窗口开头就是 xnu 的
+msgbuf 环形区**。所以旧驱动往 `+0x1000` 写 beacon 等于往内核日志环里写，会被日志覆盖。
+
+### 新增：组件把状态写进窗口**尾部**（`0x37F000` / `0x37F100`）
+
+环形区从头往后长、不回头，所以最后一页是记录唯一不会被覆盖的位置。两条记录，各 63 字节 ASCII：
+
+```
+pram slot 0x37F000: "QCOMUSB PHASE=12 ERR=0 TR=345 P=1024 LAST=7   …"
+pram slot 0x37F100: "QCOMUSB REQ rt8106 rq0006 v0100 i0000 l0040 n1 …"
+```
+
+- `PHASE`：`diag_checkpoint()` 的最后一个相位号（现在**不受 diag boot-arg 门控**，每次相位都写）；
+- `ERR`：`fail()` 的拒绝码（这就是"组件为什么放弃"的答案）；
+- `TR` / `LAST`：`core_trace()` 调用次数与最近一次 trace 类型 ⇒ **事件到底有没有被控制器投递、被吃到**；
+- `P`：`qcom_usb_debug_poll()` 的调用次数 ⇒ worker 循环是否还活着；
+- `REQ`：最近一次 SETUP 包（`rt/rq/v/i/l` + 计数）。`usb/Dwc3.c` 已经把整包塞进
+  `DWC3_TRACE_SETUP` 的两个 uint32（`a = rt<<24|rq<<16|wValue`，`b = wIndex<<16|wLength`），
+  所以**核心一行没改**，只在板级 `core_trace()` 里解码；
+- `qcom_usb_debug_init()` 第一行会写 `QCOMUSB INIT (worker reached init)` ⇒ 区分"组件根本没被调用"
+  和"调用了但停在相位 N"。
+
+新增代码用 `gcc` 与 `clang` 的 `-Wall -Wextra -Werror` 各自编译过（把 arm64 的 `dsb sy` 在探针里
+省掉）。下一步：固件把这两个槽位打印出来并搜索 `QCOMUSB`（本机构建，不占 CI）。
