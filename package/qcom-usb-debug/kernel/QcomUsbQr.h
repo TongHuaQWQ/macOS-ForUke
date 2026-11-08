@@ -270,20 +270,21 @@ static long qr_penalty(const struct qr_code *qr)
     return score;
 }
 
-/* Encode text into one symbol; forced_mask >= 0 pins the mask (used by the host verification). */
-static int qr_encode_mask(const char *text, struct qr_code *qr, int forced_mask)
+/* Encode bytes into one symbol; forced_mask >= 0 pins the mask (used by the host verification).
+ * The payload is binary-safe: OneSend frames contain NULs and arbitrary bytes, so the length is
+ * explicit rather than a terminator. */
+static int qr_encode_bytes_mask(const uint8_t *data, size_t length, struct qr_code *qr, int forced_mask)
 {
     uint8_t codewords[QR_MAX_CODEPTS];
     uint8_t reserved[QR_MAX_SIZE * QR_MAX_SIZE];
     uint8_t plain[QR_MAX_SIZE * QR_MAX_SIZE];
     uint8_t best[QR_MAX_SIZE * QR_MAX_SIZE];
-    unsigned length = 0, ecc_count = 0, total = 0, data_count = 0, at = 0, bit = 0, i;
+    unsigned ecc_count = 0, total = 0, data_count = 0, at = 0, bit = 0, i;
     long best_score = -1;
     int version, mask;
 
     qr_gf_init();
-    while (text[length] != '\0') ++length;
-    if (length > 106) return 0;         /* version 5-L byte capacity: (108*8 - 12) / 8 */
+    if (length > 106u) return 0;        /* version 5-L byte capacity: (108*8 - 12) / 8 */
 
     for (version = 1; version <= QR_MAX_VERSION; ++version) {
         qr->size = (uint8_t)(17 + 4 * version);
@@ -301,7 +302,7 @@ static int qr_encode_mask(const char *text, struct qr_code *qr, int forced_mask)
     for (i = 0; i < length; ++i) {
         unsigned k;
         for (k = 0; k < 8u; ++k, ++at)
-            if (((unsigned char)text[i] >> (7u - k)) & 1u) codewords[at >> 3] |= (uint8_t)(0x80u >> (at & 7u));
+            if ((data[i] >> (7u - k)) & 1u) codewords[at >> 3] |= (uint8_t)(0x80u >> (at & 7u));
     }
     bit = at;
     if (bit + 4u <= data_count * 8u) bit += 4u;            /* terminator */
@@ -332,9 +333,15 @@ static int qr_encode_mask(const char *text, struct qr_code *qr, int forced_mask)
     return 1;
 }
 
+static int qr_encode_bytes(const uint8_t *data, size_t length, struct qr_code *qr)
+{
+    return qr_encode_bytes_mask(data, length, qr, -1);
+}
 static int qr_encode(const char *text, struct qr_code *qr)
 {
-    return qr_encode_mask(text, qr, -1);
+    size_t length = 0;
+    while (text[length] != '\0') ++length;
+    return qr_encode_bytes((const uint8_t *)text, length, qr);
 }
 
 #endif /* QCOM_USB_QR_H */

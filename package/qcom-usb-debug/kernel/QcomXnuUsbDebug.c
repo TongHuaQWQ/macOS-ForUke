@@ -302,8 +302,8 @@ boot_progress_persist(const char *text, uint32_t colour)
  *
  * Drawing happens on transitions only (init, refusal, a control request, the periodic state refresh),
  * costs tens of microseconds, and never panics, so enumeration keeps running. */
-#define QCOM_USB_FB_ROWS   420u          /* the band this maps, starting at a third of the height */
-#define QCOM_USB_QR_SCALE  8u            /* modules are 8 px, so a version-3 symbol is 232 px */
+#define QCOM_USB_FB_ROWS   640u          /* the band this maps, starting at a third of the height */
+#define QCOM_USB_QR_SCALE  10u           /* 10 px per module: a version-5 symbol is 370 px */
 static volatile uint32_t *qcom_usb_fb;
 static uint32_t qcom_usb_fb_stride, qcom_usb_fb_width, qcom_usb_fb_rows;
 
@@ -416,11 +416,15 @@ static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_
  * as the firmware's OneSend paging, applied to the kernel side where the logs actually are. */
 #define QCOM_USB_FB_FRAMES 8
 #define QCOM_USB_FB_WIDTH  60u          /* up to a version-4 symbol at scale 8, text below */
-static char fb_frames[QCOM_USB_FB_FRAMES][QCOM_USB_FB_WIDTH + 1u];
-static unsigned fb_frame_count, fb_frame_show, fb_frame_tick;
-static char fb_painted_text[QCOM_USB_FB_WIDTH + 1u];
-static unsigned fb_painted_show;
-static int fb_painted_valid;
+/* One payload document, shown a block at a time. */
+#define QCOM_USB_FB_PAYLOAD  480u                 /* 8 OneSend blocks of 60 bytes */
+#define QCOM_USB_FB_TICKS_KEEP  1000u             /* 1 s: repaint so the console cannot cover the card */
+#define QCOM_USB_FB_HOLD_TICKS  8u                /* 8 repaints per block, so 8 s each */
+static uint8_t fb_payload[QCOM_USB_FB_PAYLOAD];
+static size_t fb_payload_len;
+static unsigned fb_payload_dirty = 1u;
+static char fb_state_line[QCOM_USB_FB_WIDTH + 1u];
+static unsigned fb_block_show, fb_tick, fb_hold;
 
 static int fb_same(const char *a, const char *b)
 {
@@ -433,80 +437,174 @@ static void fb_copy(char *to, const char *from)
     while (i < QCOM_USB_FB_WIDTH && from[i] != 0) { to[i] = from[i]; ++i; }
     to[i] = 0;
 }
+/* OneSend framing, so the phone app can assemble a payload instead of the reader copying lines. From
+ * AdvancedLogDxe: frame = "OS", version, session, sequence, block count, block length, payload length,
+ * payload CRC32, one block, then a CRC32 of everything before it. The reference uses 720-byte blocks,
+ * which needs a version-22 symbol; the block length is a header field, so 60-byte blocks keep the
+ * symbol at version 5 with the same structure. */
+#define ONESEND_BLOCK      60u
+#define ONESEND_HEADER     28u
+#define ONESEND_CRC        4u
+#define ONESEND_FRAME_SIZE (ONESEND_HEADER + ONESEND_BLOCK + ONESEND_CRC)
+#define ONESEND_SESSION    0x554B4531u          /* "UKE1" */
+
+static uint32_t crc32_bytes(const uint8_t *data, size_t length)
+{
+    uint32_t crc = 0xffffffffu;
+    size_t i;
+    unsigned bit;
+    for (i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (bit = 0; bit < 8u; ++bit) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+static void put_le32(uint8_t *to, uint32_t value)
+{
+    to[0] = (uint8_t)value; to[1] = (uint8_t)(value >> 8);
+    to[2] = (uint8_t)(value >> 16); to[3] = (uint8_t)(value >> 24);
+}
+static void put_le16(uint8_t *to, uint16_t value)
+{
+    to[0] = (uint8_t)value; to[1] = (uint8_t)(value >> 8);
+}
+static size_t onesend_frame(uint8_t *frame, const uint8_t *payload, size_t length,
+                            unsigned index, unsigned blocks)
+{
+    size_t offset = (size_t)index * ONESEND_BLOCK;
+    size_t chunk = length > offset ? length - offset : 0;
+    unsigned i;
+    if (chunk > ONESEND_BLOCK) chunk = ONESEND_BLOCK;
+    for (i = 0; i < ONESEND_FRAME_SIZE; ++i) frame[i] = 0;
+    frame[0] = 'O'; frame[1] = 'S'; frame[2] = 2; frame[3] = 0;
+    put_le32(frame + 4, ONESEND_SESSION);
+    put_le32(frame + 8, index + index / 4u);     /* the reference's pacing of the sequence */
+    put_le32(frame + 12, blocks);
+    put_le16(frame + 16, ONESEND_BLOCK);
+    put_le16(frame + 18, 0);
+    put_le32(frame + 20, (uint32_t)length);
+    put_le32(frame + 24, crc32_bytes(payload, length));
+    for (i = 0; i < chunk; ++i) frame[ONESEND_HEADER + i] = payload[offset + i];
+    put_le32(frame + ONESEND_HEADER + ONESEND_BLOCK,
+             crc32_bytes(frame, ONESEND_HEADER + ONESEND_BLOCK));
+    return ONESEND_FRAME_SIZE;
+}
+/* Copy the console backlog, oldest first. This ring is the tee of everything the kernel printed after
+ * the console came up, so it is the log the reader actually wants; nothing drains it while USB is not
+ * enumerating, which is exactly when the panel is the only way out. */
+static size_t log_snapshot(uint8_t *out, size_t capacity)
+{
+    size_t capacity_ring = usb_log_buffer.capacity;
+    size_t used = __atomic_load_n(&usb_log_buffer.used, __ATOMIC_RELAXED);
+    size_t tail = usb_log_buffer.tail;
+    size_t i, n = 0;
+    if (capacity_ring == 0 || used == 0) return 0;
+    if (used > capacity) {                       /* keep the newest bytes, that is where the fault is */
+        tail = (tail + (used - capacity)) % capacity_ring;
+        used = capacity;
+    }
+    for (i = 0; i < used && n < capacity; ++i)
+        out[n++] = usb_log_buffer.data[(tail + i) % capacity_ring];
+    return n;
+}
+/* The payload is one consistent document: the newest diagnostic line, then the log tail. Rebuilt only
+ * when the line changes, so the block sequence stays stable long enough to be scanned. */
+static void fb_build_payload(void)
+{
+    size_t used;
+    uint8_t *payload = fb_payload;
+    size_t capacity = sizeof(fb_payload);
+    used = 0;
+    {
+        const char *line = fb_state_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    used += log_snapshot(payload + used, capacity - used - 1u);
+    fb_payload_len = used;
+    fb_payload_dirty = 0;
+}
 static void fb_paint(void)
 {
+    static uint8_t frame[ONESEND_FRAME_SIZE];
     struct qr_code qr;
-    const char *text;
-    uint32_t side, x0, text_x, text_y, card_h, label_y;
-    char label[16];
+    uint32_t side, x0, card_h, text_y, line_y;
+    size_t frame_len;
+    unsigned blocks;
+    char label[28];
     char *p;
-    if (!fb_ready() || fb_frame_count == 0) return;
-    text = fb_frames[fb_frame_show % fb_frame_count];
+    if (!fb_ready()) return;
+    if (fb_payload_len == 0) return;
+    blocks = (unsigned)((fb_payload_len + ONESEND_BLOCK - 1u) / ONESEND_BLOCK);
+    if (blocks == 0) blocks = 1;
+    if (fb_block_show >= blocks) fb_block_show = 0;
+    frame_len = onesend_frame(frame, fb_payload, fb_payload_len, fb_block_show, blocks);
     side = 0;
-    if (qr_encode(text, &qr)) side = (uint32_t)qr.size * QCOM_USB_QR_SCALE;
-    card_h = (side != 0 ? side : 160u) + 96u;
+    if (qr_encode_bytes(frame, frame_len, &qr)) side = (uint32_t)qr.size * QCOM_USB_QR_SCALE;
+    card_h = (side != 0 ? side : 160u) + 120u;
     if (card_h > qcom_usb_fb_rows) card_h = qcom_usb_fb_rows;
-    x0 = qcom_usb_fb_width > side + 32u ? (qcom_usb_fb_width - side) / 2u : 8u;
-    fb_blank(0u, card_h, 0xffffffffu);            /* white card: a dark symbol needs a light field */
+    x0 = qcom_usb_fb_width > side + 24u ? (qcom_usb_fb_width - side) / 2u : 4u;
+    fb_blank(0u, card_h, 0xffffffffu);
     if (side != 0) fb_draw_qr(&qr, x0, 8u, QCOM_USB_QR_SCALE);
-    text_x = x0;
-    text_y = 8u + side + 16u;
-    /* longer lines need a smaller glyph pitch or they run off the panel */
-    {
-        unsigned length = 0;
-        while (text[length] != 0) ++length;
-        fb_text(text_x, text_y, length > 40u ? 4u : 5u, text, 0x00000000u);
-    }
-    label_y = text_y + 40u;
-    if (label_y + 30u > card_h) label_y = card_h > 30u ? card_h - 30u : 0u;
-    label[0] = 'F'; label[1] = 'R'; label[2] = 'A'; label[3] = 'M'; label[4] = 'E'; label[5] = ' ';
-    p = append_decimal(&label[6], fb_frame_show % fb_frame_count + 1u);
+    text_y = 8u + side + 14u;
+    label[0] = 'O'; label[1] = 'S'; label[2] = ' '; label[3] = 'B';
+    p = append_decimal(&label[4], fb_block_show + 1u);
     p = append_text(p, "/");
-    p = append_decimal(p, fb_frame_count);
+    p = append_decimal(p, blocks);
+    p = append_text(p, " len ");
+    p = append_decimal(p, (uint64_t)fb_payload_len);
     *p = 0;
-    fb_text(text_x, label_y, 5u, label, 0x00000000u);
+    fb_text(x0, text_y, 5u, label, 0x00000000u);
+    /* The text carried by this block, so a photo that cannot be scanned still reads. */
+    line_y = text_y + 32u;
+    {
+        size_t at = (size_t)fb_block_show * ONESEND_BLOCK;
+        char line[QCOM_USB_FB_WIDTH + 1u];
+        unsigned n = 0;
+        size_t end_at = at + ONESEND_BLOCK;
+        if (end_at > fb_payload_len) end_at = fb_payload_len;
+        while (at < end_at && n < QCOM_USB_FB_WIDTH) {
+            uint8_t byte = fb_payload[at++];
+            line[n++] = (byte >= 0x20 && byte < 0x7f) ? (char)byte : (byte == '\n' ? '|' : '.');
+        }
+        line[n] = 0;
+        if (n != 0) fb_text(x0, line_y, 4u, line, 0x00000000u);
+    }
 }
-/* Remember a line as the newest frame and show it immediately. Duplicates are dropped so the ring
- * keeps distinct evidence rather than five copies of the same poll result. */
-/* Paint only when what is on the glass would change. Repainting on every new record is what made the
- * card flicker on the b98 round: state lines arrive every 256 polls and during boot the ring was
- * filling, so the whole card was wiped and redrawn several times a second. */
-static void fb_maybe_paint(void)
-{
-    const char *text;
-    if (!fb_ready() || fb_frame_count == 0) return;
-    text = fb_frames[fb_frame_show % fb_frame_count];
-    if (fb_painted_valid && fb_painted_show == fb_frame_show && fb_same(fb_painted_text, text)) return;
-    fb_paint();
-    fb_copy(fb_painted_text, text);
-    fb_painted_show = fb_frame_show;
-    fb_painted_valid = 1;
-}
+/* Record the newest state or request line; it heads the next payload. */
 static void fb_report(const char *first, const char *second)
 {
-    unsigned i;
     (void)second;
-    if (!fb_ready() || first == 0 || first[0] == 0) return;
-    if (fb_frame_count > 0 && fb_same(fb_frames[0], first)) {
-        fb_frame_show = 0;
-        fb_maybe_paint();
-        return;
-    }
-    for (i = QCOM_USB_FB_FRAMES - 1; i > 0; --i) fb_copy(fb_frames[i], fb_frames[i - 1]);
-    fb_copy(fb_frames[0], first);
-    if (fb_frame_count < QCOM_USB_FB_FRAMES) ++fb_frame_count;
-    fb_frame_show = 0;
-    fb_maybe_paint();
+    if (first == 0 || first[0] == 0) return;
+    if (fb_same(fb_state_line, first) && !fb_payload_dirty) return;
+    fb_copy(fb_state_line, first);
+    fb_payload_dirty = 1;
 }
-/* Advance one frame every so many polls (the worker idles at 1 ms, so ~2 s), so a reader can scan the
- * whole set without the screen changing under the camera. */
+/* Slow on purpose: 8 s per block, because a 370 px symbol needs focus and a scan, and the earlier 2 s
+ * cycled faster than the camera could catch it (reported on the b98 round). Every second the card is
+ * repainted in place: the kernel console keeps drawing text and would otherwise sit on top of it. */
 static void fb_cycle(void)
 {
-    if (!fb_ready() || fb_frame_count < 2) return;
-    if (++fb_frame_tick < 2000u) return;
-    fb_frame_tick = 0;
-    fb_frame_show = (fb_frame_show + 1u) % fb_frame_count;
-    fb_maybe_paint();
+    if (!fb_ready()) return;
+    if (++fb_tick < QCOM_USB_FB_TICKS_KEEP) return;
+    fb_tick = 0;
+    if (fb_payload_dirty) {
+        fb_build_payload();
+        fb_block_show = 0;
+        fb_hold = 0;
+        fb_paint();
+        return;
+    }
+    if (++fb_hold >= QCOM_USB_FB_HOLD_TICKS) {
+        unsigned blocks = (unsigned)((fb_payload_len + ONESEND_BLOCK - 1u) / ONESEND_BLOCK);
+        fb_hold = 0;
+        if (blocks > 1u) {
+            fb_block_show = (fb_block_show + 1u) % blocks;
+            fb_paint();
+            return;
+        }
+    }
+    fb_paint();                                   /* keep the card on top of the console */
 }
 
 /* The pram records themselves. Written once per transition, not per byte: a single non-cached store
