@@ -1,5 +1,5 @@
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index ffe7ce0..954c8e9 100644
+index ffe7ce0..fbb25f1 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -107,6 +107,13 @@
@@ -16,7 +16,7 @@ index ffe7ce0..954c8e9 100644
  
  #if (DEVELOPMENT || DEBUG)
  #include <kern/debug.h>
-@@ -1109,11 +1116,217 @@ bsdinit_task(void)
+@@ -1109,11 +1116,229 @@ bsdinit_task(void)
  	lock_trace = 1;
  }
  
@@ -119,7 +119,9 @@ index ffe7ce0..954c8e9 100644
 +	 * Reached only in normal thread context, with preemption enabled and
 +	 * outside every USB guard.
 +	 */
-+	clock_interval_to_deadline(5, NSEC_PER_MSEC, &deadline);
++	/* 1 ms, not 5: this is the only latency between the host's request and our answer while the
++	 * worker has nothing else to do. */
++	clock_interval_to_deadline(1, NSEC_PER_MSEC, &deadline);
 +	if (assert_wait_deadline((event_t)&qcom_usb_worker_state,
 +	    THREAD_UNINT, deadline) == THREAD_WAITING) {
 +		thread_block(THREAD_CONTINUE_NULL);
@@ -182,7 +184,17 @@ index ffe7ce0..954c8e9 100644
 +		if (status.phase != QCOM_USB_DEBUG_ACTIVE) {
 +			break;
 +		}
-+		qcom_usb_debug_poll();
++		/* Stay in the loop while the controller keeps producing events. A control transfer is
++		 * several events, and the host allows SET_ADDRESS only tens of milliseconds: one poll per
++		 * 5 ms sleep turned that into "Device not responding to setup address" (STATE 81). The
++		 * burst is bounded so a chatty endpoint cannot hold this thread forever. */
++		for (unsigned burst = 0; burst < 64u; burst++) {
++			qcom_usb_debug_poll();
++			qcom_usb_debug_get_status(&status);
++			if (status.last_poll_events == 0u) {
++				break;
++			}
++		}
 +		if (control_active) {
 +			qcom_usb_start_reboot_once();
 +		}

@@ -4340,3 +4340,35 @@ work/flash/boot-round-b94-nocomp.img         1122304 B  sha256 6bab1734de52bcbb�
 甚至仍然能读走描述符，那它就是**固件自己的 USB gadget**（UEFI 的 UsbFn/MSD 栈在交接时没有断连），
 我们之前所有"组件已上拉/已应答"的推断都要推翻；若什么都看不到，则之前的设备确实是组件的，
 问题就锁定在 SET_ADDRESS 的状态阶段处理。
+
+### 81b. 对照实验结果 + 找到真正的时序问题
+
+**实验（b94，`qcom-usb-debug=0`）**：主机看到的形态变成了"全速 + `device descriptor read/64, error -32`"，
+而 b93（组件开）是"高速 + `Device not responding to setup address`"。也就是说**设备的形态随组件开关而变**
+⇒ 之前那个高速设备确实是组件连上去的，不是固件残留的 gadget。方向没跑偏。
+
+**真正的可疑点：轮询节奏太慢**。读代码就明白了：
+
+```c
+/* worker 循环（bsd_init.c 补丁） */
+qcom_usb_debug_poll();
+qcom_usb_worker_wait();          /* clock_interval_to_deadline(5, NSEC_PER_MSEC) —— 每轮睡 5 ms */
+
+/* poll_owned()（组件） */
+ret = dwc3_poll(native.core, 1); /* 每次只取 1 个事件 */
+```
+
+一次控制传输 = SETUP 事件 + 数据/状态事件，而主机给 **SET_ADDRESS 的窗口只有几十毫秒**。
+按"1 个事件 / 5 ms"的节奏，SET_ADDRESS 极易超窗 —— 这正是 `Device not responding to setup address`
+（而不是描述符阶段失败）的原因；也解释了为什么第一个 `GET_DESCRIPTOR(8)` 有时成功、有时 `-110` 超时：
+完全取决于那几次轮询是不是刚好落在窗口里。
+
+**修法（两处，都是"把排空做快"）**：
+
+1. 组件：`dwc3_poll(native.core, 1)` → `dwc3_poll(native.core, 128)`（核心上限 256），
+   一次调用就能把一串事件排空；
+2. worker 补丁：poll 之后**只要还有事件就继续 poll**（burst 上限 64 轮，防止话多的端点饿死线程），
+   空闲等待 5 ms → **1 ms**。
+
+两份补丁副本已同步（`scripts/check-patch-copies.py` 通过），`git apply --check` 在干净 12377 树上通过。
+另外 `board.toml` 把 `qcom-usb-debug` 改回 `1`（对照实验已读完），参数 967 B。

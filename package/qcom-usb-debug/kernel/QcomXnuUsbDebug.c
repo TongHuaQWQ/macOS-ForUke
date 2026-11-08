@@ -1030,7 +1030,11 @@ static int poll_owned(void)
     if (native.status.phase != QCOM_USB_DEBUG_ACTIVE) return 0;
     backlog_drain_owned();
     loss_notice_owned();
-    ret = dwc3_poll(native.core, 1);
+    /* Drain a burst, not a single event: one control transfer is a setup event plus data and status
+     * events, and the host gives SET_ADDRESS tens of milliseconds. With a budget of 1 the worker
+     * needed one 5 ms sleep per event, which is exactly the window that failed on this board
+     * ("Device not responding to setup address", STATE 81). The core caps the budget at 256. */
+    ret = dwc3_poll(native.core, 128);
     native.status.poll_calls++;
     native.status.last_poll_events = ret < 0 ? 0u : (uint32_t)ret;
     buffer_status_owned();
