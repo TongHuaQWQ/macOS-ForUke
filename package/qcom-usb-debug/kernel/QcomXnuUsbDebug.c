@@ -418,6 +418,9 @@ static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_
 #define QCOM_USB_FB_WIDTH  60u          /* up to a version-4 symbol at scale 8, text below */
 static char fb_frames[QCOM_USB_FB_FRAMES][QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_frame_count, fb_frame_show, fb_frame_tick;
+static char fb_painted_text[QCOM_USB_FB_WIDTH + 1u];
+static unsigned fb_painted_show;
+static int fb_painted_valid;
 
 static int fb_same(const char *a, const char *b)
 {
@@ -465,6 +468,20 @@ static void fb_paint(void)
 }
 /* Remember a line as the newest frame and show it immediately. Duplicates are dropped so the ring
  * keeps distinct evidence rather than five copies of the same poll result. */
+/* Paint only when what is on the glass would change. Repainting on every new record is what made the
+ * card flicker on the b98 round: state lines arrive every 256 polls and during boot the ring was
+ * filling, so the whole card was wiped and redrawn several times a second. */
+static void fb_maybe_paint(void)
+{
+    const char *text;
+    if (!fb_ready() || fb_frame_count == 0) return;
+    text = fb_frames[fb_frame_show % fb_frame_count];
+    if (fb_painted_valid && fb_painted_show == fb_frame_show && fb_same(fb_painted_text, text)) return;
+    fb_paint();
+    fb_copy(fb_painted_text, text);
+    fb_painted_show = fb_frame_show;
+    fb_painted_valid = 1;
+}
 static void fb_report(const char *first, const char *second)
 {
     unsigned i;
@@ -472,14 +489,14 @@ static void fb_report(const char *first, const char *second)
     if (!fb_ready() || first == 0 || first[0] == 0) return;
     if (fb_frame_count > 0 && fb_same(fb_frames[0], first)) {
         fb_frame_show = 0;
-        fb_paint();
+        fb_maybe_paint();
         return;
     }
     for (i = QCOM_USB_FB_FRAMES - 1; i > 0; --i) fb_copy(fb_frames[i], fb_frames[i - 1]);
     fb_copy(fb_frames[0], first);
     if (fb_frame_count < QCOM_USB_FB_FRAMES) ++fb_frame_count;
     fb_frame_show = 0;
-    fb_paint();
+    fb_maybe_paint();
 }
 /* Advance one frame every so many polls (the worker idles at 1 ms, so ~2 s), so a reader can scan the
  * whole set without the screen changing under the camera. */
@@ -489,7 +506,7 @@ static void fb_cycle(void)
     if (++fb_frame_tick < 2000u) return;
     fb_frame_tick = 0;
     fb_frame_show = (fb_frame_show + 1u) % fb_frame_count;
-    fb_paint();
+    fb_maybe_paint();
 }
 
 /* The pram records themselves. Written once per transition, not per byte: a single non-cached store

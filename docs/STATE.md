@@ -4698,3 +4698,51 @@ PH=18 E=13 CR=-4 G=64 TA=10001 TB=1a0003 TR=7 LT=3
 
 判读顺序（§85c 的表）：先看 `CR` → 再看 `TA`（哪个端点 + 哪条命令）→ 最后看 `TB` 的 `(v>>12)&0xf`（命令状态码）。
 若 `TA` 的高 16 位是 `4`，就是 USB **OUT** 端点的 `SETEPCONFIG` 被拒；是 `5` 则是 **IN** 端点。
+
+---
+
+## 86. b98 真机：二维码给出**确切失败点** —— 少了总线复位后的 `DEPSTARTCFG`
+
+用户扫屏得到的帧（10 帧，逐帧 `FRAME 1/N` 增长，说明环在填充）：
+
+```
+QCOMUSB INIT
+PH 2  E 0 CR 0 G 0 EV 0      TA 0        TB 0     TR 0 LT 0
+PH 3  E 0 CR 0 G 0 EV 0      TA 0        TB 0     TR 0 LT 0
+PH 4  E 0 CR 0 G 0 EV 0      TA 0        TB 0     TR 0 LT 0
+PH 5  E 0 CR 0 G 0 EV 0      TA 0        TB 0     TR 0 LT 0
+PH 6  E 0 CR 0 G 0 EV 0      TA 0        TB 0     TR 0 LT 0
+PH 7  E 0 CR 0 G 0 EV 0      TA 0        TB 0     TR 0 LT 0
+PH 10 E 0 CR 0 G 0 EV 0      TA 0        TB 0     TR 0 LT 0
+PH 16 E 0 CR 0 G 0 EV 0      TA 33313130 TB 0     TR 1 LT 1     ← TRACE_ID，GSNPSID
+PH 18 E 13 CR -4 G 0 EV 201  TA 6        TB 1006 TR 7 LT 3     ← ★ 失败点
+```
+
+**关键的一行**逐项解码：
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| `PH=18` | FIRST_POLL | 预检、GCC/DWC3 映射、SMMU 域、init/start 全部通过 |
+| `E=13` / `CR=-4` | CORE_POLL_FAILED / -4 | 端点命令返回非零状态（与 §85c 推断一致）|
+| `EV=201` | 设备事件类型 2 | **CONNECTDONE**（总线复位后的连接完成）|
+| `TA=6` | 端点 0 + 命令 6 | **STARTTRANSFER**（`setup_phase` 挂 SETUP TRB）|
+| `TB=1006` | `(TB>>12)&0xf = 1` | 命令状态 **Invalid Resource** |
+
+### 结论与修法
+
+`DEPSTARTCFG`（Start New Configuration）在组件里**发过**（`usb/Dwc3.c:560`，初始化阶段），
+但 **USB 总线复位会丢弃端点配置及其传输资源**；复位之后的 `CONNECTDONE` 分支重新
+`SETEPCONFIG` 时，资源其实已经无效，于是紧随其后的 `STARTTRANSFER` 被判 Invalid Resource。
+
+修法：在 `CONNECTDONE` 处理里、配置端点**之前**重新发一次 `DEPSTARTCFG`
+（`ep_command(d, 0, DWC3_DEPCMD_DEPSTARTCFG, 0, 0, 0)`，失败即 `return -4`）。
+`usb/Dwc3.c` 仍可主机编译验证（gcc/clang `-Werror` 均干净）。
+
+### 同时修掉"二维码一闪一闪"
+
+根因：`fb_report()` 每来一条记录就整卡重绘，而状态行每 256 次轮询就更新、启动阶段帧环还在填充，
+于是卡片每秒被擦写多次。改为 **`fb_maybe_paint()`：只有"当前显示的那一帧内容变了"才重绘**
+（记录已显示过的 `fb_painted_text/fb_painted_show`）。
+
+本地探针实测：**1001 次相同记录 → 0 次重绘**（改之前是 1001 次）；来一条新记录 → 1 次；
+轮播前进一帧 → 1 次。gcc/clang `-Werror` 均通过。

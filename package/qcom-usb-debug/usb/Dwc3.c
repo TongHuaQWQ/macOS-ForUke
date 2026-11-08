@@ -435,6 +435,11 @@ static int device_event(struct dwc3 *d, unsigned event)
             speed != DWC3_DSTS_FULLSPEED2) return -6;
         d->full_speed = speed != DWC3_DSTS_HIGHSPEED;
         d->packet_size = d->full_speed ? 64 : 512;
+        /* The bus reset that precedes CONNECTDONE discards the endpoint configuration and with it the
+         * transfer resources, so "start a new configuration" has to be issued again here. Without it
+         * the first STARTTRANSFER on endpoint 0 is refused with status 1, Invalid Resource - which is
+         * exactly what the panel reported: PH=18 E=13 CR=-4 EV=201 TA=6 TB=1006 (STATE 86). */
+        if (ep_command(d, 0, DWC3_DEPCMD_DEPSTARTCFG, 0, 0, 0)) return -4;
         if (configure_ep(d, 0, DWC3_DEPCMD_TYPE_CONTROL, 64, 1) ||
             configure_ep(d, 1, DWC3_DEPCMD_TYPE_CONTROL, 64, 1) ||
             configure_ep(d, EP_IN, DWC3_DEPCMD_TYPE_BULK, d->packet_size, 1) ||
