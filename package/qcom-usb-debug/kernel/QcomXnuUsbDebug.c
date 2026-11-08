@@ -302,9 +302,10 @@ boot_progress_persist(const char *text, uint32_t colour)
  *
  * Drawing happens on transitions only (init, refusal, a control request, the periodic state refresh),
  * costs tens of microseconds, and never panics, so enumeration keeps running. */
-#define QCOM_USB_FB_ROWS 392u
+#define QCOM_USB_FB_ROWS   420u          /* the band this maps, starting at a third of the height */
+#define QCOM_USB_QR_SCALE  8u            /* modules are 8 px, so a version-3 symbol is 232 px */
 static volatile uint32_t *qcom_usb_fb;
-static uint32_t qcom_usb_fb_stride, qcom_usb_fb_width;
+static uint32_t qcom_usb_fb_stride, qcom_usb_fb_width, qcom_usb_fb_rows;
 
 /* 3x5 glyphs, bit 2 = leftmost column: 0-9, A-Z, space, '/', ':', '-', '.' */
 static const uint8_t fb_font[][5] = {
@@ -332,17 +333,29 @@ static int fb_index(char c)
 }
 static int fb_ready(void)
 {
+    uint64_t start, aligned;
+    uint32_t band, rows, skew;
     vm_offset_t mapped;
     if (qcom_usb_fb != 0) return 1;
     if (PE_state.video.v_baseAddr == 0 || PE_state.video.v_depth != 32 ||
         PE_state.video.v_rowBytes < 4 * 16 || PE_state.video.v_width < 16 ||
         PE_state.video.v_height == 0) return 0;
-    mapped = ml_io_map((vm_offset_t)PE_state.video.v_baseAddr,
-                       (vm_size_t)PE_state.video.v_rowBytes * QCOM_USB_FB_ROWS);
+    rows = QCOM_USB_FB_ROWS;
+    if (rows > PE_state.video.v_height) rows = (uint32_t)PE_state.video.v_height;
+    /* A third of the way down, not at the very top: the payload draws its progress bar there and a card
+     * over it is both ugly and easy to miss (reported on the b96 round). Only this band is mapped. */
+    band = (uint32_t)(PE_state.video.v_height / 3u);
+    if (band + rows > PE_state.video.v_height) band = (uint32_t)PE_state.video.v_height - rows;
+    start = (uint64_t)PE_state.video.v_baseAddr + (uint64_t)band * PE_state.video.v_rowBytes;
+    aligned = start & ~(uint64_t)0xFFFull;
+    skew = (uint32_t)(start - aligned);
+    mapped = ml_io_map((vm_offset_t)aligned,
+                       (vm_size_t)((uint64_t)PE_state.video.v_rowBytes * rows + skew + 0x1000u));
     if (mapped == 0) return 0;
-    qcom_usb_fb = (volatile uint32_t *)mapped;
+    qcom_usb_fb = (volatile uint32_t *)(mapped + skew);
     qcom_usb_fb_stride = (uint32_t)(PE_state.video.v_rowBytes / 4u);
     qcom_usb_fb_width = (uint32_t)PE_state.video.v_width;
+    qcom_usb_fb_rows = rows;
     return 1;
 }
 static void fb_text(uint32_t x, uint32_t y, uint32_t scale, const char *text, uint32_t rgb)
@@ -373,8 +386,15 @@ static void fb_text(uint32_t x, uint32_t y, uint32_t scale, const char *text, ui
 }
 /* Two lines in the top band, white over a black backing: the firmware's own output lives further down,
  * and the video console the payload draws is not this kernel's. */
-/* The symbol is what makes the reading exact; the text beside it is the fallback for a photo that is
- * too blurry to scan but good enough to read. */
+
+static void fb_blank(uint32_t y0, uint32_t y1, uint32_t rgb)
+{
+    uint32_t py, i;
+    for (py = y0; py < y1 && py < qcom_usb_fb_rows; ++py) {
+        volatile uint32_t *line = qcom_usb_fb + (size_t)py * qcom_usb_fb_stride;
+        for (i = 0; i < qcom_usb_fb_width; ++i) line[i] = rgb;
+    }
+}
 static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_t scale)
 {
     uint32_t row, col, dy, dx;
@@ -384,7 +404,7 @@ static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_
             if (!qr->modules[row * qr->size + col]) continue;
             py = y + row * scale;
             px = x + col * scale;
-            for (dy = 0; dy < scale && py + dy < QCOM_USB_FB_ROWS; ++dy) {
+            for (dy = 0; dy < scale && py + dy < qcom_usb_fb_rows; ++dy) {
                 volatile uint32_t *line = qcom_usb_fb + (size_t)(py + dy) * qcom_usb_fb_stride + px;
                 for (dx = 0; dx < scale && px + dx < qcom_usb_fb_width; ++dx) line[dx] = 0x00000000u;
             }
@@ -395,7 +415,7 @@ static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_
  * line is rarely the whole answer. A phone scanning the panel collects them one by one - the same idea
  * as the firmware's OneSend paging, applied to the kernel side where the logs actually are. */
 #define QCOM_USB_FB_FRAMES 5
-#define QCOM_USB_FB_WIDTH  47u                  /* fits a version-2 symbol at scale 6 beside the text */
+#define QCOM_USB_FB_WIDTH  47u          /* fits a version-2 symbol at scale 8 beside the text */
 static char fb_frames[QCOM_USB_FB_FRAMES][QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_frame_count, fb_frame_show, fb_frame_tick;
 
@@ -414,27 +434,29 @@ static void fb_paint(void)
 {
     struct qr_code qr;
     const char *text;
-    uint32_t py, i, text_x = 16u;
-    char label[16];                 /* "FRAME 1/5" plus NUL, with room for two digits */
+    uint32_t side, x0, text_x, text_y, card_h, label_y;
+    char label[16];
     char *p;
     if (!fb_ready() || fb_frame_count == 0) return;
     text = fb_frames[fb_frame_show % fb_frame_count];
-    for (py = 4u; py < 232u; ++py) {
-        volatile uint32_t *line = qcom_usb_fb + (size_t)py * qcom_usb_fb_stride;
-        for (i = 0; i < qcom_usb_fb_width; ++i) line[i] = 0xffffffffu;   /* white card for the code */
-    }
-    if (qr_encode(text, &qr)) {
-        fb_draw_qr(&qr, 24u, 20u, 6u);
-        text_x = 24u + (uint32_t)qr.size * 6u + 24u;
-    }
-    /* frame counter, so the reader knows how many more to scan */
+    side = 0;
+    if (qr_encode(text, &qr)) side = (uint32_t)qr.size * QCOM_USB_QR_SCALE;
+    card_h = (side != 0 ? side : 160u) + 96u;
+    if (card_h > qcom_usb_fb_rows) card_h = qcom_usb_fb_rows;
+    x0 = qcom_usb_fb_width > side + 32u ? (qcom_usb_fb_width - side) / 2u : 8u;
+    fb_blank(0u, card_h, 0xffffffffu);            /* white card: a dark symbol needs a light field */
+    if (side != 0) fb_draw_qr(&qr, x0, 8u, QCOM_USB_QR_SCALE);
+    text_x = x0;
+    text_y = 8u + side + 16u;
+    fb_text(text_x, text_y, 5u, text, 0x00000000u);
+    label_y = text_y + 40u;
+    if (label_y + 30u > card_h) label_y = card_h > 30u ? card_h - 30u : 0u;
     label[0] = 'F'; label[1] = 'R'; label[2] = 'A'; label[3] = 'M'; label[4] = 'E'; label[5] = ' ';
     p = append_decimal(&label[6], fb_frame_show % fb_frame_count + 1u);
     p = append_text(p, "/");
     p = append_decimal(p, fb_frame_count);
     *p = 0;
-    fb_text(24u, 200u, 6u, label, 0x00000000u);
-    fb_text(text_x, 24u, 5u, text, 0x00000000u);
+    fb_text(text_x, label_y, 5u, label, 0x00000000u);
 }
 /* Remember a line as the newest frame and show it immediately. Duplicates are dropped so the ring
  * keeps distinct evidence rather than five copies of the same poll result. */
@@ -491,21 +513,51 @@ static void pram_write(unsigned int offset, const char *text, size_t length)
  * core_trace() calls, which only happen if the controller posts events; last_trace is the most recent
  * dwc3_trace value, so "events never arrived" and "events arrived but were not served" look different. */
 static unsigned int pram_polls;
+static char *append_signed(char *to, int value)
+{
+    if (value < 0) {
+        *to++ = '-';
+        return append_decimal(to, (uint64_t)(-(int64_t)value));
+    }
+    return append_decimal(to, (uint64_t)value);
+}
 static void pram_state(void)
 {
-    char text[64];
-    char *p = append_text(text, "QCOMUSB PHASE=");
+    char text[96], panel[96];
+    char *p = append_text(text, "QCOMUSB PH=");
+    char *q = append_text(panel, "PH=");
     p = append_decimal(p, native.status.diag_checkpoint);
-    p = append_text(p, " ERR=");
+    q = append_decimal(q, native.status.diag_checkpoint);
+    p = append_text(p, " E=");
+    q = append_text(q, " E=");
     p = append_decimal(p, native.status.error);
+    q = append_decimal(q, native.status.error);
+    p = append_text(p, " CR=");
+    q = append_text(q, " CR=");
+    p = append_signed(p, (int)native.status.core_result);
+    q = append_signed(q, (int)native.status.core_result);
+    p = append_text(p, " G=");
+    q = append_text(q, " G=");
+    p = append_decimal(p, native.status.core_event_bytes);
+    q = append_decimal(q, native.status.core_event_bytes);
+    p = append_text(p, " EV=");
+    q = append_text(q, " EV=");
+    p = append_hex(p, native.status.core_last_event);
+    q = append_hex(q, native.status.core_last_event);
     p = append_text(p, " TR=");
+    q = append_text(q, " TR=");
     p = append_decimal(p, native.status.traces);
+    q = append_decimal(q, native.status.traces);
+    p = append_text(p, " LT=");
+    q = append_text(q, " LT=");
+    p = append_decimal(p, native.status.last_trace);
+    q = append_decimal(q, native.status.last_trace);
     p = append_text(p, " P=");
     p = append_decimal(p, pram_polls);
-    p = append_text(p, " LAST=");
-    p = append_decimal(p, native.status.last_trace);
     pram_write(QCOM_USB_PRAM_STATE, text, (size_t)(p - text));
-    fb_report(text, 0);
+    /* The panel gets the same fields without the poll counter: that counter changes every 256 polls,
+     * and repainting on every change is what made the card flicker (reported on the b96 round). */
+    fb_report(panel, 0);
 }
 /* Four hex digits, fixed width: a field that shortens when its value is small makes two records
  * impossible to compare at a glance. */
@@ -1180,6 +1232,8 @@ int qcom_usb_debug_init(void)
             native.status.last_poll_events = events < 0 ? 0u : (uint32_t)events;
             if (events < 0 || native.status.io_failed) {
                 usb_diag_polling = 0;
+                native.status.core_event_bytes = dwc3_event_count(native.core);
+                native.status.core_last_event = dwc3_last_event(native.core);
                 fail(QCOM_USB_DEBUG_CORE_POLL_FAILED, events);
                 (void)restore_after_failure(); ret = 0; goto out;
             }
@@ -1221,6 +1275,8 @@ static int poll_owned(void)
     buffer_status_owned();
     if (ret < 0 || native.status.io_failed) {
         native.status.core_result = ret;
+        native.status.core_event_bytes = dwc3_event_count(native.core);
+        native.status.core_last_event = dwc3_last_event(native.core);
         native.status.error = native.deadline_active && native.deadline_expired ? QCOM_USB_DEBUG_DEADLINE_EXPIRED :
                                                       QCOM_USB_DEBUG_CORE_POLL_FAILED;
         native.status.phase = QCOM_USB_DEBUG_IO_FAILED;

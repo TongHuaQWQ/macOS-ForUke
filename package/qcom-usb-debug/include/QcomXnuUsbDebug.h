@@ -79,6 +79,8 @@ typedef struct qcom_usb_debug_status {
     uint32_t dma_address_width, hwparams0;
     uint32_t last_trace, trace_a, trace_b, traces;
     uint32_t poll_calls, last_poll_events, io_failed;
+    /* Captured from the core when a poll fails: the pending event bytes and the last raw event. */
+    uint32_t core_event_bytes, core_last_event;
     uint64_t dma_pa, counter_frequency, cache_line, dropped;
     uint32_t domain_result, domain_stage, domain_bank, domain_slot, domain_asid;
     uint64_t tables_pa, dma_iova, domain_last_address, domain_last_expected, domain_last_readback;

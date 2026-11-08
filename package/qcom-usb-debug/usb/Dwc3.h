@@ -68,6 +68,11 @@ size_t dwc3_queue(struct dwc3 *dev, const void *bytes, size_t count);
  * advances rx_generation so a protocol parser can invalidate its state. */
 size_t dwc3_read(struct dwc3 *dev, void *bytes, size_t count);
 int dwc3_ready(const struct dwc3 *dev);
+/* Diagnosis of a failed poll: the pending event byte count from GEVNTCOUNT, and the raw event
+ * dword the core last decoded. A count larger than the ring means the ring or its address is wrong;
+ * an unrecognised dword means the ring holds something other than events. */
+uint32_t dwc3_event_count(const struct dwc3 *dev);
+uint32_t dwc3_last_event(const struct dwc3 *dev);
 size_t dwc3_queued(const struct dwc3 *dev);
 uint64_t dwc3_dropped(const struct dwc3 *dev);
 size_t dwc3_rx_pending(const struct dwc3 *dev);

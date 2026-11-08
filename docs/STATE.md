@@ -4578,3 +4578,41 @@ work/flash/boot-round-b96-qr.img         1122304 B  sha256 6bab1734de52bcbb…�
    扫一下即得精确字节。
 
 多帧轮播那颗（`a1079b2`）还在 CI 里，出来后作为 b97 备用；b96 用来先验证 SET_ADDRESS 修复是否生效。
+
+---
+
+## 85. b96 真机：**二维码读到了** —— 初始化全过，第一次轮询失败（`PHASE=18 ERR=13`）
+
+刷 b96 后，用户扫屏读到的第一行精确内容：
+
+```
+QCOMUSB PHASE=18 ERR=13 TR=7 P=0 LAST=3
+```
+
+按 §79b 的对照表翻译：
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| `PHASE` | 18 | `DIAG_FIRST_POLL` —— **GCC 映射、SMMU 域、DWC3 init/start 全部通过**，走到第一次轮询 |
+| `ERR` | 13 | `QCOM_USB_DEBUG_CORE_POLL_FAILED` —— `dwc3_poll()` 返回了负值 |
+| `TR` | 7 | `core_trace()` 被调用 7 次 ⇒ 控制器**确实投递了事件**且被吃掉了 |
+| `P` | 0 | 还没有一次 poll 完成（这条记录由 `fail()` 写出） |
+| `LAST` | 3 | `DWC3_TRACE_COMMAND`（枚举：ID=1,TIMEOUT=2,COMMAND=3,…）⇒ 最后一条是端点命令 |
+
+主机侧同轮仍然是 `Device not responding to setup address` + `error -71`，与"轮询失败"一致。
+
+**这是本项目第一次拿到内核侧的结构化自述**（此前只有拍屏/猜），也正是二维码通道的价值。
+但 `ERR=13` 只说"轮询失败了"，没说**哪条路径**失败：`dwc3_poll()` 可能因
+`GEVNTCOUNT > EVENT_BYTES`（-7）、`handle_event` 返回（-4 等）或 `pump()` 失败而退出。
+
+### 于是这一轮补三样（同时修用户反馈的两个体验问题）
+
+1. 记录 `CR=`（`dwc3_poll` 的确切返回值）、`G=`（`GEVNTCOUNT` 待处理字节数）、
+   `EV=`（最后一个原始事件 dword）—— 这三个数能直接分辨"事件环尺寸/地址错"与"事件内容不认识"；
+   核心新增 `dwc3_event_count()` / `dwc3_last_event()` 两个取值口（`usb/Dwc3.c` 已在主机上用
+   `gcc`/`clang -Werror` 编译通过）。
+2. **闪烁**：面板文本里去掉了 `P=`（它每 256 次轮询就变一次，导致整张卡片被反复重绘）；
+   pram 里仍保留完整记录。
+3. **位置**：卡片从屏幕最顶端移到**高度 1/3** 处（避开 payload 的绿色进度条），水平居中，
+   二维码取 scale 8（v2=200 px、v3=232 px），`FRAME n/N` 移到卡片下缘。
+   映射只覆盖该带（按页对齐 + skew 校正），不再整屏映射。

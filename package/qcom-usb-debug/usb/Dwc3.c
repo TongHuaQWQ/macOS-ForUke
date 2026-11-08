@@ -626,6 +626,15 @@ size_t dwc3_read(struct dwc3 *d, void *bytes, size_t count)
     d->rx_used -= (uint32_t)n;
     return n;
 }
+uint32_t dwc3_event_count(const struct dwc3 *d)
+{
+    if (!d || !d->initialized) return 0;
+    return rd((struct dwc3 *)d, DWC3_GEVNTCOUNT(0)) & DWC3_GEVNTCOUNT_MASK;
+}
+uint32_t dwc3_last_event(const struct dwc3 *d)
+{
+    return d ? d->last_event : 0;
+}
 int dwc3_ready(const struct dwc3 *d) { return d && d->running && !d->failed && d->configured && d->dtr; }
 size_t dwc3_queued(const struct dwc3 *d) { return d ? d->tx_used : 0; }
 uint64_t dwc3_dropped(const struct dwc3 *d) { return d ? d->dropped : 0; }
