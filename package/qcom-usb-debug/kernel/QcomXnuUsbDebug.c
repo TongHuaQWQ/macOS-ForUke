@@ -150,6 +150,7 @@ static unsigned int usb_panic_mode = QCOM_USB_PANIC_DEFAULT;
  * errors ("expected identifier or '('"), which is exactly how the round that added this failed. */
 static void pram_state(void);
 static void pram_setup(uint32_t a, uint32_t b);
+static void fb_remember_request(const char *line);
 static void pram_write(unsigned int offset, const char *text, size_t length);
 
 static void diag_checkpoint(unsigned int checkpoint)
@@ -424,6 +425,11 @@ static uint8_t fb_payload[QCOM_USB_FB_PAYLOAD];
 static size_t fb_payload_len;
 static unsigned fb_payload_dirty = 1u;
 static char fb_state_line[QCOM_USB_FB_WIDTH + 1u];
+/* Control requests, newest first: these say how far the host got, which is exactly what the panel is
+ * for while enumeration is being fixed. */
+#define QCOM_USB_FB_REQUESTS 4u
+static char fb_request_lines[QCOM_USB_FB_REQUESTS][QCOM_USB_FB_WIDTH + 1u];
+static unsigned fb_request_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
 static int fb_same(const char *a, const char *b)
@@ -512,11 +518,17 @@ static size_t log_snapshot(uint8_t *out, size_t capacity)
 static void fb_build_payload(void)
 {
     size_t used;
+    unsigned i;
     uint8_t *payload = fb_payload;
     size_t capacity = sizeof(fb_payload);
     used = 0;
     {
         const char *line = fb_state_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    for (i = 0; i < fb_request_count && used + 1u < capacity; ++i) {
+        const char *line = fb_request_lines[i];
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
         if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
     }
@@ -571,7 +583,22 @@ static void fb_paint(void)
         if (n != 0) fb_text(x0, line_y, 4u, line, 0x00000000u);
     }
 }
-/* Record the newest state or request line; it heads the next payload. */
+/* Record the newest state or request line; it heads the next payload. Painting happens right here and
+ * not only in fb_cycle: the worker stops polling once the phase leaves ACTIVE, and a panel that only
+ * the poll loop ever drew then stays blank - which is what happened on the first OneSend build. */
+static void fb_remember_request(const char *line)
+{
+    unsigned i;
+    if (line == 0 || line[0] == 0) return;
+    if (fb_request_count > 0 && fb_same(fb_request_lines[0], line)) return;
+    for (i = QCOM_USB_FB_REQUESTS - 1; i > 0; --i) fb_copy(fb_request_lines[i], fb_request_lines[i - 1]);
+    fb_copy(fb_request_lines[0], line);
+    if (fb_request_count < QCOM_USB_FB_REQUESTS) ++fb_request_count;
+    fb_payload_dirty = 1;
+    fb_build_payload();
+    fb_block_show = 0;
+    fb_paint();
+}
 static void fb_report(const char *first, const char *second)
 {
     (void)second;
@@ -579,6 +606,9 @@ static void fb_report(const char *first, const char *second)
     if (fb_same(fb_state_line, first) && !fb_payload_dirty) return;
     fb_copy(fb_state_line, first);
     fb_payload_dirty = 1;
+    fb_build_payload();
+    fb_block_show = 0;
+    fb_paint();
 }
 /* Slow on purpose: 8 s per block, because a 370 px symbol needs focus and a scan, and the earlier 2 s
  * cycled faster than the camera could catch it (reported on the b98 round). Every second the card is
@@ -721,7 +751,7 @@ static void pram_setup(uint32_t a, uint32_t b)
     p = append_text(p, " n");
     p = append_decimal(p, ++setups);
     pram_write(QCOM_USB_PRAM_SETUP, text, (size_t)(p - text));
-    fb_report(text, 0);
+    fb_remember_request(text);
 }
 /* Small in-band accounting records use no printf/console recursion. */
 static size_t loss_record(char *text, int final)
