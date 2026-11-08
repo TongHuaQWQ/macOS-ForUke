@@ -127,6 +127,15 @@ def main():
                    # PE_state.video carries the framebuffer address the panel diagnostics draw into
                    # (STATE 82); the symbol is exported unconditionally by the kernel.
                    '_PE_state',
+                   # The archive is compiled with the kernel's own flags, which include
+                   # -fsanitize=signed-integer-overflow -fsanitize-minimal-runtime, so signed
+                   # arithmetic emits calls into the kernel's minimal runtime. All five handlers are
+                   # defined by san/memory/ubsan_minimal.c in this XNU revision.
+                   '___ubsan_handle_add_overflow_minimal',
+                   '___ubsan_handle_sub_overflow_minimal',
+                   '___ubsan_handle_mul_overflow_minimal',
+                   '___ubsan_handle_divrem_overflow_minimal',
+                   '___ubsan_handle_negate_overflow_minimal',
                    '_bzero', '_memcpy', '_memset',
                    # Optional: the refusal report goes to the board's diagnostic page when the
                    # kernel has one. It is a weak_import, so a kernel without boot progress still

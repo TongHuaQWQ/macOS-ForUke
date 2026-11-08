@@ -4520,3 +4520,17 @@ qcomusb init: worker reached init -> mask 0 OK
 
 另外把导入审计再补一条 `_PE_state`（`PE_state.video` 是 framebuffer 地址的来源），
 这是本轮 CI 失败的唯一原因（`preflight: 0 error(s)` 之后被自己的白名单拦下）。
+
+### 84b. 又两轮被同一类"内部卫生"挡下（都已修）
+
+| run | commit | 失败原因 | 修法 |
+|---|---|---|---|
+| `42482731090` / `42483098737` | `b31f495` / `7382093` | `unexpected XNU imports: ['_PE_state']`（面板要读 framebuffer 地址） | 白名单加 `_PE_state` |
+| `42483525188` | `0d44c6c` | `unexpected XNU imports: ['___ubsan_handle_{add,sub,mul}_overflow_minimal']` | 白名单加内核 minimal runtime 的**全部五个** handler |
+
+第二条尤其值得记：归档是用**内核自己的编译参数**编的，其中包含
+`-fsanitize=signed-integer-overflow -fsanitize-minimal-runtime`，所以只要代码里有有符号运算，
+就会引用内核的 minimal runtime。五个 handler 在 `san/memory/ubsan_minimal.c` 里都有定义
+（add/sub/mul/divrem/negate），一次登记齐，别再逐个撞。
+
+另外 `board.toml` 的 `qcom-usb-panic` 已改回 `0`（面板不再靠 panic 出信息，panic 只会打断枚举）。
