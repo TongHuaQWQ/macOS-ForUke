@@ -4442,3 +4442,39 @@ QCOMUSB PHASE=12 ERR=0 TR=345 P=1024 LAST=7
 
 新增代码用 gcc 与 clang 的 `-Wall -Wextra -Werror` 各自编译通过，字形表也用 ASCII art 验证过
 （`RT=8000` 五个字形逐个确认）。
+
+---
+
+## 83. b95A（轮询修复）结果一模一样 ⇒ 问题在 SET_ADDRESS 的**顺序**
+
+```
+[9604.909321] usb 3-1.2: new high-speed USB device number 51 using xhci_hcd
+[9604.997474] usb 3-1.2: Device not responding to setup address.
+[9605.205003] usb 3-1.2: Device not responding to setup address.
+[9605.412375] usb 3-1.2: device not accepting address 51, error -71
+```
+
+和 b93 逐字相同 ⇒ **把轮询从"1 事件/5 ms"改成"128 事件 + burst 排空 + 1 ms"并没有改变结果**，
+所以延迟不是瓶颈。剩下的差别只在**请求本身**：第一个 `GET_DESCRIPTOR`（三段式）能过，
+`SET_ADDRESS`（**两段式**）过不去。
+
+组件原来的写法是错的：
+
+```c
+} else if (s[0] == 0 && s[1] == 5 && ...) {          /* SET_ADDRESS */
+    wr(d, DWC3_DCFG, ... | DWC3_DCFG_DEVADDR(value));   /* ← 立刻写新地址 */
+    ok = 1;
+}
+```
+
+DWC3 在 `DCFG.DevAddr` 写入的**瞬间**就采用新地址，于是状态阶段会从**新地址**发出，
+而主机此刻还在 **address 0** 上等状态 —— 主机收不到状态，报的正是
+`Device not responding to setup address`。
+
+修法（`usb/Dwc3.c`）：SET_ADDRESS 只记下地址（`pending_address/address_pending`），
+等状态阶段完成事件到达后再写 DCFG，然后才重新挂 SETUP 传输；总线复位时一并清掉待定地址。
+两种硬件行为下都正确（若核自己也会应用地址，晚写无害；若不会，则状态在旧地址发出、随后立即补写）。
+
+`usb/Dwc3.c` 是 freestanding 的，所以这次**在主机上直接编译验证**：
+`gcc -std=c11 -Wall -Wextra -Werror` 与 `clang` 均干净；`soc/QcomUsbQualify.c`、
+`soc/QcomUsbDmaDomain.c`、`kernel/QcomUsbScreenshot.c` 也一并编译通过。

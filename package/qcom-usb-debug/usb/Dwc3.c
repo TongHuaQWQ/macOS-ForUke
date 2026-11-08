@@ -36,6 +36,7 @@ struct dwc3 {
     uint8_t tx[TX_BYTES], rx[DWC3_RX_BYTES], line_coding[7], control_reply[256];
     uint16_t control_length;
     uint8_t control_state, control_three_stage, configured, dtr;
+    uint8_t pending_address, address_pending;
     uint8_t zlp_pending, running, initialized, full_speed, usb31;
     int failed;
     uint32_t events, commands, last_event;
@@ -296,8 +297,13 @@ static int setup_request(struct dwc3 *d)
         d->control_reply[0] = 0; d->control_reply[1] = 0;
         reply = d->control_reply; n = 2; ok = 1;
     } else if (s[0] == 0 && s[1] == 5 && value <= 127 && index == 0 && length == 0) {
-        wr(d, DWC3_DCFG, (rd(d, DWC3_DCFG) & ~DWC3_DCFG_DEVADDR_MASK) |
-                         DWC3_DCFG_DEVADDR(value));
+        /* DWC3 takes DevAddr the instant it is written, so programming it here makes the core answer
+         * the status stage from the NEW address while the host is still listening on address 0. The
+         * host then reports "Device not responding to setup address" and gives up - which is exactly
+         * what this board did, with the first GET_DESCRIPTOR served correctly (STATE 83). Hold the
+         * address until the status stage has completed. */
+        d->pending_address = (uint8_t)value;
+        d->address_pending = 1;
         ok = 1;
     } else if (s[0] == 0 && s[1] == 9 && index == 0 && length == 0 && value <= 1) {
         int ret = set_configuration(d, value);
@@ -357,6 +363,15 @@ static int control_not_ready(struct dwc3 *d, unsigned ep, unsigned status)
     default: return 0;
     }
 }
+/* Written only after the status stage of SET_ADDRESS has completed: the core must answer that stage
+ * on the old address, and the host switches immediately afterwards. */
+static void apply_address(struct dwc3 *d)
+{
+    if (!d->address_pending) return;
+    d->address_pending = 0;
+    wr(d, DWC3_DCFG, (rd(d, DWC3_DCFG) & ~DWC3_DCFG_DEVADDR_MASK) |
+                     DWC3_DCFG_DEVADDR(d->pending_address));
+}
 static int control_complete(struct dwc3 *d, unsigned ep, uint32_t residual)
 {
     switch (d->control_state) {
@@ -373,7 +388,9 @@ static int control_complete(struct dwc3 *d, unsigned ep, uint32_t residual)
         copy(d->line_coding, buffer(d, 0), 7);
         d->control_state = CTRL_STATUS_IN_WAIT; return 0;
     case CTRL_STATUS_IN_ACTIVE:
-    case CTRL_STATUS_OUT_ACTIVE: return setup_phase(d);
+    case CTRL_STATUS_OUT_ACTIVE:
+        apply_address(d);
+        return setup_phase(d);
     default: return stall(d);
     }
 }
@@ -407,6 +424,7 @@ static int device_event(struct dwc3 *d, unsigned event)
         for (i = 0; i < EP_COUNT; i++) d->active[i] = 0;
         wr(d, DWC3_DALEPENA, 3);
         wr(d, DWC3_DCFG, rd(d, DWC3_DCFG) & ~DWC3_DCFG_DEVADDR_MASK);
+        d->address_pending = 0;
         d->control_state = CTRL_SETUP;
         /* The next CONNECTDONE arms a new SETUP transfer. */
         return 0;
