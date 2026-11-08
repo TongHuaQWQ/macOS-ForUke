@@ -137,7 +137,13 @@ static vm_offset_t qcom_usb_pram_va;
 #define QCOM_USB_PANIC_REFUSAL  1
 #define QCOM_USB_PANIC_REQUEST  2
 #define QCOM_USB_PANIC_POLLS    3
-static unsigned int usb_panic_mode;
+/* The board sets the default from its compile record, because the boot-arg route did not take effect
+ * on the first attempt: with qcom-usb-panic=2 on the command line the host still saw a successful
+ * first GET_DESCRIPTOR followed by a dead SET_ADDRESS, i.e. no panic fired (STATE 81). */
+#ifndef QCOM_USB_PANIC_DEFAULT
+#define QCOM_USB_PANIC_DEFAULT 0
+#endif
+static unsigned int usb_panic_mode = QCOM_USB_PANIC_DEFAULT;
 /* panic() is a macro in this kernel (osfmk/kern/panic_call.h), already visible to this translation
  * unit, so it must not be declared here: an extern declaration is expanded by the macro into syntax
  * errors ("expected identifier or '('"), which is exactly how the round that added this failed. */
@@ -620,9 +626,9 @@ static void core_trace(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t
     if (event == DWC3_TRACE_SETUP) {
         pram_setup(a, b);
         if (usb_panic_mode == QCOM_USB_PANIC_REQUEST)
-            panic("QCOMUSB request rt=%x rq=%x v=%x i=%x l=%x phase=%u",
+            panic("QCOMUSB request rt=%x rq=%x v=%x i=%x l=%x phase=%u mode=%u",
                   a >> 24, (a >> 16) & 0xffu, a & 0xffffu, b >> 16, b & 0xffffu,
-                  native.status.diag_checkpoint);
+                  native.status.diag_checkpoint, usb_panic_mode);
     } else if ((native.status.traces & 63u) == 0u) {
         pram_state();
     }

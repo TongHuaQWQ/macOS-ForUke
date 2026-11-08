@@ -117,7 +117,14 @@ UNITS = ('kernel/QcomXnuUsbDebug.c', 'kernel/QcomUsbScreenshot.c',
 # capture buffer plus a 4 MiB log ring asked for 4x that, and prelink refused with "Native __DATA
 # overlaps a retained segment" (STATE 76). 32 KiB brings the archive's whole footprint to 160 KiB,
 # leaving ~62 KiB of margin; real screenshots need the prelink data range widened first.
-BOARD_DEFINES = ('-DQUD_SCREENSHOT_MAX_BYTES=32768',)
+BOARD_DEFINES = (
+    '-DQUD_SCREENSHOT_MAX_BYTES=32768',
+    # Diagnostic panic mode compiled in, so the experiment does not depend on the boot argument being
+    # parsed: with qcom-usb-panic=2 on the command line the host still saw a served GET_DESCRIPTOR
+    # followed by a dead SET_ADDRESS, i.e. nothing panicked (STATE 81). 2 = panic on every control
+    # request, printing rt/rq/v/i/l and the phase on the panel.
+    '-DQCOM_USB_PANIC_DEFAULT=2',
+)
 
 # 'file:line:col: error: ...' from a compile, and 'error: ...' from the driver itself.
 DIAGNOSTIC = re.compile(r'(^|: )error: ')

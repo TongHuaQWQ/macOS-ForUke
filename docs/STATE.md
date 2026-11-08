@@ -4302,3 +4302,41 @@ work/flash/boot-round-b93-panicreq.img          1122304 B  sha256 6bab1734de52bc
 | 字段乱码/全 0 | SETUP 读到垃圾 ⇒ 域安装/一致性问题（常量已核对无误，见 §80e）|
 | 没有这行、但主机仍看到 high-speed | 事件没投递 ⇒ 事件环 |
 | `QCOMUSB refused err=…` | 预检被拒（本轮 N=2 不该出现，若出现说明 init 提前失败）|
+
+---
+
+## 81. b93 真机：第一个 GET_DESCRIPTOR **成功**了，死在 SET_ADDRESS —— 但 panic 没打出来
+
+```
+[5422.807997] usb 3-1.2: new high-speed USB device number 42 using xhci_hcd
+[5422.808071] usb 3-1.2: Device not responding to setup address.
+[5423.014333] usb 3-1.2: Device not responding to setup address.
+[5423.223128] usb 3-1.2: device not accepting address 42, error -71
+[5423.223549] usb 3-1-port2: unable to enumerate USB device
+```
+
+两点新信息：
+
+1. **失败点往后移了**：之前是 `device descriptor read/64, error -32`（GET_DESCRIPTOR 被 stall），
+   现在是 `Device not responding to setup address`（SET_ADDRESS 无应答）—— 也就是**第一个 8 字节
+   设备描述符是被成功读走的**（否则 xhci 会先打 descriptor read 错误）。
+2. **`qcom-usb-panic=2` 没有生效**：如果它生效，第一个控制请求就会 panic，那样连描述符都读不到。
+   所以要么 boot-arg 没被解析到，要么 panic 路径/渲染没走到。
+
+### 于是做了两件事
+
+**(a) panic 模式不再依赖 boot-arg**：`QCOM_USB_PANIC_DEFAULT` 由板级编译记录注入
+（`BOARD_DEFINES` 里加 `-DQCOM_USB_PANIC_DEFAULT=2`），并把 `mode=%u` 打进 panic 文本，
+这样"参数没生效"和"panic 没渲染"在下一屏就能区分。
+
+**(b) 一个 6 分钟、不用 CI 的对照实验（b94，组件整体关闭）**：
+
+```
+work/flash/vendor_boot_round-b94-nocomp.img  85782528 B  sha256 8d57702167ede766…（内核同 b93，但 qcom-usb-debug=0）
+work/flash/boot-round-b94-nocomp.img         1122304 B  sha256 6bab1734de52bcbb…（= b93 固件）
+```
+
+`qcom-usb-debug=0` 之后内核里没有任何代码碰 DWC3。此时若主机**仍然**看到 high-speed 设备、
+甚至仍然能读走描述符，那它就是**固件自己的 USB gadget**（UEFI 的 UsbFn/MSD 栈在交接时没有断连），
+我们之前所有"组件已上拉/已应答"的推断都要推翻；若什么都看不到，则之前的设备确实是组件的，
+问题就锁定在 SET_ADDRESS 的状态阶段处理。
