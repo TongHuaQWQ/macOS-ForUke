@@ -4534,3 +4534,29 @@ qcomusb init: worker reached init -> mask 0 OK
 （add/sub/mul/divrem/negate），一次登记齐，别再逐个撞。
 
 另外 `board.toml` 的 `qcom-usb-panic` 已改回 `0`（面板不再靠 panic 出信息，panic 只会打断枚举）。
+
+### 84c. 面板二维码改成**多帧轮播**（用户要的"多数据"）
+
+单帧只能放一行，而"为什么枚举失败"往往要好几条线索。于是面板上维护一个 5 帧的环：
+
+- `fb_report()` 每来一条新证据（init / 拒绝 / 每次控制请求 / 每 256 次轮询的状态）就把它推进环首并**立刻显示**；
+- 帧与帧之间按"worker 空闲 1 ms ⇒ 每 2000 次轮询约 2 秒"自动轮换（`fb_cycle()`，由 `qcom_usb_debug_poll()` 驱动），
+  这样手机可以逐帧扫完，中途屏幕不会乱跳；
+- 每帧画面 = 白底 + 二维码（内容就是该帧文本）+ 右侧同文本 + 左下角 `FRAME n/N` 计数，
+  这样"还有几帧要扫"一眼可见；
+- 重复内容不占帧位（只跟环首比较），避免五格都是同一条轮询结果。
+
+本地探针（把面板代码原样抽出来编）：5 条证据正确入环、重复不新增、2000 次轮询后 show 前进一格；
+**并且抓到一个真实的栈溢出** —— `char label[8]` 装不下 `"FRAME 1/5"`，已改为 16 字节。
+
+### 84d. 为什么没有直接用官方的 `AdvancedLogDxe`
+
+官方那份（`UniXNUPkg/Driver/AdvancedLogDxe`，依赖 `QrEncoderLib`）依赖我们树里都有的组件
+（`Common/Mu/MsGraphicsPkg/Library/QrEncoderLib`、`AdvLoggerPkg`），但它的数据来源是
+**UEFI Advanced Logger 的内存缓冲**，需要把固件 `DebugLib` 整体换成 `AdvancedLoggerLib`
+（本机无 UART，还得配 `AdvancedLoggerHdwPortLibNull`）。而我们固件现在所有面板输出
+（`UKE-GCC:`、`pram slot`、`pram find`）正是 `DebugLib → ConOut` 出来的 —— 换掉就等于拿
+**唯一可靠的输出通道**去赌，而且它传的仍是固件日志，不是内核日志。
+
+所以内核侧沿用同一种"多帧轮播"思路（§84c），把真正需要的**内核/USB 状态**扫出来。
+如果之后仍要固件侧的 QR，再单独做，并先在本地确认 `DebugLib` 替换后面板输出没丢。

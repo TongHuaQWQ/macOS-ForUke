@@ -391,21 +391,78 @@ static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_
         }
     }
 }
-static void fb_report(const char *first, const char *second)
+/* Several frames, shown one at a time, because a single symbol cannot carry the whole picture and one
+ * line is rarely the whole answer. A phone scanning the panel collects them one by one - the same idea
+ * as the firmware's OneSend paging, applied to the kernel side where the logs actually are. */
+#define QCOM_USB_FB_FRAMES 5
+#define QCOM_USB_FB_WIDTH  47u                  /* fits a version-2 symbol at scale 6 beside the text */
+static char fb_frames[QCOM_USB_FB_FRAMES][QCOM_USB_FB_WIDTH + 1u];
+static unsigned fb_frame_count, fb_frame_show, fb_frame_tick;
+
+static int fb_same(const char *a, const char *b)
+{
+    while (*a && *b) { if (*a != *b) return 0; ++a; ++b; }
+    return *a == *b;
+}
+static void fb_copy(char *to, const char *from)
+{
+    unsigned i = 0;
+    while (i < QCOM_USB_FB_WIDTH && from[i] != 0) { to[i] = from[i]; ++i; }
+    to[i] = 0;
+}
+static void fb_paint(void)
 {
     struct qr_code qr;
+    const char *text;
     uint32_t py, i, text_x = 16u;
-    if (!fb_ready()) return;
+    char label[16];                 /* "FRAME 1/5" plus NUL, with room for two digits */
+    char *p;
+    if (!fb_ready() || fb_frame_count == 0) return;
+    text = fb_frames[fb_frame_show % fb_frame_count];
     for (py = 4u; py < 232u; ++py) {
         volatile uint32_t *line = qcom_usb_fb + (size_t)py * qcom_usb_fb_stride;
         for (i = 0; i < qcom_usb_fb_width; ++i) line[i] = 0xffffffffu;   /* white card for the code */
     }
-    if (qr_encode(first, &qr)) {
+    if (qr_encode(text, &qr)) {
         fb_draw_qr(&qr, 24u, 20u, 6u);
         text_x = 24u + (uint32_t)qr.size * 6u + 24u;
     }
-    fb_text(text_x, 24u, 6u, first, 0x00000000u);
-    if (second != 0) fb_text(text_x, 76u, 6u, second, 0x00800000u);
+    /* frame counter, so the reader knows how many more to scan */
+    label[0] = 'F'; label[1] = 'R'; label[2] = 'A'; label[3] = 'M'; label[4] = 'E'; label[5] = ' ';
+    p = append_decimal(&label[6], fb_frame_show % fb_frame_count + 1u);
+    p = append_text(p, "/");
+    p = append_decimal(p, fb_frame_count);
+    *p = 0;
+    fb_text(24u, 200u, 6u, label, 0x00000000u);
+    fb_text(text_x, 24u, 5u, text, 0x00000000u);
+}
+/* Remember a line as the newest frame and show it immediately. Duplicates are dropped so the ring
+ * keeps distinct evidence rather than five copies of the same poll result. */
+static void fb_report(const char *first, const char *second)
+{
+    unsigned i;
+    (void)second;
+    if (!fb_ready() || first == 0 || first[0] == 0) return;
+    if (fb_frame_count > 0 && fb_same(fb_frames[0], first)) {
+        fb_frame_show = 0;
+        fb_paint();
+        return;
+    }
+    for (i = QCOM_USB_FB_FRAMES - 1; i > 0; --i) fb_copy(fb_frames[i], fb_frames[i - 1]);
+    fb_copy(fb_frames[0], first);
+    if (fb_frame_count < QCOM_USB_FB_FRAMES) ++fb_frame_count;
+    fb_frame_show = 0;
+    fb_paint();
+}
+/* Advance one frame every so many polls (the worker idles at 1 ms, so ~2 s), so a reader can scan the
+ * whole set without the screen changing under the camera. */
+static void fb_cycle(void)
+{
+    if (!fb_ready() || fb_frame_count < 2) return;
+    if (++fb_frame_tick < 2000u) return;
+    fb_frame_tick = 0;
+    fb_frame_show = (fb_frame_show + 1u) % fb_frame_count;
+    fb_paint();
 }
 
 /* The pram records themselves. Written once per transition, not per byte: a single non-cached store
@@ -1571,6 +1628,7 @@ void qcom_usb_debug_putc(char c) { (void)qcom_usb_debug_write(&c, 1); }
 void qcom_usb_debug_poll(void)
 {
     uint64_t flags;
+    fb_cycle();
     if ((++pram_polls & 255u) == 1u) pram_state();
     if (usb_panic_mode == QCOM_USB_PANIC_POLLS && pram_polls == 64u)
         panic("QCOMUSB poll64 phase=%u err=%u tr=%u last=%u a=%x b=%x",
