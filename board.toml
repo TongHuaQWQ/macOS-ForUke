@@ -445,10 +445,13 @@ kernel_args = [
   # uke_usb_probe_and_freeze(), and uke_usb=1 with no uke_usb_power writes the GDSC and all five USB
   # branch clocks - the same DWC3 the component owns. Its STARTUP still writes the UKEUSB-DISABLED
   # beacon into pram before returning, which is the one piece of evidence worth keeping.
+  # uke_usb=0 alone disables the old probe driver (it returns before touching anything), so sync/hook/
+  # panic are dropped rather than carried as zeros - the 1000-byte command line is full.
   "uke_usb=0",
-  "uke_usb_sync=0",
-  "uke_usb_hook=0",
-  "uke_usb_panic=0",
+  # Panic as soon as the controller hands us a control request, printing the request bytes and the
+  # phase reached. The panel is the only console that has ever shown anything here, and the pram window
+  # does not survive reliably (STATE 80), so one photograph replaces a blind round.
+  "qcom-usb-panic=2",
   "qcom-usb-debug=1",   # the CDC-ACM log console over DWC3 (package/qcom-usb-debug)
   "sheng-pmgr=2",
   "sheng-lite=1",

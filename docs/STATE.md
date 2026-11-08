@@ -4187,3 +4187,48 @@ fastboot boot work/flash/boot-round-b92-pramq.img          # 第二次：读 pra
 pram slot 0x37F000: "QCOMUSB PHASE=… ERR=… TR=… P=… LAST=…"
 pram slot 0x37F100: "QCOMUSB REQ rt… rq… v… i… l… n…"   或 "QCOMUSB INIT (worker reached init)"
 ```
+
+---
+
+## 80. pram 这条通道不可靠（记录写得进去、留不住）——改用**panic 屏**当诊断口
+
+b92 的读数（多帧）：
+
+```
+pram slot 0x1000/0x1100/0x1200/0x37F000/0x37F100: <no printable text>
+pram find "UKEUSB" / "UKELASTLOG" / "QCOMUSB": not present in 3584 KiB
+pram first text: <none: DRAM did not survive, or the kernel never wrote>
+```
+
+但另一帧里明确出现过 `pram slot 0x37F100: "P=0"` —— 也就是**我们的记录确实写过、后来自不见了**。
+结合这块窗口的身份（`make-uke-adt.py` 里注明它对齐 live DT 的 **`llcc_lpi_region@ff800000`**，
+即 LLCC 低功耗 SRAM 区，跨复位保留是有条件的），结论是：
+
+- **不能把 pram 当可靠通道**：写入可能落在，但跨复位保留是碰运气；
+- 这也一次性解释了历史现象：`UKEUSB-*` beacon 从来读不到、`UKELASTLOG` 从来读不到、
+  `pram first text` 永远是 none —— 不是我们的代码没写，是这块区域留不住。
+
+### 换成 panic 屏（这块板子唯一确认可见的控制台）
+
+`board.toml` 里 `panic_screen = true`，之前的 SError panic 就是靠它读出来的。于是给组件加
+boot-arg `qcom-usb-panic=N`：
+
+| N | 行为 |
+|---|---|
+| 1 | `fail()` 时 panic，打印 `err=核心结果=phase=tr=last=` |
+| **2** | **每次控制请求到达时 panic**，打印 `rt/rq/v/i/l` + phase（本轮用这个）|
+| 3 | 第 64 次 poll 时 panic，打印 phase/err/tr/last/trace_a/trace_b |
+
+本轮参数选 `qcom-usb-panic=2`：主机那次 `GET_DESCRIPTOR` 一到，屏上就会直接出现
+`QCOMUSB request rt=… rq=… v=… i=… l=… phase=…`。这一行同时回答三件事：
+
+1. 请求到底有没有到达我们的 gadget（到了就一定有这行）；
+2. 到达的字节是不是**正常的** `rt=8000 rq=0006 v=0100 i=0000 l=0040`（若不是 ⇒ SETUP 读到垃圾 ⇒
+   SMMU/DMA 翻译问题 ⇒ 才会走 `stall()` ⇒ 正好对应主机的 `-32`）；
+3. 卡在哪个 phase（`phase<12` 就是预检被拒，但那种情况会走 N=1 的 fail 分支）。
+
+顺带把三个全 0 的旧开关（`uke_usb_sync/hook/panic`）从命令行删掉（`uke_usb=0` 已足够让旧驱动惰性），
+参数总长 949 + 18 = 967 B，仍在 1000 B 上限内。
+
+固件侧同时升级：`pram slot 0x37F000/0x37F100` 现在除了文本还打 **4 行 × 16 字节的 hex**，
+这样"记录在但前缀被覆盖"也能看出来（本机已编译通过，等下一组镜像）。

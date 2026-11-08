@@ -126,6 +126,19 @@ static int qcom_usb_control_halt_restart(unsigned int type)
 #define QCOM_USB_PRAM_STATE  0x37F000u
 #define QCOM_USB_PRAM_SETUP  0x37F100u
 static vm_offset_t qcom_usb_pram_va;
+/* Diagnostic panics, because the panel is the only console that has ever shown anything on this board
+ * (panic_screen=true in board.toml, which is how the SError was read). Boot-arg qcom-usb-panic selects
+ * what to report and when:
+ *   1  the refusal code, from fail()
+ *   2  every control request as it arrives - the record that says what the host actually asked for
+ *   3  the state after 64 polls, for "initialized but nothing happens"
+ * The pram window was meant to carry this, but its content does not survive reliably (STATE 80), so the
+ * panic screen is the dependable channel. */
+#define QCOM_USB_PANIC_REFUSAL  1
+#define QCOM_USB_PANIC_REQUEST  2
+#define QCOM_USB_PANIC_POLLS    3
+static unsigned int usb_panic_mode;
+extern void panic(const char *format, ...);
 static void pram_state(void);
 static void pram_setup(uint32_t a, uint32_t b);
 static void pram_write(unsigned int offset, const char *text, size_t length);
@@ -371,6 +384,10 @@ static void fail(unsigned int error, int core_result)
     native.status.phase = QCOM_USB_DEBUG_REFUSED;
     native.status.dma_lease_active = native.lease.active;
     pram_state();
+    if (usb_panic_mode == QCOM_USB_PANIC_REFUSAL)
+        panic("QCOMUSB refused err=%u core=%d phase=%u tr=%u last=%u",
+              error, core_result, native.status.diag_checkpoint, native.status.traces,
+              native.status.last_trace);
     /* Say which check refused, on the panel. The module otherwise gives up silently: no USB
      * device appears and nothing anywhere says why, because the console it would have reported
      * on is the one that failed. boot_progress_stage writes into the diagnostic page the board
@@ -600,6 +617,10 @@ static void core_trace(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t
      * its own slot; a periodic refresh keeps the count current without writing on every event. */
     if (event == DWC3_TRACE_SETUP) {
         pram_setup(a, b);
+        if (usb_panic_mode == QCOM_USB_PANIC_REQUEST)
+            panic("QCOMUSB request rt=%x rq=%x v=%x i=%x l=%x phase=%u",
+                  a >> 24, (a >> 16) & 0xffu, a & 0xffffu, b >> 16, b & 0xffffu,
+                  native.status.diag_checkpoint);
     } else if ((native.status.traces & 63u) == 0u) {
         pram_state();
     }
@@ -769,6 +790,11 @@ int qcom_usb_debug_init(void)
     pram_write(QCOM_USB_PRAM_SETUP, reached, sizeof(reached) - 1u);
     if (native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
         int diagnostic = 0;
+        int panic_mode = 0;
+        if (PE_parse_boot_argn("qcom-usb-panic", &panic_mode, sizeof(panic_mode)) &&
+            panic_mode >= QCOM_USB_PANIC_REFUSAL && panic_mode <= QCOM_USB_PANIC_POLLS) {
+            usb_panic_mode = (unsigned int)panic_mode;
+        }
         if (QUD_PSCI_SMC_RESET &&
             PE_parse_boot_argn("qcom-usb-diag", &diagnostic, sizeof(diagnostic)) &&
             (diagnostic == 1 || diagnostic == 2 || (diagnostic >= 101 && diagnostic <= 119) ||
@@ -1410,6 +1436,10 @@ void qcom_usb_debug_poll(void)
 {
     uint64_t flags;
     if ((++pram_polls & 255u) == 1u) pram_state();
+    if (usb_panic_mode == QCOM_USB_PANIC_POLLS && pram_polls == 64u)
+        panic("QCOMUSB poll64 phase=%u err=%u tr=%u last=%u a=%x b=%x",
+              native.status.diag_checkpoint, native.status.error, native.status.traces,
+              native.status.last_trace, native.status.trace_a, native.status.trace_b);
     uint8_t control_bytes[SXNU_CONTROL_WORK_BYTES];
     struct qcom_usb_debug_status control_status = {0};
     uint32_t generation = 0;
