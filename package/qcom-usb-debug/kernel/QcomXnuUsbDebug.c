@@ -432,6 +432,12 @@ static char fb_request_lines[QCOM_USB_FB_REQUESTS][QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_request_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
+static int mem_equal(const uint8_t *a, const uint8_t *b, size_t length)
+{
+    size_t i;
+    for (i = 0; i < length; ++i) if (a[i] != b[i]) return 0;
+    return 1;
+}
 static int fb_same(const char *a, const char *b)
 {
     while (*a && *b) { if (*a != *b) return 0; ++a; ++b; }
@@ -533,6 +539,10 @@ static void fb_build_payload(void)
         if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
     }
     used += log_snapshot(payload + used, capacity - used - 1u);
+    if (used == fb_payload_len && mem_equal(payload, fb_payload, used)) {
+        fb_payload_dirty = 0;
+        return;
+    }
     fb_payload_len = used;
     fb_payload_dirty = 0;
 }
@@ -607,7 +617,6 @@ static void fb_report(const char *first, const char *second)
     fb_copy(fb_state_line, first);
     fb_payload_dirty = 1;
     fb_build_payload();
-    fb_block_show = 0;
     fb_paint();
 }
 /* Slow on purpose: 8 s per block, because a 370 px symbol needs focus and a scan, and the earlier 2 s
@@ -706,14 +715,12 @@ static void pram_state(void)
     q = append_text(q, " TB=");
     p = append_hex(p, native.status.trace_b);
     q = append_hex(q, native.status.trace_b);
+    /* TR and LT stay in the pram record only: they change on every trace, and a panel payload that
+     * changes every second cannot be scanned (reported on the b101 round). */
     p = append_text(p, " TR=");
-    q = append_text(q, " TR=");
     p = append_decimal(p, native.status.traces);
-    q = append_decimal(q, native.status.traces);
     p = append_text(p, " LT=");
-    q = append_text(q, " LT=");
     p = append_decimal(p, native.status.last_trace);
-    q = append_decimal(q, native.status.last_trace);
     p = append_text(p, " P=");
     p = append_decimal(p, pram_polls);
     pram_write(QCOM_USB_PRAM_STATE, text, (size_t)(p - text));
@@ -739,6 +746,7 @@ static void pram_setup(uint32_t a, uint32_t b)
     static unsigned int setups;
     char text[64];
     char *p = append_text(text, "QCOMUSB REQ rt");
+    char *q;
     p = append_hex16(p, a >> 24);
     p = append_text(p, " rq");
     p = append_hex16(p, (a >> 16) & 0xffu);
@@ -748,9 +756,13 @@ static void pram_setup(uint32_t a, uint32_t b)
     p = append_hex16(p, b >> 16);
     p = append_text(p, " l");
     p = append_hex16(p, b & 0xffffu);
+    /* The request counter goes to pram only: on the panel it would change the payload on every retry of
+     * the same request, and a symbol that changes cannot be scanned (STATE 89b). */
+    q = p;
     p = append_text(p, " n");
     p = append_decimal(p, ++setups);
     pram_write(QCOM_USB_PRAM_SETUP, text, (size_t)(p - text));
+    *q = 0;
     fb_remember_request(text);
 }
 /* Small in-band accounting records use no printf/console recursion. */
