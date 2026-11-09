@@ -169,6 +169,11 @@ archives = [
   # libQcomXnuUsbDebug.a (package/qcom-usb-debug), built against this tree's own compile records with
   # soc/Uke.h. The kernel links it when CONFIG_XNU_QCOM_USB_DEBUG is on, which it now is.
   "build-qcom-usb-debug.py",
+  # libUkeUfsLog.a (package/UfsLog.cpp + package/UfsLogKernel.c): the freestanding UFS transport that
+  # gives UkeLastLog.c's userdata half its native_ufs_log_* symbols without CONFIG_XNU_NATIVE_UFS.
+  # configs/uke-macos_defconfig force-loads it through CONFIG_XNU_EXTRA_LD_ARCHIVES, so a configuration
+  # with CONFIG_XNU_LOG_USERDATA=y links it and one without builds it and links nothing.
+  "build-ufs-log.py",
   # The comparison kernel the fileset prelink reads, last, as upstream's 26/27 archives do:
   #   "The 27 kernel archives end with build-fileset-release-reference.py --tree ., the comparison
   #    kernel the prelink step reads." (docs/devices/sheng.md)
@@ -439,6 +444,23 @@ kernel_args = [
   "sheng-data-persist=2",
   # "sheng-staged-apps=1",   (see the note above: dropped for the 1000-byte command-line cap)
   "sheng-log=1",
+  # The userdata copy of the message buffer (package/UkeLastLog.c, UKE_LOG_USERDATA): an absolute
+  # first/last LBA of userdata on LUN 0, so the writer can open the last 32 MiB of it and append one
+  # 16 KiB record every 2 s. Absolute, because the transport sends SCSI READ/WRITE(10) LBAs while the
+  # recovery-side dd counts from the partition start.
+  #
+  # Where the two numbers come from. [userdata] above records the GPT entry (0x2d3000..0x38417fa) and
+  # that record is stale: the live partition is 58,988,539 4K blocks of 225 GiB starting at 2,961,408,
+  # so its last LBA is 2,961,408 + 58,988,539 - 1 = 61,949,946 and the 32 MiB window starts at
+  # 61,941,755 -- which is the LBA the previous port's driver logged ("opens LBA61941755") and the
+  # same 8192 blocks TWRP reads at skip=58980347 of /dev/block/sda32. The arithmetic is the check:
+  # a stale end would move the window silently, which is why the start is passed too.
+  #
+  # Names, not sheng-log-*: the pram writer's sheng-log=1 is upstream's switch, these two belong to
+  # the freestanding UFS writer in package/UfsLog.cpp. They are short on purpose -- the command line
+  # is capped at 1000 bytes and 949 were already in use.
+  "uke-log-first=2961408",
+  "uke-log-last=61949946",
   # The old probe driver (package/uke_usb.c) is now inert, on purpose. Three of its switches would
   # each stop the boot before QcomXnuUsbDebug's worker runs: uke_usb_sync=1 panics inside its
   # STARTUP by design ("uke_usb_sync=1's whole purpose"), uke_usb_hook=1 reaches

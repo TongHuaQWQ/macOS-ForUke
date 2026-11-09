@@ -80,6 +80,16 @@ extern "C" void ufslog_unlock(void *lock);
 static void IOLockLock(void *lock) { ufslog_lock(lock); }
 static void IOLockUnlock(void *lock) { ufslog_unlock(lock); }
 // Freestanding, like the driver's own bare-metal harness: no libc in the kernel link.
+//
+// The kernel already defines all three -- osfmk/arm64/bcopy.s (_memcpy), osfmk/arm64/bzero.s (_bzero)
+// and osfmk/device/subrs.c (_strcmp, reachable as strcmp_impl) -- so an object that *defined* them
+// again would be a duplicate symbol at the link, and -force_load puts this object in unconditionally.
+// They are only declared here, and defined only for a build outside the kernel: the host/EL1 check
+// runs this file with -DUKE_UFS_LOG_STANDALONE, where nothing else provides them.
+extern "C" void *memcpy(void *out, const void *in, size_t n);
+extern "C" int strcmp(const char *a, const char *b);
+extern "C" void bzero(void *out, size_t n);
+#ifdef UKE_UFS_LOG_STANDALONE
 extern "C" void *memcpy(void *out, const void *in, size_t n)
 {
   auto d = static_cast<uint8_t *>(out); auto s = static_cast<const uint8_t *>(in);
@@ -91,12 +101,12 @@ extern "C" int strcmp(const char *a, const char *b)
   while (*a && *a == *b) { ++a; ++b; }
   return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
-extern "C" void *bzero(void *out, size_t n)
+extern "C" void bzero(void *out, size_t n)
 {
   auto d = static_cast<uint8_t *>(out);
   for (size_t i = 0; i < n; ++i) d[i] = 0;
-  return out;
 }
+#endif
 
 #include "RootDiagnostics.h"
 
@@ -232,8 +242,14 @@ extern "C" int native_ufs_log_open(uint64_t *firstLba, uint64_t *blocks, const c
   int ok = 0;
   uint32_t first = 0, last = 0;
 
-  if (!ufslog_boot_arg_u32("sheng-log-first-lba", &first) ||
-      !ufslog_boot_arg_u32("sheng-log-last-lba", &last)) {
+  // Absolute first/last LBA of userdata on LUN 0: board.toml [payload] kernel_args carries them, read
+  // off the tablet's own GPT. They are absolute because RootCommands.h sends plain SCSI
+  // READ(10)/WRITE(10) LBAs, while the recovery-side dd counts from the partition -- the window this
+  // file opens is therefore the same 32 MiB dd reads at (partition_blocks - 8192) 4096-byte blocks.
+  // uke-log-first is a cross-check on the recorded end: if userdata was resized, the end alone would
+  // move the window silently into whatever follows it.
+  if (!ufslog_boot_arg_u32("uke-log-first", &first) ||
+      !ufslog_boot_arg_u32("uke-log-last", &last)) {
     reason = "no geometry";
   } else if (last <= first || (uint64_t(last) - first + 1) < kLogWindowBlocks) {
     reason = "partition too small";

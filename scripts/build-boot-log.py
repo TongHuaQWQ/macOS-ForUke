@@ -13,8 +13,15 @@ OUT.mkdir(parents=True, exist_ok=True)
 STARTUP_RECORD = 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json'
 KERN_EXEC_RECORD = 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o.json'
 
+# CONFIG_XNU_LOG_USERDATA=y in the defconfig becomes XNU_LOG_USERDATA=1 here. With it, UkeLastLog.c
+# compiles the userdata half too: the 16 KiB record it appends to the last 32 MiB of userdata every
+# two seconds, through the three native_ufs_log_* calls that build-ufs-log.py's archive defines. The
+# half stays out of the pram-only configurations (CONFIG_XNU_BOOT_LOG without the switch), where
+# nothing defines those symbols and the object would fail the link.
+USERDATA_LOG = os.environ.get('XNU_LOG_USERDATA') == '1'
 
-def compile_source(source, record_name, obj):
+
+def compile_source(source, record_name, obj, extra=()):
     record = json.loads((ROOT / record_name).read_text().strip().rstrip(','))
     command = []
     args = record['arguments']
@@ -32,30 +39,30 @@ def compile_source(source, record_name, obj):
         elif not arg.startswith('-W'):
             command.append(arg)
         i += 1
-    command += ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Werror']
+    command += ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Werror', *extra]
     subprocess.run(command, cwd=record['directory'], check=True, timeout=120)
     (OUT / (obj.stem + '-compile-command.json')).write_text(json.dumps(command, indent=2) + '\n')
     return hashlib.sha256(source.read_bytes()).hexdigest(), hashlib.sha256(obj.read_bytes()).hexdigest()
 
 
 sources = [
-    ('UkeLastLog.c', STARTUP_RECORD, 'UkeLastLog.o'),
+    ('UkeLastLog.c', STARTUP_RECORD, 'UkeLastLog.o', ['-DUKE_LOG_USERDATA=1'] if USERDATA_LOG else []),
     # Kernel entry points this configuration does not build but the prelinked
     # fileset calls by name (csr_check and friends).
-    ('MissingKernelSymbols.c', STARTUP_RECORD, 'MissingKernelSymbols.o'),
-    ('BootWatchdogPolicy.c', KERN_EXEC_RECORD, 'BootWatchdogPolicy.o'),
-    ('CrashLogProbe.c', KERN_EXEC_RECORD, 'CrashLogProbe.o'),
+    ('MissingKernelSymbols.c', STARTUP_RECORD, 'MissingKernelSymbols.o', []),
+    ('BootWatchdogPolicy.c', KERN_EXEC_RECORD, 'BootWatchdogPolicy.o', []),
+    ('CrashLogProbe.c', KERN_EXEC_RECORD, 'CrashLogProbe.o', []),
 ]
-report = {}
+report = {'userdata_log': USERDATA_LOG}
 objects = []
-for name, record, obj_name in sources:
+for name, record, obj_name, extra in sources:
     # The kit appears as kits/uke inside the build tree, but the archive scripts run
     # with the device checkout as ROOT, where those sources are in package/.
     source = ROOT / 'kits/uke' / name
     if not source.is_file():
         source = ROOT / 'package' / name
     obj = OUT / obj_name
-    source_sha, object_sha = compile_source(source, record, obj)
+    source_sha, object_sha = compile_source(source, record, obj, extra)
     report[name] = {'source_sha256': source_sha, 'object_sha256': object_sha}
     objects.append(obj)
 
@@ -71,4 +78,5 @@ subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, objects)], check=T
 report['archive_sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
 report['hardware_execution'] = False
 (OUT / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
-print('PASS: strict source-kernel ARM64 pram writer, watchdog policy and crash probe build')
+print('PASS: strict source-kernel ARM64 pram writer, watchdog policy and crash probe build'
+      + (', with the userdata log half' if USERDATA_LOG else ' (pram only)'))

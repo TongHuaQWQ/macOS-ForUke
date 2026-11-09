@@ -1250,6 +1250,34 @@ static uint64_t reserveBlocks (void)
   return static_cast<uint64_t> (cached);
 }
 
+// The log window does not need the root image, only where userdata ends. Both numbers are known at
+// build time -- the device repository records them from the tablet's own GPT -- so they can arrive as
+// boot arguments instead of being discovered by walking LUN 0's GPT and reading the root manifest,
+// which is what findRootLayout() does and what drags in the verified-root machinery.
+//
+// uke-log-first / uke-log-last are absolute 4096-byte LBAs of the userdata partition, the same two
+// arguments package/UfsLog.cpp reads.
+// Only first/last are filled: imageBytes stays 0, so native_ufs_log_open()'s "does the window overlap
+// the root image" test degenerates to "is the window inside the partition", which is the only part of
+// it that means anything when no root image is being served.
+static bool geometryFromBootArgs (void)
+{
+  // 32-bit on purpose: PE_parse_boot_argn's size argument makes this the same call shape as
+  // reserveBlocks() below, and a 4 KiB-block LBA below 2^32 covers 16 TiB of userdata.
+  uint32_t first = 0, last = 0;
+  if (!PE_parse_boot_argn ("uke-log-first", &first, sizeof (first))) return false;
+  if (!PE_parse_boot_argn ("uke-log-last", &last, sizeof (last))) return false;
+  if (last <= first || (static_cast<uint64_t> (last) - first + 1) < kLogReserveBlocks) return false;
+  gStoreGeometry.valid = true;
+  gStoreGeometry.first = first;
+  gStoreGeometry.last = last;
+  gStoreGeometry.imageBytes = 0;
+  gStoreGeometry.entriesLba = 0;
+  gStoreGeometry.headerCrc = 0;
+  gStoreGeometry.entriesCrc = 0;
+  gStoreGeometry.entryCount = 0;
+  return true;
+}
 static unsigned storeMode (void)
 {
   static int cached = -1;
@@ -1364,7 +1392,8 @@ extern "C" int native_ufs_log_open (uint64_t *firstLba, uint64_t *blocks, const 
   const char *reason = "";
   int ok = 0;
   if (!logMode ()) reason = "off";
-  else if (!gStoreGeometry.valid || !gHost.ready) reason = "no root layout";
+  else if (!gStoreGeometry.valid && !geometryFromBootArgs ()) reason = "no root layout";
+  else if (!gHost.ready) reason = "no host";
   else if (gLogRegionBlocks) reason = "already open";
   else {
     uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;

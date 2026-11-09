@@ -254,6 +254,15 @@ uke_last_log_write(void)
 int native_ufs_log_open(uint64_t *firstLba, uint64_t *blocks, const char **why);
 int native_ufs_log_write(uint64_t rel, uint32_t blocks, const void *src);
 int native_ufs_log_sync(void);
+// package/UfsLogKernel.c: maps the host controller and apps-SMMU windows, allocates the transport
+// buffer and lock, stops the firmware's request list, programs the UFS stream's SMMU context and
+// proves the result with a NOP OUT. Three symbols above then serve the window it attached to.
+//
+// Called once, not on every tick: it rewrites SMMU routing and stops the boot chain's request list,
+// so an unbounded retry would keep re-entering that sequence. UKE_UFS_START_ATTEMPTS spaced ticks is
+// enough to ride out an early failure and still stop for good afterwards.
+#define UKE_UFS_START_ATTEMPTS 5
+int ufs_log_start(const char **why);
 #endif
 
 #if UKE_LOG_USERDATA
@@ -271,6 +280,8 @@ uke_crc32(const uint8_t *data, size_t length)
 }
 
 static uint8_t ukeUfsBuffer[UKE_UFS_RECORD_BYTES] __attribute__((aligned(4096)));
+static bool ukeUfsStarted;
+static unsigned ukeUfsStartAttempts;
 static bool ukeUfsOpen;
 static bool ukeUfsRefused;
 static uint64_t ukeUfsBlocks;
@@ -314,17 +325,34 @@ uke_ufs_publish(void)
 	if (ukeUfsRefused) {
 		return;
 	}
+	// Before the window: the transport that serves it. UfsLogKernel.c owns everything the kernel has
+	// to do itself -- map 0x01d84000+0x3000 and the apps SMMU, allocate the contiguous request list,
+	// stop the firmware's list, program stream 0x60 and send one NOP OUT. It is idempotent once it
+	// succeeds, and it is what makes native_ufs_log_* exist at all without CONFIG_XNU_NATIVE_UFS.
+	if (!ukeUfsStarted) {
+		const char *why = "";
+		if (!ufs_log_start(&why)) {
+			if (++ukeUfsStartAttempts < UKE_UFS_START_ATTEMPTS) {
+				return;
+			}
+			IOLog("UkeLastLog: userdata log transport unavailable: %s\n",
+			    why != NULL && why[0] != '\0' ? why : "(no reason)");
+			ukeUfsRefused = true;
+			return;
+		}
+		ukeUfsStarted = true;
+		IOLog("UkeLastLog: userdata log transport attached\n");
+	}
 	if (!ukeUfsOpen) {
 		const char *why = "";
 		uint64_t first = 0, blocks = 0;
 		if (!native_ufs_log_open(&first, &blocks, &why)) {
-			// "off" and "no root layout" are the normal states before the
-			// storage driver has started; anything else will not change.
-			if (why != NULL && strcmp(why, "off") != 0 &&
-			    strcmp(why, "no root layout") != 0) {
-				IOLog("UkeLastLog: userdata log window unavailable: %s\n", why);
-				ukeUfsRefused = true;
-			}
+			// The geometry arrives as uke-log-first/uke-log-last from board.toml, and hostLogOpen
+			// already knows the transport answered a NOP OUT, so none of these reasons is going to
+			// change on a later tick.
+			IOLog("UkeLastLog: userdata log window unavailable: %s\n",
+			    why != NULL && why[0] != '\0' ? why : "(no reason)");
+			ukeUfsRefused = true;
 			return;
 		}
 		ukeUfsBlocks = blocks;

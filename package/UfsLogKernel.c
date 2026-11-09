@@ -38,7 +38,9 @@ extern int ufs_log_attach(const struct UfsLogMaps *maps, const char **why);
 static uintptr_t gUfsLogHc;
 static uintptr_t gUfsLogSmmu;
 static void     *gUfsLogDma;
-static uintptr_t gUfsLogDmaPhys;
+// IOPhysicalAddress, not uintptr_t: IOMallocContiguous takes IOPhysicalAddress* and on arm64 macOS that
+// is `unsigned long long` while uintptr_t is `unsigned long`, which is an incompatible-pointer warning.
+static IOPhysicalAddress gUfsLogDmaPhys;
 static void     *gUfsLogLock;
 static bool      gUfsLogStarted;
 static const char *gUfsLogWhy = "not started";
@@ -162,7 +164,14 @@ ufs_log_start(const char **why)
   if (gUfsLogDma == NULL || gUfsLogLock == NULL) {
     // Contiguous, because the transport hands the controller one physical address for the request list
     // and the data area. IOMallocContiguous is what the storage driver uses for the same reason.
+    //
+    // The declaration is marked deprecated (the replacement, IOBufferMemoryDescriptor, is an IOKit
+    // object and this file deliberately has no IOKit object graph), so the one warning it produces is
+    // silenced here rather than for the whole file.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     gUfsLogDma = IOMallocContiguous(UFSLOG_DMA_BYTES, 4096, &gUfsLogDmaPhys);
+#pragma clang diagnostic pop
     if (gUfsLogDma == NULL) {
       gUfsLogWhy = "dma buffer";
       if (why != NULL) {
