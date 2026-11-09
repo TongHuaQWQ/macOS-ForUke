@@ -88,10 +88,51 @@ def tool(name):
     return path
 
 
+def record_probing():
+    """Exercise build-ufs-log.py's compile-record probing, which the round cannot test any other way.
+
+    unixnu's own note says it: "with CONFIG_XNU_BUILD_LTO the records sit next to the LTO objects and the
+    path probed above need not exist". So the build must find whatever record is actually there, say
+    which one it used, and fail with the paths it probed when there is none -- not with a traceback.
+    """
+    module = ROOT / 'scripts/build-ufs-log.py'
+    spec = importlib.util.spec_from_file_location('build_ufs_log_probe', module)
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    with tempfile.TemporaryDirectory(prefix='ufs-log-record-') as temporary:
+        tree = Path(temporary)
+        records = tree / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
+        (records / 'bsd/DEVELOPMENT').mkdir(parents=True)
+        wanted = records / 'bsd/DEVELOPMENT/bsd_init.o.json'
+        wanted.write_text('{"file": "bsd_init.c", "directory": ".", "arguments": []}')
+        late = records / 'osfmk/DEVELOPMENT/IOPlatformExpert.cpo.json'
+        late.parent.mkdir(parents=True)
+        late.write_text('{"file": "IOPlatformExpert.cpp", "directory": ".", "arguments": []}')
+        build.ROOT, build.RECORDS = tree, records.relative_to(tree).as_posix()
+
+        name, note = build.find_record((build.C_RECORD,), 'c')
+        if name != 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o.json' or note:
+            raise SystemExit(f'record probing: expected the exact path with no note, got {name!r} {note!r}')
+        name, note = build.find_record((build.CXX_RECORD,), 'cpp')
+        if not name.endswith('IOPlatformExpert.cpo.json') or 'no cpp record' not in note:
+            raise SystemExit(f'record probing: expected the glob fallback with a note, got {name!r} {note!r}')
+        (records / 'bsd/DEVELOPMENT/bsd_init.o.json').unlink()
+        (records / 'osfmk/DEVELOPMENT/IOPlatformExpert.cpo.json').unlink()
+        try:
+            build.find_record((build.C_RECORD,), 'c')
+        except SystemExit as failure:
+            if 'probed' not in str(failure):
+                raise SystemExit(f'record probing: unhelpful failure: {failure}')
+        else:
+            raise SystemExit('record probing: a missing record must fail, not return something')
+        print('PASS: compile records are probed, the fallback is named, and a missing one fails loudly')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('-v', '--verbose', action='store_true', help='show compiler output')
     options = parser.parse_args()
+    record_probing()
     clang, clangxx = tool('clang'), tool('clang++')
     linker, nm = tool('ld.lld'), tool('llvm-nm')
 

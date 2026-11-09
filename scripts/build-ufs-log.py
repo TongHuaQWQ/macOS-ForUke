@@ -61,8 +61,20 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/uke-ufs-log'
 OUT.mkdir(parents=True, exist_ok=True)
 RECORDS = 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
-CXX_RECORD = f'{RECORDS}/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
+# The record paths are probed, not assumed. unixnu's own comment on the bootstrap pass says it plainly:
+# "with CONFIG_XNU_BUILD_LTO the records sit next to the LTO objects and the path probed above need not
+# exist" -- and this configuration is an LTO build. The C record below is the one archive-16
+# (build-uke-usb.py) already builds against successfully; the C++ one has no such proof, so it is first
+# attempted at the historical path, then at the other plausible spellings, then by glob.
 C_RECORD = f'{RECORDS}/bsd/DEVELOPMENT/bsd_init.o.json'
+C_RECORD_ALTERNATES = (f'{RECORDS}/osfmk/DEVELOPMENT/startup.o.json',)
+CXX_RECORD = f'{RECORDS}/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
+CXX_RECORD_ALTERNATES = (
+    f'{RECORDS}/iokit/DEVELOPMENT/IOPlatformExpert.o.json',
+    f'{RECORDS}/libkern/DEVELOPMENT/OSObject.cpo.json',
+    f'{RECORDS}/libkern/c++/DEVELOPMENT/OSObject.cpo.json',
+    f'{RECORDS}/osfmk/DEVELOPMENT/startup.cpo.json',
+)
 # native_ufs_log_* are what UkeLastLog.c calls; ufs_log_start is what it calls before them.
 EXPORTS = ('native_ufs_log_open', 'native_ufs_log_write', 'native_ufs_log_sync', 'ufs_log_start')
 # Imports that must never appear: the kernel link has no C++ runtime.
@@ -71,6 +83,31 @@ FORBIDDEN_PREFIXES = ('__cxa_', '__gxx_', '_Unwind_', '__dynamic_cast', '__si_')
 
 def load_record(name):
     return json.loads((ROOT / name).read_text().strip().rstrip(','))
+
+
+def find_record(candidates, what):
+    """First existing record of the candidates, else any record, else a precise failure.
+
+    Falling back to *any* record is safe because a record only supplies the kernel's global command line
+    (triple, PAC options, include set, defines); the file, -o and dependency flags are rewritten and the
+    language is forced for the C++ unit. What it must not do is fail quietly with a path nobody can
+    check from the log.
+    """
+    probed = []
+    for name in candidates:
+        probed.append(name)
+        if (ROOT / name).is_file():
+            return name, ''
+    # Prefer a C++ record (.cpo) over a C one (.o): the latter compiles this unit only because main()
+    # forces -x c++, which is a fallback, not a preference.
+    found = sorted((path.relative_to(ROOT).as_posix()
+                    for path in (ROOT / RECORDS).rglob('*.json')
+                    if path.name.endswith(('.o.json', '.cpo.json'))),
+                   key=lambda name: (0 if name.endswith('.cpo.json') else 1, name))
+    if found:
+        return found[0], f' (no {what} record at any expected path; used {found[0]} from {RECORDS})'
+    raise SystemExit(f'no compile record for the {what} unit; probed {", ".join(probed)} and found no '
+                     f'*.o.json / *.cpo.json under {RECORDS}')
 
 
 def rewrite(record, source, obj, extra):
@@ -137,15 +174,28 @@ def main():
 
     report = {}
     objects = []
-    for name, record_name, extra in (
-            ('UfsLog.cpp', CXX_RECORD, includes + warnings + ['-fno-exceptions', '-fno-rtti']),
-            ('UfsLogKernel.c', C_RECORD, includes + warnings)):
+    units = (
+        # source, records to try, flags, and the flags that make a C record serve a C++ unit. The last
+        # two are appended after the record's own command line, and clang takes the last -x / -std.
+        ('UfsLog.cpp', (CXX_RECORD,) + CXX_RECORD_ALTERNATES,
+         includes + warnings + ['-fno-exceptions', '-fno-rtti'], ['-x', 'c++', '-std=c++17']),
+        ('UfsLogKernel.c', (C_RECORD,) + C_RECORD_ALTERNATES, includes + warnings, []),
+    )
+    for name, candidates, extra, language in units:
         source = ROOT / 'kits/uke' / name
         if not source.is_file():
             source = ROOT / 'package' / name
+        record_name, note = find_record(candidates, Path(name).suffix.lstrip('.'))
+        # A record from the wrong language still supplies the right global flags; -x c++ says so.
+        if language and not record_name in candidates[:1]:
+            extra = extra + language
+            note += f' (forced {language[1]})' if not note else note
         obj = OUT / (Path(name).stem + '.o')
         source_sha, object_sha = compile_unit(source, record_name, obj, extra)
-        report[name] = {'source_sha256': source_sha, 'object_sha256': object_sha}
+        report[name] = {'source_sha256': source_sha, 'object_sha256': object_sha,
+                        'record': record_name, 'record_note': note}
+        if note:
+            print(f'{name}: {note}')
         objects.append(obj)
 
     archive = OUT / 'libUkeUfsLog.a'

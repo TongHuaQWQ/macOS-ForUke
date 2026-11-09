@@ -136,6 +136,12 @@ def main():
                    '___ubsan_handle_mul_overflow_minimal',
                    '___ubsan_handle_divrem_overflow_minimal',
                    '___ubsan_handle_negate_overflow_minimal',
+                   # The kernel's own log API: iokit/Kernel/IOLib.c, part of the kernel link, not a
+                   # kext. The driver sends its traces here so that msgbuf carries them, because
+                   # package/UkeLastLog.c snapshots the tail of msgbuf into the last 32 MiB of userdata
+                   # every two seconds -- the one channel that can be read with dd in recovery, instead
+                   # of photographing the panel or hoping the pram survived a reset.
+                   '_IOLog',
                    '_bzero', '_memcpy', '_memset',
                    # Optional: the refusal report goes to the board's diagnostic page when the
                    # kernel has one. It is a weak_import, so a kernel without boot progress still
