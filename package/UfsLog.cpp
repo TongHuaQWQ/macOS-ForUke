@@ -86,6 +86,11 @@ extern "C" void *memcpy(void *out, const void *in, size_t n)
   for (size_t i = 0; i < n; ++i) d[i] = s[i];
   return out;
 }
+extern "C" int strcmp(const char *a, const char *b)
+{
+  while (*a && *a == *b) { ++a; ++b; }
+  return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
 extern "C" void *bzero(void *out, size_t n)
 {
   auto d = static_cast<uint8_t *>(out);
@@ -136,6 +141,84 @@ static IOReturn recordTransport(IOReturn result, uint32_t ocs)
 #include "RootTransportLayout.h"
 #include "TransferPoll.h"
 #include "RootCommands.h"
+#include "RootQueue.h"
+#include "SmmuTakeover.h"
+
+// ---- attaching to the controller the boot chain left running --------------------------------------
+//
+// Everything below the IOKit line is here, not in the kernel glue: stopping the firmware's request list,
+// planning and programming the SMMU context bank for the UFS stream, starting our own list, and proving
+// the transport with a NOP. Those are the driver's own RootQueue.h and SmmuTakeover.h, which are
+// IOKit-free by construction -- the same code that ran on hardware as NativeUfs's probe.
+//
+// What the kernel glue still owns is the three things only the kernel can do: map the two register
+// windows, allocate one physically contiguous DMA buffer, and allocate a lock.
+struct UfsLogMaps {
+  uintptr_t hc;      // virtual base of the host controller window (0x1d84000, 0x3000 bytes)
+  uintptr_t smmu;    // virtual base of the apps SMMU
+  uint8_t *dma;      // virtual address of a contiguous buffer of at least kDmaBytes
+  uint64_t dmaPhys;  // its physical address, 4096-byte aligned
+  void *lock;        // an IOLock
+};
+
+static uint32_t smmuRead(unsigned offset) { return read32(gHost.smmu, offset); }
+
+struct SmmuReader {
+  uint32_t operator()(unsigned offset) const { return smmuRead(offset); }
+};
+struct SmmuWriter {
+  void operator()(unsigned offset, uint32_t value) const
+  {
+    write32(gHost.smmu, offset, value);
+    ufslog_barrier();
+  }
+};
+
+extern "C" int ufs_log_attach(const struct UfsLogMaps *maps, const char **why)
+{
+  if (why) *why = "";
+  if (!maps || !maps->hc || !maps->smmu || !maps->dma || !maps->dmaPhys || !maps->lock ||
+      (maps->dmaPhys & 4095)) {
+    if (why) *why = "bad maps";
+    return 0;
+  }
+  if (gHost.ready) return 1;
+  if (gHost.poisoned) {
+    if (why) *why = "transport quarantined";
+    return 0;
+  }
+
+  gHost.hc = maps->hc;
+  gHost.smmu = maps->smmu;
+  gHost.virt = maps->dma;
+  gHost.phys = maps->dmaPhys;
+  gHost.lock = maps->lock;
+
+  bzero(gHost.virt, kDmaBytes);
+  cacheCivac(gHost.virt, kDmaBytes);
+
+  // The firmware's list has to be stopped before its SMMU routing is touched.
+  if (!hostStopQueue(why)) return 0;
+
+  // UFS stream 0x60, the same stream the driver's probes used on this board.
+  UfsSmmuPlan plan = planUfsSmmu(0x60, gHost.phys, kDmaBytes, SmmuReader());
+  const char *failure = configureUfsSmmu(plan, 0x60, SmmuReader(), SmmuWriter());
+  if (failure) {
+    if (why) *why = failure;
+    return 0;
+  }
+  gHost.cb = gHost.smmu + (plan.pages + plan.bank) * 4096;
+
+  if (!hostStartQueue(why)) return 0;
+
+  // A NOP OUT proves the transport before the SCSI layer is asked for anything.
+  if (hostNop() != kIOReturnSuccess) {
+    if (why) *why = "NOP OUT";
+    return 0;
+  }
+  gHost.ready = true;
+  return 1;
+}
 
 // ---- the log window ------------------------------------------------------------------------------
 
