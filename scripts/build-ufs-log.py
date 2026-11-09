@@ -94,8 +94,13 @@ def rewrite(record, source, obj, extra):
 
 
 def xnu_root(record):
-    """The source root the record was compiled in: the directory that owns iokit/IOKit."""
-    directory = Path(record['directory']).resolve()
+    """The source root the record was compiled in: the directory that owns iokit/IOKit.
+
+    A record's "directory" is the working directory its command ran in, which for this tree is the
+    patched xnu source. It is normally absolute; joining it onto ROOT first makes a relative one work
+    too (ROOT / an absolute path is that path).
+    """
+    directory = (ROOT / record['directory']).resolve()
     for candidate in (directory, *directory.parents):
         if (candidate / 'iokit/IOKit/IOLocks.h').is_file():
             return candidate
