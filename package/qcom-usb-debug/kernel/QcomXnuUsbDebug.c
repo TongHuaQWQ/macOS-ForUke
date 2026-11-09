@@ -445,6 +445,19 @@ static unsigned fb_request_count;
 #define QCOM_USB_FB_TRACES 4u
 static char fb_trace_lines[QCOM_USB_FB_TRACES][36];
 static unsigned fb_trace_count;
+/* The newest control request in block-0 form.
+ *
+ * The payload is 480 bytes and the card shows it 60 bytes at a time, so one photograph catches block 0
+ * and nothing else unless the state happens to sit still for 16 s. Measured on the b107 round: the
+ * state line "PH=19 E=0 CR=0 S=2 ER=0 LS=0 TA=00000000 TB=00000000" is 52 characters, so block 0 ended
+ * exactly one character into the first trace ("T9 90c2"), cutting the values that mattered in half.
+ *
+ * Block 0 therefore carries the state line -- with the all-zero TA/TB pair omitted, which is the common
+ * case -- followed by this one line: the setup packet, which is what tells GET_DESCRIPTOR apart from
+ * SET_ADDRESS on sight, plus how many the host has sent. The full request history and the traces keep
+ * their place further down, where a longer capture still reaches them. */
+static char fb_setup_line[32];
+static unsigned fb_setup_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
 static int mem_equal(const uint8_t *a, const uint8_t *b, size_t length)
@@ -545,6 +558,12 @@ static void fb_build_payload(void)
     used = 0;
     {
         const char *line = fb_state_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    /* Second in the block on purpose: see fb_setup_line. */
+    if (fb_setup_line[0] != 0) {
+        const char *line = fb_setup_line;
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
         if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
     }
@@ -752,14 +771,19 @@ static void pram_state(void)
     q = append_decimal(q, native.status.core_link_state);
     /* Fixed eight-digit fields: a photographed frame has to be unambiguous, and variable-width hex made
      * TA=0 TB=6 versus TA=6 TB=0 impossible to tell apart on the b105 round (STATE 92). */
-    p = append_text(p, " TA=");
-    q = append_text(q, " TA=");
-    p = append_hex32(p, native.status.command_a);
-    q = append_hex32(q, native.status.command_a);
-    p = append_text(p, " TB=");
-    q = append_text(q, " TB=");
-    p = append_hex32(p, native.status.command_b);
-    q = append_hex32(q, native.status.command_b);
+    /* A refused endpoint command is the one thing TA/TB report, so an all-zero pair is omitted rather
+     * than printed: 23 characters of every frame spent saying nothing, in the one line that has to fit
+     * block 0 (measured on b107; see fb_setup_line). */
+    if (native.status.command_a != 0 || native.status.command_b != 0) {
+        p = append_text(p, " TA=");
+        q = append_text(q, " TA=");
+        p = append_hex32(p, native.status.command_a);
+        q = append_hex32(q, native.status.command_a);
+        p = append_text(p, " TB=");
+        q = append_text(q, " TB=");
+        p = append_hex32(p, native.status.command_b);
+        q = append_hex32(q, native.status.command_b);
+    }
     p = append_text(p, " G=");
     p = append_decimal(p, native.status.core_event_bytes);
     p = append_text(p, " EV=");
@@ -811,6 +835,18 @@ static void pram_setup(uint32_t a, uint32_t b)
     pram_write(QCOM_USB_PRAM_SETUP, text, (size_t)(p - text));
     *q = 0;
     fb_remember_request(text);
+    {
+        char *r = append_text(fb_setup_line, "R");
+        r = append_hex16(r, a >> 24);
+        r = append_hex16(r, (a >> 16) & 0xffu);
+        r = append_text(r, " v");
+        r = append_hex16(r, a & 0xffffu);
+        r = append_text(r, " l");
+        r = append_hex16(r, b & 0xffffu);
+        r = append_text(r, " #");
+        r = append_decimal(r, ++fb_setup_count);
+        *r = 0;
+    }
 }
 /* Small in-band accounting records use no printf/console recursion. */
 static size_t loss_record(char *text, int final)
