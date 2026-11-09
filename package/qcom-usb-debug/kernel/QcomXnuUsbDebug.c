@@ -740,14 +740,16 @@ static void pram_state(void)
     q = append_text(q, " LS=");
     p = append_decimal(p, native.status.core_link_state);
     q = append_decimal(q, native.status.core_link_state);
+    /* Fixed eight-digit fields: a photographed frame has to be unambiguous, and variable-width hex made
+     * TA=0 TB=6 versus TA=6 TB=0 impossible to tell apart on the b105 round (STATE 92). */
     p = append_text(p, " TA=");
     q = append_text(q, " TA=");
-    p = append_hex(p, native.status.command_a);
-    q = append_hex(q, native.status.command_a);
+    p = append_hex32(p, native.status.command_a);
+    q = append_hex32(q, native.status.command_a);
     p = append_text(p, " TB=");
     q = append_text(q, " TB=");
-    p = append_hex(p, native.status.command_b);
-    q = append_hex(q, native.status.command_b);
+    p = append_hex32(p, native.status.command_b);
+    q = append_hex32(q, native.status.command_b);
     p = append_text(p, " G=");
     p = append_decimal(p, native.status.core_event_bytes);
     p = append_text(p, " EV=");
@@ -762,6 +764,16 @@ static void pram_state(void)
     /* The panel line is stable by construction: every field in it changes only on a real transition, so
      * an unchanged report repaints nothing (reported on the b101 round). */
     fb_report(panel, 0);
+}
+/* Eight hex digits, fixed width, for the same reason as append_hex16 and because a 4-bit command status
+ * hides in the middle of the word: TB's bits 12..15 are CmdStatus, so TB=00001006 is a refused
+ * StartTransfer (status 1) and TB=00000006 is the same command with status 0. */
+static char *append_hex32(char *to, uint32_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    int shift;
+    for (shift = 28; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
+    return to;
 }
 /* Four hex digits, fixed width: a field that shortens when its value is small makes two records
  * impossible to compare at a glance. */

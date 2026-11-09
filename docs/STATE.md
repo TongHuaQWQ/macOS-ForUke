@@ -5227,3 +5227,65 @@ tshark -r uke-b105.pcap -V | less             # 或 Wireshark 打开
 
 这一份抓包能一次分辨：设备是否真的回 ACK、状态阶段（零长度 OUT）主机到底有没有发、数据阶段是否在总线上
 被打断、以及设备地址切换前后的行为。
+
+## 92. b105 真机：**更早**失败了（`-110`），面板指出 CONNECTDONE 处理里有一处 `-4`
+
+### 92a. 这一轮读到的（4 张 OneSend 帧 + 主机 dmesg）
+
+面板状态行（block 0 的 60 列切片，`\` 为 `=`）：
+
+```
+PH 19 E 0 CR 0 S 0 ER 1 LS 0 TA 0 TB 6 T1 80000004 201 T3 …
+```
+
+- `PH 19`（比 b103 的 18 更进一步）、`E 0` `CR 0` —— **没有硬失败**（"不再上锁"的改动生效：坏事件只计数）；
+- `ER 1` —— 轮询**吞掉**了 1 个错误，这是新计数器；
+- `S 0` `LS 0` —— 控制状态回到 SETUP、链路在 U0（说明 PHY 没被挂起）；
+- 事件历史：`T1 33313130 10420086` = **GSNPSID 0x33313130（DWC_usb31）+ GHWPARAMS3 0x10420086**
+  ⇒ 32 个物理端点、16 个 IN 端点（第二参数终于有了）；
+- `T5 80060100 40` = SETUP `GET_DESCRIPTOR(rt=80 rq=06 v=0100 l=40)` —— **主机第一条请求到了并被解码**；
+- `T7 80000004 201` = 我新加的"事件处理失败"标记（`0x80000000 | -ret`，`ret=-4`）＋ 事件字 `0x201`
+  ⇒ **`CONNECTDONE` 的处理里有一处返回了 -4**（`0x201` bit0=1、类型 `(>>8)&0xf`=2 = CONNECTDONE）。
+
+主机侧却比 b103 更早失败：
+
+```
+xhci_hcd: Timeout while waiting for setup device command      ×2
+usb 3-1.2: device descriptor read/64, error -110
+usb 3-1.2: device descriptor read/64, error -71
+usb 3-1.2: Device not responding to setup address.            ×2
+usb 3-1.2: device not accepting address 39/40, error -71
+usb 3-1-port2: unable to enumerate USB device
+```
+
+即：设备 ACK 了 SETUP、我们也解码了，但**数据阶段没上线**，主机等到超时。
+
+### 92b. 两个都在本轮新代码里的嫌疑，都已改掉
+
+**(1) `CONNECTDONE` 重新配置时没有重新分配 transfer resource。**
+`DEPSTARTCFG` 会把资源分配**丢掉**，所以之后必须用 `modify=0` 重新走 `SETEPCONFIG + SETTRANSFRESOURCE`。
+b99 只补了 `DEPSTARTCFG`，`configure_ep` 仍是 `modify=1` ⇒ 端点没有资源 ⇒ 第一次 `STARTTRANSFER` 被
+`CmdStatus=1`（Invalid Resource，`TB=1006`）拒掉 —— 就是 b96 那个错误。现在改成 `modify=0`，
+并且**每个子步骤失败都留下可辨认的标记**：`0xc0de0001`=`DEPSTARTCFG`、`0002`=端点配置、`0003`=武装 SETUP。
+
+**(2) 2 秒看门狗会取消"正在等主机"的传输。**
+`dwc3_poll()` 里只要 `control_state != CTRL_SETUP` 且 2000 次轮询没事件，就 `ENDTRANSFER` 并重挂 SETUP。
+主机的重试间隔是秒级，于是这个看门狗恰好会在数据阶段等着主机时把传输**取消掉** —— 这足以把
+"b103 能把描述符送上去"变成"b105 直接 `-110`"。现在：**只要 `ep0`/`ep1` 还有 TRB 挂着就绝不计时**，
+阈值提到 6000 次轮询（约 6 秒），且只从"两个端点都没挂东西"的状态里恢复。
+
+### 92c. 面板 `TA`/`TB` 改成**定宽 8 位十六进制**
+
+b105 的照片里 `TA 0 TB 6` 到底是 `TA=0 TB=6` 还是 `TA=6 TB=0`（`TA` 是 `(ep<<16)|cmd`，`TB` 是
+`DEPCMD` 回读值，`TB` 的 bit12..15 才是 `CmdStatus`）无法分辨，照片 OCR 也不可靠。现在固定 8 位：
+
+```
+PH=19 E=0 CR=0 S=0 ER=1 LS=0 TA=00000000 TB=00001006      ← 52 列（上限 60）
+```
+
+`TB=00001006` = `STARTTRANSFER`(cmd 6) 被拒且 `CmdStatus=1`；`TB=00000006` = 同一条命令、状态 0。
+
+### 92d. 本地模型
+
+`tests/test_dwc3.c` 全绿（`clang -fsanitize=address,undefined -Werror`），包含
+"一条 `XferNotReady` 都不发也能走完枚举"和"预挂被拒后退回事件驱动"两个新用例。

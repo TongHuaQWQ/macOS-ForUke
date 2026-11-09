@@ -474,12 +474,26 @@ static int device_event(struct dwc3 *d, unsigned event)
          * transfer resources, so "start a new configuration" has to be issued again here. Without it
          * the first STARTTRANSFER on endpoint 0 is refused with status 1, Invalid Resource - which is
          * exactly what the panel reported: PH=18 E=13 CR=-4 EV=201 TA=6 TB=1006 (STATE 86). */
-        if (ep_command(d, 0, DWC3_DEPCMD_DEPSTARTCFG, 0, 0, 0)) return -4;
-        if (configure_ep(d, 0, DWC3_DEPCMD_TYPE_CONTROL, 64, 1) ||
-            configure_ep(d, 1, DWC3_DEPCMD_TYPE_CONTROL, 64, 1) ||
-            configure_ep(d, EP_IN, DWC3_DEPCMD_TYPE_BULK, d->packet_size, 1) ||
-            configure_ep(d, EP_OUT, DWC3_DEPCMD_TYPE_BULK, d->packet_size, 1)) return -4;
-        return setup_phase(d);
+        if (ep_command(d, 0, DWC3_DEPCMD_DEPSTARTCFG, 0, 0, 0)) {
+            trace(d, DWC3_TRACE_BAD_EVENT, 0xc0de0001u, rd(d, DWC3_DEPCMD(0)));
+            return -4;
+        }
+        /* DEPSTARTCFG throws away the transfer resource allocation, so every endpoint has to be
+         * configured from scratch here: modify=0 re-issues SETTRANSFRESOURCE. Keeping modify=1 (as this
+         * did until STATE 92) leaves the endpoints without a resource, and the first STARTTRANSFER is
+         * then refused with CmdStatus=1, Invalid Resource - the b96 failure, TB=1006. */
+        if (configure_ep(d, 0, DWC3_DEPCMD_TYPE_CONTROL, 64, 0) ||
+            configure_ep(d, 1, DWC3_DEPCMD_TYPE_CONTROL, 64, 0) ||
+            configure_ep(d, EP_IN, DWC3_DEPCMD_TYPE_BULK, d->packet_size, 0) ||
+            configure_ep(d, EP_OUT, DWC3_DEPCMD_TYPE_BULK, d->packet_size, 0)) {
+            trace(d, DWC3_TRACE_BAD_EVENT, 0xc0de0002u, rd(d, DWC3_DEPCMD(0)));
+            return -4;
+        }
+        if (setup_phase(d)) {
+            trace(d, DWC3_TRACE_BAD_EVENT, 0xc0de0003u, rd(d, DWC3_DEPCMD(0)));
+            return -4;
+        }
+        return 0;
     }
     if (event == DWC3_DEVT_EVNTOVERFLOW || event == DWC3_DEVT_ERRTICERR) {
         /* Report it, then keep going: stopping here would leave endpoint 0 armed with nothing while the
@@ -668,18 +682,14 @@ int dwc3_poll(struct dwc3 *d, unsigned budget)
         }
     }
     if (pump(d)) d->errors++;
-    if (d->control_state == CTRL_SETUP || done) d->stalled_polls = 0;
-    else if (++d->stalled_polls > 2000u) {
-        /* The host walks away from a transfer that stops making progress, and a polled driver would then
-         * wait on endpoint 0 forever. About two seconds of silence with a control transfer still open
-         * is the signal to cancel it and re-arm SETUP (STATE 89). */
+    if (d->control_state == CTRL_SETUP || done || d->active[0] || d->active[1]) d->stalled_polls = 0;
+    else if (++d->stalled_polls > 6000u) {
+        /* Recovery for a control transfer that lost its TRB: six seconds with nothing armed and no
+         * event. It must never fire while a transfer is armed and waiting for the host - cancelling
+         * that transfer is how the b105 round turned a served descriptor into a -110 timeout
+         * (STATE 92). */
         d->stalled_polls = 0;
         trace(d, DWC3_TRACE_TIMEOUT, 0x4354524Cu, (uint32_t)d->control_state);
-        if (d->control_state == CTRL_IN_ACTIVE ||
-            d->control_state == CTRL_STATUS_IN_ACTIVE) end_transfer(d, 1);
-        if (d->control_state == CTRL_OUT_ACTIVE ||
-            d->control_state == CTRL_STATUS_OUT_ACTIVE) end_transfer(d, 0);
-        d->active[0] = d->active[1] = 0;
         d->control_state = CTRL_SETUP;
         if (setup_phase(d)) d->errors++;
     }
