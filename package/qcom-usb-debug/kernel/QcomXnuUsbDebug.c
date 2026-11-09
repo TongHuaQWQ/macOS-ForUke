@@ -13,6 +13,10 @@
 #include <machine/machine_routines.h>
 #include <kern/cpu_number.h>
 #include <pexpert/pexpert.h>
+/* IOLog, for the msgbuf copy of this driver's evidence: package/UkeLastLog.c snapshots the tail of
+ * msgbuf into the last 32 MiB of userdata every two seconds, so an IOLog line is readable with dd in
+ * recovery while the panel and the pram both need someone standing in front of the tablet. */
+#include <IOKit/IOLib.h>
 
 #define NATIVE_CONTEXT_BYTES DWC3_CONTEXT_BYTES
 #define GCC_BYTES QUD_GCC_BYTES
@@ -795,6 +799,9 @@ static void pram_state(void)
     p = append_text(p, " P=");
     p = append_decimal(p, pram_polls);
     pram_write(QCOM_USB_PRAM_STATE, text, (size_t)(p - text));
+    /* The same record into msgbuf, which is what makes it readable without a camera: `text` already
+     * carries the QCOMUSB tag the firmware's printable-run scan looks for, so it goes out unchanged. */
+    IOLog("%s\n", text);
     /* The panel line is stable by construction: every field in it changes only on a real transition, so
      * an unchanged report repaints nothing (reported on the b101 round). */
     fb_report(panel, 0);
@@ -1125,6 +1132,11 @@ static void core_trace(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t
         *p = 0;
         if (fb_trace_count == 0 || !fb_same(fb_trace_lines[0], line)) {
             unsigned i;
+            /* New trace lines only, and into msgbuf as well: the panel keeps four of them and needs a
+             * photograph, while the userdata log keeps the tail of everything this boot said. That is
+             * what separates "the controller never posted an event" from "it posted one the state
+             * machine refused" without a second hardware round. */
+            IOLog("QCOMUSB %s\n", line);
             for (i = QCOM_USB_FB_TRACES - 1; i > 0; --i) fb_copy(fb_trace_lines[i], fb_trace_lines[i - 1]);
             fb_copy(fb_trace_lines[0], line);
             if (fb_trace_count < QCOM_USB_FB_TRACES) ++fb_trace_count;
