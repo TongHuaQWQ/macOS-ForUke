@@ -1,0 +1,49 @@
+## @file
+#  Firmware heartbeat and watchdog pet.
+#
+#  Two things go wrong silently in the vendor-DXE bring-up: a driver can hang the
+#  CPU (no output at all) and Gunyah's virtual watchdog resets a boot that nobody
+#  pets after roughly half a minute. Both look identical from the outside - black
+#  screen, then a reset - which is what the b70 round produced right after
+#  GlinkDxe.
+#
+#  This driver is listed early in APRIORI (after ArmTimerDxe, before every vendor
+#  driver) so its one-second timer is already running when the fleet dispatches.
+#  Every beat pets the watchdog and rewrites a counter in place on the panel, so a
+#  photograph tells timed-out boot apart from a hung one: a rising number means the
+#  CPU is alive and a driver is waiting for something that never arrives, a frozen
+#  number means the CPU is stuck inside whatever the dispatcher last printed.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = UkeProgressDxe
+  FILE_GUID                      = 7E3A5B2C-4D6F-4A8B-9C1D-2E3F4A5B6C81
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UkeProgressDxeEntry
+
+[Sources]
+  UkeProgressDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  ukePkg/uke.dec
+
+[LibraryClasses]
+  BaseLib
+  DebugLib
+  IoLib
+  PcdLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Pcd]
+  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatSeconds
+  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatStallHook
+  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatMarker
+
+[Depex]
+  TRUE

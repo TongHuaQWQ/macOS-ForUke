@@ -1,0 +1,1163 @@
+diff --git a/Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.c b/Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.c
+index b6d31913..b7020813 100644
+--- a/Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.c
++++ b/Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.c
+@@ -28,6 +28,8 @@
+ #include <Library/BaseLib.h>
+ #include <Library/BaseMemoryLib.h>
+ #include <Library/DebugLib.h>
++#include <Library/CacheMaintenanceLib.h>
++#include <Library/IoLib.h>
+ #include <Library/PcdLib.h>
+ #include <Library/DxeServicesTableLib.h>
+ #include <Library/PrintLib.h>
+@@ -39,6 +41,8 @@
+ #include <Protocol/DevicePath.h>
+ #include <Protocol/SimpleTextIn.h>
+ 
++#include "UkePersist.h"
++
+ //
+ // The QcomPkg USB headers cannot be included here: EFIUsbfnIo.h pulls in
+ // Protocol/EFIUsbEx.h, which redefines the MdePkg USB descriptors.  The two
+@@ -95,8 +99,20 @@ STATIC EFI_GUID  mUsbfnIoProtocolGuid = {
+ #define UKE_LOG_BLOCK_SIZE  EFI_PAGE_SIZE
+ #define UKE_LOG_BLOCKS      256 /* 1 MiB of text: UEFI phase + the previous boot */
+ #define UKE_PRAM_TEXT_MAX   (192 * 1024) /* how much of the pram window we copy */
+-#define UKE_PANEL_TAIL_LINES 34          /* lines of the previous log echoed to the panel */
++#define UKE_PANEL_HEAD_LINES 12          /* earliest kept lines, where early-boot probes land */
++#define UKE_PANEL_TAIL_LINES 24          /* newest kept lines, where a panic lands */
++#define UKE_PANEL_LINES      UKE_PANEL_TAIL_LINES
+ #define UKE_LOG_MAX_LUNS    8
++//
++// Linux pstore: struct persistent_ram_buffer { u32 sig; u32 start; u32 size; u8 data[]; }
++// with sig = 0x43474244 ("DBRG"), the same record UkeLastLog.c writes from the kernel side.
++//
++#define UKE_RAMOOPS_SIG     0x43474244U
++typedef struct {
++  UINT32  Sig;
++  UINT32  Start;
++  UINT32  Size;
++} UKE_RAMOOPS_HEADER;
+ #define UKE_LOG_LINE_MAX    200
+ 
+ //
+@@ -141,6 +157,258 @@ STATIC UINTN                  mLogLen;
+ STATIC EFI_BLOCK_IO_MEDIA     mLogMedia;
+ STATIC EFI_BLOCK_IO_PROTOCOL  mLogBlockIo;
+ 
++//
++// State the kernel's QcomXnuUsbDebug module checks before it touches the
++// controller (drivers/QcomXnuUsbDebug/soc/QcomUsbQualify.c): powered GDSC,
++// de-asserted reset, ungated USB clocks, a readable DWC3 core, and a device
++// controller that is halted rather than left running by the firmware.  The GCC
++// and DWC3 numbers are the ones soc/Uke.h carries, themselves from the live DT
++// (gcc: clock-controller@100000 reg <0x100000 0x1f4200>, dwc3 at 0xa600000).
++//
++// The order below is the qualifier's order on purpose: reading the DWC3 window
++// before the power domain and its clocks are proven is how a "probe" becomes a
++// bus hang with no log at all.
++//
++#define UKE_QUD_GCC_BASE          0x00100000
++#define UKE_QUD_DWC3_BASE         0x0A600000
++#define UKE_QUD_GCC_BCR           0x39000
++#define UKE_QUD_GCC_GDSCR         0x39004
++#define UKE_QUD_GCC_CFG_GDSCR     0x39008
++#define UKE_QUD_DWC3_GCTL         0xC110
++#define UKE_QUD_DWC3_GSNPSID      0xC120
++#define UKE_QUD_DWC3_GUSB2PHYCFG  0xC200
++#define UKE_QUD_DWC3_DCFG         0xC700
++#define UKE_QUD_DWC3_DCTL         0xC704
++#define UKE_QUD_DWC3_DSTS         0xC70C
++#define UKE_QUD_DCTL_RUN_STOP     (1U << 31)
++#define UKE_QUD_DSTS_DEVCTRLHLT   (1U << 22)
++#define UKE_QUD_CFG_GDSCR_POWER_UP_COMPLETE  (1U << 16)
++#define UKE_QUD_CBCR_COUNT        5
++#define UKE_QUD_CBCR_REQUIRED     3   /* eUSB2 only: the two SuperSpeed branches stay off */
++#define UKE_QUD_CBCR_CLK_OFF      (1U << 31)
++
++STATIC CONST UINT32  mQudCbcrOffset[UKE_QUD_CBCR_COUNT] = {
++  0x39018, 0x39024, 0x39028, 0x39060, 0x39064
++};
++
++STATIC
++VOID
++Log (
++  IN CONST CHAR8  *Format,
++  ...
++  );
++
++
++/**
++  Publish this firmware's log as a Linux ramoops console record.
++
++  The USB log disk needs the vendor function stack, which does not survive on this board
++  yet, so the log had no way out that did not involve photographing the panel. Android,
++  however, maps the ramoops region described by its own device tree
++
++      ramoops_mem: ramoops_region { reg = <0x00 0xa7000000 0x00 0x400000>;
++                                    console-size = <0x200000>; pmsg-size = <0x200000>; }
++
++  and pstore reads the *previous* boot's console zone out of it on the next start. The
++  frame buffer volume occupies 0xA7100000 and up, so the first megabyte of that zone is
++  free for this firmware. A record is a persistent_ram_buffer header (sig "DBRG", start,
++  size) followed by the text; pstore hands it to userspace as /sys/fs/pstore/... .
++
++  With a root adb shell that turns a failed boot into a readable log:
++
++      adb shell su -c 'ls -l /sys/fs/pstore/'
++      adb shell su -c 'cat /sys/fs/pstore/dmesg-ramoops-0'
++
++  Only the text this driver keeps is copied, and the window is written back before the
++  hand-off so a reset cannot leave it in the cache.
++**/
++STATIC
++VOID
++UkeRamoopsPublish (
++  VOID
++  )
++{
++  EFI_STATUS                       Status;
++  EFI_GCD_MEMORY_SPACE_DESCRIPTOR  Descriptor;
++  UINT64                           Base;
++  UINT64                           Size;
++  UINT32                           Capacity;
++  UINTN                            Copy;
++  volatile UINT32                  *Header;
++  CHAR8                            *Data;
++
++  Base     = PcdGet64 (PcdUkeRamoopsBase);
++  Capacity = PcdGet32 (PcdUkeRamoopsSize);
++  if ((Base == 0) || (Capacity < 4096)) {
++    return;
++  }
++
++  Status = gDS->GetMemorySpaceDescriptor ((EFI_PHYSICAL_ADDRESS)Base, &Descriptor);
++  if (EFI_ERROR (Status)) {
++    Log ("ramoops: 0x%lx not described %r", Base, Status);
++    return;
++  }
++
++  Size = (mLogLen < (Capacity - 32)) ? mLogLen : (Capacity - 32);
++  if (Size == 0) {
++    return;
++  }
++
++  Header    = (volatile UINT32 *)(UINTN)Base;
++  Data      = (CHAR8 *)(UINTN)(Base + sizeof (UKE_RAMOOPS_HEADER));
++  Copy      = (UINTN)Size;
++
++  Log ("ramoops: publishing %u of %u bytes at 0x%lx", Copy, mLogLen, Base);
++  CopyMem (Data, mLog, Copy);
++  Header[0] = UKE_RAMOOPS_SIG;
++  Header[1] = 0;              /* start: this is a single record, not a ring */
++  Header[2] = (UINT32)Copy;   /* size */
++  WriteBackDataCacheRange ((VOID *)(UINTN)Base, (UINTN)sizeof (UKE_RAMOOPS_HEADER) + Copy);
++  Log ("ramoops: written back");
++}
++
++/**
++  Report, and optionally stop, the USB controller this firmware is about to hand
++  to the kernel.
++
++  Two questions are answered here, both of which used to need a device round to
++  guess at:
++
++    * did the vendor USB stack manage to power the GDSC, ungate the USB clocks,
++      de-assert the reset and reach a live DWC3, i.e. is the state XNU's
++      QcomUsbQualify accepts even present?
++    * is the controller left running (DCTL.RUN_STOP set, DSTS.DEVCTRLHLT clear)?
++      The qualifier refuses that state, and the firmware stack has no
++      ExitBootServices hook of its own, so the halt has to happen here.
++
++  Nothing outside the GCC window is read until the power domain and the three
++  required USB branches are proven live.
++**/
++STATIC
++VOID
++UkeUsbInheritProbe (
++  IN BOOLEAN  Halt
++  )
++{
++  UINT32   Cbcr[UKE_QUD_CBCR_COUNT];
++  UINT32   Bcr;
++  UINT32   Gdscr;
++  UINT32   CfgGdscr;
++  UINT32   Gsnpsid;
++  UINT32   Gctl;
++  UINT32   PhyCfg;
++  UINT32   Dcfg;
++  UINT32   Dctl;
++  UINT32   Dsts;
++  UINTN    Index;
++  UINTN    ClocksRunning;
++  UINTN    Poll;
++  BOOLEAN  Powered;
++
++  for (Index = 0; Index < UKE_QUD_CBCR_COUNT; Index++) {
++    Cbcr[Index] = MmioRead32 (UKE_QUD_GCC_BASE + mQudCbcrOffset[Index]);
++  }
++
++  Bcr      = MmioRead32 (UKE_QUD_GCC_BASE + UKE_QUD_GCC_BCR);
++  Gdscr    = MmioRead32 (UKE_QUD_GCC_BASE + UKE_QUD_GCC_GDSCR);
++  CfgGdscr = MmioRead32 (UKE_QUD_GCC_BASE + UKE_QUD_GCC_CFG_GDSCR);
++
++  Log ("UKE-QUD: gcc bcr=%08x gdscr=%08x cfg_gdscr=%08x", Bcr, Gdscr, CfgGdscr);
++  Log (
++       "UKE-QUD: cbcr %08x %08x %08x %08x %08x",
++       Cbcr[0], Cbcr[1], Cbcr[2], Cbcr[3], Cbcr[4]
++       );
++
++  Powered = (CfgGdscr & UKE_QUD_CFG_GDSCR_POWER_UP_COMPLETE) != 0;
++  ClocksRunning = 0;
++  for (Index = 0; Index < UKE_QUD_CBCR_REQUIRED; Index++) {
++    if ((Cbcr[Index] & UKE_QUD_CBCR_CLK_OFF) == 0) {
++      ClocksRunning++;
++    }
++  }
++
++  if (!Powered || ((Bcr & 1U) != 0) || (ClocksRunning < UKE_QUD_CBCR_REQUIRED)) {
++    Log (
++         "UKE-QUD: NOT INHERITABLE pwr=%u rst_deasserted=%u clocks=%u/%u (DWC3 not touched)",
++         (UINTN)(Powered ? 1 : 0),
++         (UINTN)((Bcr & 1U) ? 0 : 1),
++         ClocksRunning,
++         (UINTN)UKE_QUD_CBCR_REQUIRED
++         );
++
++    //
++    // Still worth a look when the power is on but a clock is gated: the core is
++    // readable then, and a silent GSNPSID answers "wrong base address" instead of
++    // "no power".
++    //
++    if (!Powered || ((Bcr & 1U) != 0)) {
++      return;
++    }
++  }
++
++  Gsnpsid = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_GSNPSID);
++  Gctl    = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_GCTL);
++  PhyCfg  = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_GUSB2PHYCFG);
++  Dcfg    = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DCFG);
++  Dctl    = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DCTL);
++  Dsts    = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DSTS);
++
++  Log ("UKE-QUD: dwc3 gsnpsid=%08x gctl=%08x phycfg=%08x", Gsnpsid, Gctl, PhyCfg);
++  Log (
++       "UKE-QUD: dwc3 dcfg=%08x dctl=%08x dsts=%08x run_stop=%u halted=%u",
++       Dcfg,
++       Dctl,
++       Dsts,
++       (UINTN)((Dctl & UKE_QUD_DCTL_RUN_STOP) ? 1 : 0),
++       (UINTN)((Dsts & UKE_QUD_DSTS_DEVCTRLHLT) ? 1 : 0)
++       );
++
++  if (!Halt) {
++    return;
++  }
++
++  if ((Dctl & UKE_QUD_DCTL_RUN_STOP) != 0) {
++    MmioWrite32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DCTL, Dctl & ~UKE_QUD_DCTL_RUN_STOP);
++  }
++
++  Dsts = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DSTS);
++  for (Poll = 0; (Poll < 200) && ((Dsts & UKE_QUD_DSTS_DEVCTRLHLT) == 0); Poll++) {
++    gBS->Stall (1000);
++    Dsts = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DSTS);
++  }
++
++  Dctl = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DCTL);
++  Log (
++       "UKE-QUD: halt %u ms dctl=%08x dsts=%08x halted=%u",
++       Poll,
++       Dctl,
++       Dsts,
++       (UINTN)(((Dctl & UKE_QUD_DCTL_RUN_STOP) == 0) &&
++               ((Dsts & UKE_QUD_DSTS_DEVCTRLHLT) != 0) ? 1 : 0)
++       );
++}
++
++/**
++  ExitBootServices: repeat the halt with the CPU to ourselves. The vendor USB
++  stack keeps its own timers until boot services end, so a RUN_STOP cleared at
++  ReadyToBoot can be set again before the kernel starts.
++**/
++STATIC
++VOID
++EFIAPI
++UkeUsbHaltOnExitBootServices (
++  IN EFI_EVENT  Event,
++  IN VOID       *Context
++  )
++{
++  UINT32  Dctl;
++
++  Dctl = MmioRead32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DCTL);
++  if ((Dctl & UKE_QUD_DCTL_RUN_STOP) != 0) {
++    MmioWrite32 (UKE_QUD_DWC3_BASE + UKE_QUD_DWC3_DCTL, Dctl & ~UKE_QUD_DCTL_RUN_STOP);
++  }
++}
++
+ /**
+   Bridge to Gunyah's virtual watchdog (the same calls UkeBootMemoryDxe makes, which are the
+   ones Android's gh_virt_wdt driver makes). The tablet resets about half a minute into a boot
+@@ -173,6 +441,12 @@ UkeWatchdogPet (
+   }
+ }
+ 
++STATIC
++BOOLEAN
++VolumeUpPressed (
++  VOID
++  );   /* defined below; the panel hold in DumpPreviousBootLog uses it */
++
+ STATIC
+ VOID
+ Log (
+@@ -197,7 +471,14 @@ Log (
+ 
+   mLog[mLogLen + Printed]     = '\n';
+   mLog[mLogLen + Printed + 1] = '\0';
+-  AsciiPrint ("%a", &mLog[mLogLen]);
++  //
++  // Printed through DebugLib, not ConOut: the panels this firmware actually reaches
++  // (the dispatcher's "Loading driver at ..." lines, Sec's banner) all come from
++  // DebugLib -> FrameBufferSerialPortLib, while the console route has produced nothing
++  // on this board all along - including this driver's own "--- previous boot log ---"
++  // echo. Same output path as the lines that do appear.
++  //
++  DEBUG ((DEBUG_WARN, "%a", &mLog[mLogLen]));
+   mLogLen += Printed + 1;
+ 
+   /* the buffer is NUL terminated after the newline, so this stays a C string */
+@@ -388,6 +669,226 @@ LogAppendRaw (
+   mLog[mLogLen] = '\0';
+ }
+ 
++
++/**
++  Page through the previous boot's text on the panel.
++
++  The two-window echo above shows the first lines and the last lines, which is all that fits
++  in one photograph. The rest of the kernel log was only reachable over USB - and that needs
++  the vendor function stack, which does not survive on this board. So the same text is offered
++  one page at a time: Volume Up prints the next page, Volume Down (or the timeout) continues
++  the boot. A camera then captures the whole log, not a window of it.
++**/
++STATIC
++UINTN
++PanelPrintPage (
++  IN UINTN  StartLine,
++  IN UINTN  Lines
++  )
++{
++  UINTN  Line;
++  UINTN  Offset;
++  UINTN  Printed;
++
++  Offset  = 0;
++  Line    = 0;
++  Printed = 0;
++  while ((Offset < mLogLen) && (Line < StartLine)) {
++    if (mLog[Offset] == '\n') {
++      Line++;
++    }
++
++    Offset++;
++  }
++
++  while ((Offset < mLogLen) && (Printed < Lines)) {
++    DEBUG ((DEBUG_WARN, "%a", &mLog[Offset]));
++    while ((Offset < mLogLen) && (mLog[Offset] != '\n')) {
++      Offset++;
++    }
++
++    if (Offset < mLogLen) {
++      Offset++;
++    }
++
++    Printed++;
++  }
++
++  return Printed;
++}
++
++STATIC
++VOID
++DumpPagedLog (
++  IN UINT32  HoldSeconds
++  )
++{
++  UINTN    StartLine;
++  UINTN    Page;
++  UINTN    Lines;
++  UINT32   Remaining;
++  BOOLEAN  NextPage;
++
++  StartLine = 0;
++  Page      = 1;
++  for (;;) {
++    DEBUG ((DEBUG_WARN, "--- boot log page %u (vol-up next, vol-down continue) ---\n", Page));
++    Lines = PanelPrintPage (StartLine, 22);
++    StartLine += Lines;
++    if (Lines < 22) {
++      return;
++    }
++
++    gBS->Stall (200 * 1000);
++
++    NextPage  = FALSE;
++    Remaining = (HoldSeconds == 0) ? 20 : HoldSeconds;
++    while (Remaining > 0) {
++      EFI_INPUT_KEY  Key;
++
++      UkeWatchdogPet (NULL);
++      if ((gST->ConIn != NULL) && (gST->ConIn->ReadKeyStroke != NULL)) {
++        while (!EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {
++          if (Key.ScanCode == SCAN_DOWN) {
++            return;
++          }
++
++          if (Key.ScanCode == SCAN_UP) {
++            NextPage = TRUE;
++          }
++        }
++      }
++
++      if (NextPage) {
++        break;
++      }
++
++      gBS->Stall (20 * 1000);
++      Remaining--;
++    }
++
++    if (!NextPage) {
++      return;
++    }
++
++    Page++;
++  }
++}
++
++
++/**
++  Print a printable run out of one 64-byte slot in the pram window.
++
++  The kernel-side probe leaves its breadcrumbs in the pram window (uke_usb writes
++  UKEUSB-STARTUP-ENTERED and UKEUSB-STEP-nnn at +0x1000, UkeLastLog uses +0x1100), and the whole
++  window scan above only reports them if they happen to survive as a long enough run. Reading the
++  slot directly turns "did a kernel STARTUP from that archive run at all" into one line on the
++  panel, with no thresholds in the way.
++**/
++STATIC
++VOID
++LogPramSlot (
++  IN CONST UINT8  *Pram,
++  IN UINTN         Size,
++  IN UINTN         Offset
++  )
++{
++  CHAR8  Text[49];
++  UINTN  Index;
++  UINTN  Copied;
++
++  if (Offset + 64 > Size) {
++    return;
++  }
++
++  Copied = 0;
++  for (Index = 0; (Index < 48) && (Pram[Offset + Index] >= 0x20) && (Pram[Offset + Index] < 0x7f); Index++) {
++    Text[Copied++] = (CHAR8)Pram[Offset + Index];
++  }
++
++  Text[Copied] = '\0';
++  if (Copied == 0) {
++    Log ("pram slot 0x%lx: <no printable text>", Offset);
++  } else {
++    Log ("pram slot 0x%lx: \"%a\"", Offset, Text);
++  }
++}
++
++
++/**
++  Raw hex of one 64-byte slot: if the kernel wrote something that is not printable text (a partial
++  record, a differently aligned write), hex is the only way to see it at all.
++**/
++STATIC
++VOID
++LogPramSlotRaw (
++  IN CONST UINT8  *Pram,
++  IN UINTN         Size,
++  IN UINTN         Offset
++  )
++{
++  if (Offset + 16 > Size) {
++    return;
++  }
++
++  Log (
++       "pram slot 0x%lx raw: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x",
++       Offset,
++       Pram[Offset], Pram[Offset + 1], Pram[Offset + 2], Pram[Offset + 3],
++       Pram[Offset + 4], Pram[Offset + 5], Pram[Offset + 6], Pram[Offset + 7],
++       Pram[Offset + 8], Pram[Offset + 9], Pram[Offset + 10], Pram[Offset + 11],
++       Pram[Offset + 12], Pram[Offset + 13], Pram[Offset + 14], Pram[Offset + 15]
++       );
++}
++
++/**
++  Find a literal marker anywhere in the window.
++
++  The kernel is expected to write UKEUSB-* at +0x1000, but an offset that is off by a page, a
++  mapping that landed elsewhere or a record written by a different path all render the fixed slots
++  useless. Searching the whole window for the marker itself removes that assumption: every hit is
++  reported with its offset and the text that follows.
++**/
++STATIC
++VOID
++LogPramFind (
++  IN CONST UINT8  *Pram,
++  IN UINTN         Size,
++  IN CONST CHAR8  *Marker
++  )
++{
++  UINTN  Length;
++  UINTN  Offset;
++  UINTN  Found;
++  UINTN  Index;
++  UINTN  Copied;
++  CHAR8  Text[41];
++
++  Length = AsciiStrLen (Marker);
++  Found  = 0;
++  for (Offset = 0; (Offset + Length <= Size) && (Found < 4); Offset++) {
++    if (CompareMem (&Pram[Offset], Marker, Length) != 0) {
++      continue;
++    }
++
++    Copied = 0;
++    for (Index = 0; (Index < 40) && ((Offset + Index) < Size); Index++) {
++      UINT8  Byte = Pram[Offset + Index];
++      if ((Byte < 0x20) || (Byte >= 0x7f)) {
++        break;
++      }
++      Text[Copied++] = (CHAR8)Byte;
++    }
++    Text[Copied] = '\0';
++    Log ("pram find \"%a\" at 0x%lx: \"%a\"", Marker, Offset, Text);
++    Found++;
++  }
++
++  if (Found == 0) {
++    Log ("pram find \"%a\": not present in %u KiB", Marker, (UINTN)(Size / 1024));
++  }
++}
++
+ /**
+   Copy the previous boot's kernel log out of the pram window.
+ 
+@@ -415,7 +916,9 @@ DumpPreviousBootLog (
+   UINTN                       Printable;
+   UINTN                       TextBytes;
+   CHAR8                       Sample[49];
+-  UINTN                       PanelTail[UKE_PANEL_TAIL_LINES];
++  UINTN                       PanelTail[UKE_PANEL_LINES];
++  UINTN                       PanelHead[UKE_PANEL_HEAD_LINES];
++  UINTN                       PanelHeadCount;
+   UINTN                       PanelTailAt;
+   UINTN                       PanelTailCount;
+ 
+@@ -440,11 +943,49 @@ DumpPreviousBootLog (
+   Printable     = 0;
+   TextBytes     = 0;
+   RunStart      = 0;
+-  PanelTailAt   = 0;
++  PanelTailAt    = 0;
+   PanelTailCount = 0;
++  PanelHeadCount = 0;
+   Sample[0]     = '\0';
+ 
+   Log ("--- pram 0x%lx (%u KiB) from the previous boot ---", Base, Size / 1024);
++  Log ("pram head: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x",
++      Pram[0], Pram[1], Pram[2], Pram[3], Pram[4], Pram[5], Pram[6], Pram[7],
++      Pram[8], Pram[9], Pram[10], Pram[11], Pram[12], Pram[13], Pram[14], Pram[15]);
++  //
++  // The kernel's own breadcrumbs, read straight out of their slots: UKEUSB at +0x1000 and
++  // UkeLastLog at +0x1100. One line each, no scan thresholds involved.
++  //
++  LogPramSlot (Pram, (UINTN)Size, 0x1000);
++  LogPramSlot (Pram, (UINTN)Size, 0x1100);
++  LogPramSlot (Pram, (UINTN)Size, 0x1200);
++  LogPramSlotRaw (Pram, (UINTN)Size, 0x1000);
++  LogPramSlotRaw (Pram, (UINTN)Size, 0x1200);
++  LogPramFind (Pram, (UINTN)Size, "UKEUSB");
++  LogPramFind (Pram, (UINTN)Size, "UKELASTLOG");
++  /*
++    QcomXnuUsbDebug's own records (STATE 79). The window's first 0x37F000 bytes
++    are XNU's msgbuf ring, so the component writes to the last page instead:
++    +0x37F000 carries QCOMUSB PHASE=/ERR=/TR=/P=/LAST= for the last phase it
++    reached, +0x37F100 the last control request it was asked for. Reading them
++    here is what turns "the gadget attached and then stalled" into a named phase
++    and request without any console.
++  */
++  LogPramSlot (Pram, (UINTN)Size, 0x37F000);
++  LogPramSlot (Pram, (UINTN)Size, 0x37F100);
++  /*
++    Hex as well as text, four lines per slot: a record that is present but has a
++    clobbered prefix, or one that arrived with different alignment, reads as "no
++    printable text" and leaves nothing to act on. 64 bytes covers the whole
++    record, so the next reading cannot be ambiguous.
++  */
++  for (UINTN Offset = 0x37F000; Offset <= 0x37F040; Offset += 16) {
++    LogPramSlotRaw (Pram, (UINTN)Size, Offset);
++  }
++  for (UINTN Offset = 0x37F100; Offset <= 0x37F140; Offset += 16) {
++    LogPramSlotRaw (Pram, (UINTN)Size, Offset);
++  }
++  LogPramFind (Pram, (UINTN)Size, "QCOMUSB");
+ 
+   for (Index = 0; Index <= Size; Index++) {
+     BOOLEAN  Keep;
+@@ -478,9 +1019,12 @@ DumpPreviousBootLog (
+       }
+ 
+       if (TextBytes + Printable + 2 < UKE_PRAM_TEXT_MAX) {
++        if (PanelHeadCount < UKE_PANEL_HEAD_LINES) {
++          PanelHead[PanelHeadCount++] = mLogLen;
++        }
+         PanelTail[PanelTailAt] = mLogLen;
+-        PanelTailAt = (PanelTailAt + 1) % UKE_PANEL_TAIL_LINES;
+-        if (PanelTailCount < UKE_PANEL_TAIL_LINES) {
++        PanelTailAt = (PanelTailAt + 1) % UKE_PANEL_LINES;
++        if (PanelTailCount < UKE_PANEL_LINES) {
+           PanelTailCount++;
+         }
+ 
+@@ -493,7 +1037,7 @@ DumpPreviousBootLog (
+     Printable = 0;
+   }
+ 
+-  Log ("--- pram end: %u KiB of text kept ---", TextBytes / 1024);
++  Log ("--- pram end: %u KiB of text kept in %u lines ---", TextBytes / 1024, PanelTailCount);
+   if (Sample[0] != '\0') {
+     Log ("pram first text: \"%a\"", Sample);
+   } else {
+@@ -509,10 +1053,43 @@ DumpPreviousBootLog (
+     UINTN  Line;
+     UINTN  First;
+ 
+-    AsciiPrint ("--- previous boot log, last %u lines ---\n", PanelTailCount);
+-    First = (PanelTailAt + UKE_PANEL_TAIL_LINES - PanelTailCount) % UKE_PANEL_TAIL_LINES;
+-    for (Line = 0; Line < PanelTailCount; Line++) {
+-      AsciiPrint ("%a\n", &mLog[PanelTail[(First + Line) % UKE_PANEL_TAIL_LINES]]);
++    //
++    // Two windows, not one: the earliest lines are where the early-boot probes print (UkeUsbLogDxe
++    // itself, uke_usb's DWC3 identity, ArmCpu) and the newest are where a panic lands. A single tail
++    // window showed only the panic and lost the probes entirely.
++    //
++    DEBUG ((DEBUG_WARN, "--- previous boot log: first %u lines ---\n", PanelHeadCount));
++    for (Line = 0; Line < PanelHeadCount; Line++) {
++      DEBUG ((DEBUG_WARN, "%a\n", &mLog[PanelHead[Line]]));
++    }
++    if (PanelTailCount > PanelHeadCount) {
++      First = (PanelTailAt + UKE_PANEL_LINES - PanelTailCount) % UKE_PANEL_LINES;
++      DEBUG ((DEBUG_WARN, "--- and the last %u ---\n", PanelTailCount - PanelHeadCount));
++      for (Line = PanelHeadCount; Line < PanelTailCount; Line++) {
++        DEBUG ((DEBUG_WARN, "%a\n", &mLog[PanelTail[(First + Line) % UKE_PANEL_LINES]]));
++      }
++    }
++  }
++
++  //
++  // Hold the screen whether or not anything was kept: ReadyToBoot is followed immediately by the
++  // loader's own output, and "pram was empty" is itself an answer that has to be photographed.
++  //
++  {
++    UINT32  HoldSeconds = PcdGet32 (PcdUkePanelHoldSeconds);
++    while (HoldSeconds > 0) {
++      if (VolumeUpPressed ()) {
++        break;
++      }
++      // Gunyah's virtual watchdog resets a boot nobody pets about half a minute in, and both
++      // panel windows stall the CPU for the camera, so pet here as well.
++      UkeWatchdogPet (NULL);
++      gBS->Stall (20 * 1000);
++      HoldSeconds--;
++    }
++
++    if (PcdGet32 (PcdUkePageHoldSeconds) != 0) {
++      DumpPagedLog (PcdGet32 (PcdUkePageHoldSeconds));
+     }
+   }
+ }
+@@ -571,8 +1148,33 @@ UkeUsbLogReadyToBoot (
+   HoldSeconds    = PcdGet32 (PcdUkeUsbLogHoldSeconds);
+ 
+   Log ("UKE-LOG: ready-to-boot hold=%u", HoldSeconds);
++  UkePersistStage (UKE_STAGE_LOG_READY_TO_BOOT, HoldSeconds);
+   DumpPreviousBootLog ();
+ 
++  //
++  // Before boot services end, answer the inheritance questions the kernel's USB
++  // module asks: is the power domain on, are the USB clocks running, and is the
++  // controller halted rather than left running by the vendor stack?  The panel
++  // gets its own window so these lines are not scrolled away by the loader.
++  //
++  if (PcdGet32 (PcdUkeUsbHandoff) != 0) {
++    UINT32  ProbeHold = PcdGet32 (PcdUkeUsbProbeHoldSeconds);
++
++    UkePersistStage (UKE_STAGE_LOG_PROBED, 0);
++    UkeUsbInheritProbe (TRUE);
++    while (ProbeHold > 0) {
++      if (VolumeUpPressed ()) {
++        break;
++      }
++
++      UkeWatchdogPet (NULL);
++      gBS->Stall (20 * 1000);
++      ProbeHold--;
++    }
++  }
++
++  UkeRamoopsPublish ();
++
+   Status = gBS->LocateProtocol (&mUsbMsdProtocolGuid, NULL, (VOID **)&Msd);
+   Log ("UKE-LOG: usb-msd %r", Status);
+   if (EFI_ERROR (Status)) {
+@@ -697,6 +1299,7 @@ UkeUsbLogDxeEntry (
+   // evidence that this driver's entry point ran at all.
+   //
+   Log ("UKE-LOG: driver entry");
++  UkePersistStage (UKE_STAGE_LOG_ENTRY, 0);
+ 
+   Status = InstallLogDisk ();
+   if (EFI_ERROR (Status)) {
+@@ -716,5 +1319,23 @@ UkeUsbLogDxeEntry (
+     return Status;
+   }
+ 
++  //
++  // The vendor USB stack keeps running its own timers until boot services end and
++  // has no ExitBootServices hook, so the halt is repeated here, with the image
++  // about to be handed over: this is the last write that can set the controller
++  // state the kernel expects to inherit.
++  //
++  Status = gBS->CreateEventEx (
++                  EVT_NOTIFY_SIGNAL,
++                  TPL_CALLBACK,
++                  UkeUsbHaltOnExitBootServices,
++                  NULL,
++                  &gEfiEventExitBootServicesGuid,
++                  &Event
++                  );
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_ERROR, "UKE-LOG: cannot arm ExitBootServices: %r\n", Status));
++  }
++
+   return EFI_SUCCESS;
+ }
+diff --git a/Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.inf b/Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.inf
+index 886614ca..96b12fb3 100644
+--- a/Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.inf
++++ b/Platforms/Xiaomi/ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.inf
+@@ -21,10 +21,12 @@
+ 
+ [LibraryClasses]
+   BaseLib
++  CacheMaintenanceLib
+   BaseMemoryLib
+   DevicePathLib
+   DebugLib
+   DxeServicesTableLib
++  IoLib
+   PcdLib
+   UefiBootServicesTableLib
+   UefiDriverEntryPoint
+@@ -36,11 +38,18 @@
+ 
+ [Pcd]
+   gUkePkgTokenSpaceGuid.PcdUkeUsbLogHoldSeconds
++  gUkePkgTokenSpaceGuid.PcdUkePanelHoldSeconds
+   gUkePkgTokenSpaceGuid.PcdUkePramBase
+   gUkePkgTokenSpaceGuid.PcdUkePramSize
++  gUkePkgTokenSpaceGuid.PcdUkeUsbHandoff
++  gUkePkgTokenSpaceGuid.PcdUkeUsbProbeHoldSeconds
++  gUkePkgTokenSpaceGuid.PcdUkeRamoopsBase
++  gUkePkgTokenSpaceGuid.PcdUkeRamoopsSize
++  gUkePkgTokenSpaceGuid.PcdUkePageHoldSeconds
+ 
+ [Guids]
+   gEfiEventReadyToBootGuid                      ## CONSUMES
++  gEfiEventExitBootServicesGuid                 ## CONSUMES
+ 
+ [Depex]
+   TRUE
+diff --git a/Platforms/Xiaomi/ukePkg/Include/APRIORI.inc b/Platforms/Xiaomi/ukePkg/Include/APRIORI.inc
+index e3153a17..1ef5fd9a 100644
+--- a/Platforms/Xiaomi/ukePkg/Include/APRIORI.inc
++++ b/Platforms/Xiaomi/ukePkg/Include/APRIORI.inc
+@@ -2,7 +2,7 @@ APRIORI DXE {
+   INF MdeModulePkg/Core/Dxe/DxeMain.inf
+   INF MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
+ 
+-!if $(UKE_VENDOR_HW) == 1
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
+   INF Binaries/uke/QcomPkg/Drivers/EnvDxe/EnvDxe.inf
+ !endif
+ 
+@@ -14,7 +14,13 @@ APRIORI DXE {
+   INF EmbeddedPkg/MetronomeDxe/MetronomeDxe.inf
+   INF ArmPkg/Drivers/TimerDxe/TimerDxe.inf
+ 
+-!if $(UKE_VENDOR_HW) == 1
++  # Heartbeat: first driver that can own a timer, and before every vendor driver, so the
++  # one-second gunyah watchdog pet already runs while the vendor fleet dispatches. A boot
++  # that dies there leaves no output at all, and "hung" and "watchdog reset" look the same
++  # in a photograph unless something is still counting on the panel.
++  INF ukePkg/Drivers/UkeProgressDxe/UkeProgressDxe.inf
++
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
+   INF Binaries/uke/QcomPkg/Drivers/SmemDxe/SmemDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/DALSYSDxe/DALSYSDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/HWIODxe/HWIODxe.inf
+@@ -23,14 +29,25 @@ APRIORI DXE {
+   INF Binaries/uke/QcomPkg/Drivers/ProjectInfoDxe/ProjectInfoDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/HALIOMMUDxe/HALIOMMUDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/ULogDxe/ULogDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/IPCCDxe/IPCCDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/GLinkDxe/GLinkDxe.inf
++  # SMP2P publishes the protocol GlinkDxe's DEPEX waits for (52858ad7-...). Without it the
++  # dispatcher still calls GlinkDxe's entry (APRIORI ignores DEPEX) and the vendor code walks
++  # a NULL protocol pointer: b70 black-screened and reset on exactly that line.
++  # The IPC transports stay out: IPCCDxe, Smp2pDxe and GlinkDxe are the RPM/PMIC-glink
++  # path, which nothing in this image uses (USB needs SPMI/PMIC, GCC clocks and the
++  # DWC3 function controller). Two device rounds died on them - b70 at GlinkDxe with
++  # SMP2P absent and b71 at Smp2pDxe with it present - and APRIORI dispatches without
++  # evaluating DEPEX, so a driver that is listed there runs even when its dependency is
++  # missing and the vendor code then walks a NULL pointer.
+   INF Binaries/uke/QcomPkg/Drivers/CmdDbDxe/CmdDbDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/PwrUtilsDxe/PwrUtilsDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/NpaDxe/NpaDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/RpmhDxe/RpmhDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/VcsDxe/VcsDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/ClockDxe/ClockDxe.inf
++  # ClockDxe is out: it reconfigures the whole GCC tree from BSP data and the b75 round
++  # shows the boot dying on it (last dispatcher line, then a black screen that does not
++  # reset). The USB work does not need it - QcomXnuUsbDebug only checks the inherited
++  # GDSC/BCR/CBCR state, and UkeUsbLogDxe reads that state out at ReadyToBoot - so this
++  # round measures whether the boot gets past the point where ClockDxe used to run.
+   INF Binaries/uke/QcomPkg/Drivers/ICBDxe/ICBDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/ShmBridgeDxe/ShmBridgeDxeLA.inf
+   INF Binaries/uke/QcomPkg/Drivers/TzDxe/ScmDxeCompat.inf
+@@ -41,7 +58,7 @@ APRIORI DXE {
+ 
+   INF MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
+ 
+-!if $(UKE_VENDOR_HW) == 1
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
+   INF Binaries/uke/QcomPkg/Drivers/PmicDxe/PmicDxeLa.inf
+ !endif
+ 
+@@ -86,26 +103,34 @@ APRIORI DXE {
+   INF MdeModulePkg/Universal/HiiDatabaseDxe/HiiDatabaseDxe.inf
+   INF MdeModulePkg/Universal/BdsDxe/BdsDxe.inf
+ 
++# No xHCI host driver in the stock uke image: uke exposes USB device mode only
++# (Dwc3 function controller).  UsbPwrCtrlDxe publishes the protocol that
++# UsbfnDwc3Dxe's DEPEX waits for, so the two travel together.
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
++  INF Binaries/uke/QcomPkg/Drivers/UsbPwrCtrlDxe/UsbPwrCtrlDxe.inf
++  INF Binaries/uke/QcomPkg/Drivers/UsbfnDwc3Dxe/UsbfnDwc3Dxe.inf
++  #INF Binaries/uke/QcomPkg/Drivers/XhciDxe/XhciDxe.inf
++!endif
++
+ !if $(UKE_VENDOR_HW) == 1
+   INF Binaries/uke/QcomPkg/Drivers/SPIDxe/SPIDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/PmicGlinkDxe/PmicGlinkDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/UsbPwrCtrlDxe/UsbPwrCtrlDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/QcomChargerDxe/QcomChargerDxeLA.inf
+   INF Binaries/uke/QcomPkg/Drivers/ChargerExDxe/ChargerExDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/UsbfnDwc3Dxe/UsbfnDwc3Dxe.inf
+-  # No xHCI host driver in the stock uke image: uke exposes USB
+-  # device mode only (Dwc3 function controller).
+-  # INF Binaries/uke/QcomPkg/Drivers/XhciDxe/XhciDxe.inf
+ !endif
+ 
+   INF MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
+   INF MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf
+   INF MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf
+ 
+-!if $(UKE_VENDOR_HW) == 1
+-  INF Binaries/uke/QcomPkg/Drivers/UsbMsdDxe/UsbMsdDxe.inf
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
+   INF Binaries/uke/QcomPkg/Drivers/UsbDeviceDxe/UsbDeviceDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/UsbConfigDxe/UsbConfigDxe.inf
++  INF Binaries/uke/QcomPkg/Drivers/UCDxe/UCDxe.inf
++!endif
++
++!if $(UKE_VENDOR_HW) == 1
++  INF Binaries/uke/QcomPkg/Drivers/UsbMsdDxe/UsbMsdDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/TsensDxe/TsensDxe.inf
+ 
+@@ -114,7 +139,6 @@ APRIORI DXE {
+   INF Binaries/uke/QcomPkg/Drivers/LimitsDxe/LimitsDxe.inf
+   # Headless until stock uke framebuffer data is available.
+   INF Binaries/uke/QcomPkg/Drivers/GpiDxe/GpiDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/UCDxe/UCDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/RNGDxe/RngDxe.inf
+ !endif
+ 
+diff --git a/Platforms/Xiaomi/ukePkg/Include/DXE.inc b/Platforms/Xiaomi/ukePkg/Include/DXE.inc
+index c41e723f..96c2e48d 100644
+--- a/Platforms/Xiaomi/ukePkg/Include/DXE.inc
++++ b/Platforms/Xiaomi/ukePkg/Include/DXE.inc
+@@ -1,7 +1,7 @@
+   INF MdeModulePkg/Core/Dxe/DxeMain.inf
+   INF MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
+ 
+-!if $(UKE_VENDOR_HW) == 1
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
+   INF Binaries/uke/QcomPkg/Drivers/EnvDxe/EnvDxe.inf
+ !endif
+ 
+@@ -11,7 +11,7 @@
+   INF MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
+   INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
+ 
+-!if $(UKE_VENDOR_HW) == 1
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
+   INF Binaries/uke/QcomPkg/Drivers/ShmBridgeDxe/ShmBridgeDxeLA.inf
+   INF Binaries/uke/QcomPkg/Drivers/TzDxe/ScmDxeCompat.inf
+   INF Binaries/uke/QcomPkg/Drivers/TzDxe/TzDxeLA.inf
+@@ -28,10 +28,8 @@
+   INF ArmPkg/Drivers/ArmGicDxe/ArmGicDxe.inf
+   INF ArmPkg/Drivers/TimerDxe/TimerDxe.inf
+ 
+-!if $(UKE_VENDOR_HW) == 1
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
+   INF Binaries/uke/QcomPkg/Drivers/ChipInfoDxe/ChipInfoDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/IPCCDxe/IPCCDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/GLinkDxe/GLinkDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/PlatformInfoDxe/PlatformInfoDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/ProjectInfoDxe/ProjectInfoDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/DALSYSDxe/DALSYSDxe.inf
+@@ -44,6 +42,9 @@
+ 
+   INF MdeModulePkg/Universal/DevicePathDxe/DevicePathDxe.inf
+   INF ukePkg/Drivers/UkeBootMemoryDxe/UkeBootMemoryDxe.inf
++  # The heartbeat is listed in APRIORI, but a module only reaches the FV from this list:
++  # APRIORI.inc alone put the GUID in the APRIORI file and shipped no FFS for it.
++  INF ukePkg/Drivers/UkeProgressDxe/UkeProgressDxe.inf
+   # The XNU loader is part of the firmware: a driver loaded from a volume is
+   # refused by the image verification of this build.
+   INF DarwinBootPkg/Driver/DarwinBoot.inf
+@@ -55,14 +56,24 @@
+ !if $(UKE_VENDOR_HW) == 1 && $(UKE_VENDOR_STORAGE) == 1
+   INF Binaries/uke/QcomPkg/Drivers/UFSDxe/UFSDxe.inf
+ !endif
+-!if $(UKE_VENDOR_HW) == 1
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
++  # The IPC transports stay out: IPCCDxe, Smp2pDxe and GlinkDxe are the RPM/PMIC-glink
++  # path, which nothing in this image uses (USB needs SPMI/PMIC, GCC clocks and the
++  # DWC3 function controller). Two device rounds died on them - b70 at GlinkDxe with
++  # SMP2P absent and b71 at Smp2pDxe with it present - and APRIORI dispatches without
++  # evaluating DEPEX, so a driver that is listed there runs even when its dependency is
++  # missing and the vendor code then walks a NULL pointer.
+   INF Binaries/uke/QcomPkg/Drivers/CmdDbDxe/CmdDbDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/PwrUtilsDxe/PwrUtilsDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/RpmhDxe/RpmhDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/NpaDxe/NpaDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/ULogDxe/ULogDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/VcsDxe/VcsDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/ClockDxe/ClockDxe.inf
++  # ClockDxe is out: it reconfigures the whole GCC tree from BSP data and the b75 round
++  # shows the boot dying on it (last dispatcher line, then a black screen that does not
++  # reset). The USB work does not need it - QcomXnuUsbDebug only checks the inherited
++  # GDSC/BCR/CBCR state, and UkeUsbLogDxe reads that state out at ReadyToBoot - so this
++  # round measures whether the boot gets past the point where ClockDxe used to run.
+   INF Binaries/uke/QcomPkg/Drivers/SPMIDxe/SPMIDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/ICBDxe/ICBDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/SmemDxe/SmemDxe.inf
+@@ -98,31 +109,43 @@
+ 
+   # Headless until stock uke framebuffer data is available.
+ 
++# No xHCI host driver in the stock uke image: uke exposes USB device mode only
++# (Dwc3 function controller).
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
++  INF Binaries/uke/QcomPkg/Drivers/UsbPwrCtrlDxe/UsbPwrCtrlDxe.inf
++  INF Binaries/uke/QcomPkg/Drivers/UsbfnDwc3Dxe/UsbfnDwc3Dxe.inf
++  #INF Binaries/uke/QcomPkg/Drivers/XhciDxe/XhciDxe.inf
++!endif
++
+ !if $(UKE_VENDOR_HW) == 1
+   INF Binaries/uke/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/ChargerExDxe/ChargerExDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/PmicGlinkDxe/PmicGlinkDxe.inf
++  # QcomChargerDxeLA arms a hardware watchdog (logfs: "ChargerPlatform_Init
++  # Enabled WDOG."), so it stays out of the USB-only image that has no charger
++  # task to pet it.
+   INF Binaries/uke/QcomPkg/Drivers/QcomChargerDxe/QcomChargerDxeLA.inf
+-  INF Binaries/uke/QcomPkg/Drivers/UsbPwrCtrlDxe/UsbPwrCtrlDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/TsensDxe/TsensDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/LimitsDxe/LimitsDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/DDRInfoDxe/DDRInfoDxe.inf
+-  INF Binaries/uke/QcomPkg/Drivers/UsbfnDwc3Dxe/UsbfnDwc3Dxe.inf
+-  # No xHCI host driver in the stock uke image: uke exposes USB
+-  # device mode only (Dwc3 function controller).
+-  # INF Binaries/uke/QcomPkg/Drivers/XhciDxe/XhciDxe.inf
+ !endif
+ 
+   INF MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
+   INF MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf
+   INF MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf
+ 
+-!if $(UKE_VENDOR_HW) == 1
+-  INF Binaries/uke/QcomPkg/Drivers/UsbMsdDxe/UsbMsdDxe.inf
++# UsbConfigDxe/UsbDeviceDxe drive the standard-request side of the function
++# controller; UsbMsdDxe is the disk gadget, which this image does not want (the
++# board's own UkeUsbLogDxe serves the log disk).
++!if $(UKE_VENDOR_HW) == 1 || $(UKE_VENDOR_USB) == 1
+   INF Binaries/uke/QcomPkg/Drivers/UsbDeviceDxe/UsbDeviceDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/UsbConfigDxe/UsbConfigDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/UsbInitDxe/UsbInitDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/UCDxe/UCDxe.inf
++!endif
++
++!if $(UKE_VENDOR_HW) == 1
++  INF Binaries/uke/QcomPkg/Drivers/UsbMsdDxe/UsbMsdDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/RNGDxe/RngDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/PILDxe/PILDxe.inf
+   INF Binaries/uke/QcomPkg/Drivers/PILProxyDxe/PILProxyDxe.inf
+diff --git a/Platforms/Xiaomi/ukePkg/Tools/gen-vendor-binaries.py b/Platforms/Xiaomi/ukePkg/Tools/gen-vendor-binaries.py
+index 2c19111a..176d6d86 100644
+--- a/Platforms/Xiaomi/ukePkg/Tools/gen-vendor-binaries.py
++++ b/Platforms/Xiaomi/ukePkg/Tools/gen-vendor-binaries.py
+@@ -43,6 +43,7 @@ MODULES = [
+     ("HALIOMMUDxe/HALIOMMUDxe.inf", "HALIOMMU"),
+     ("ULogDxe/ULogDxe.inf", "ULogDxe"),
+     ("IPCCDxe/IPCCDxe.inf", "IPCCDxe"),
++    ("Smp2pDxe/Smp2pDxe.inf", "Smp2pDxe"),
+     ("GLinkDxe/GLinkDxe.inf", "GlinkDxe"),
+     ("CmdDbDxe/CmdDbDxe.inf", "CmdDbDxe"),
+     ("PwrUtilsDxe/PwrUtilsDxe.inf", "PwrUtilsDxe"),
+diff --git a/Platforms/Xiaomi/ukePkg/uke.dec b/Platforms/Xiaomi/ukePkg/uke.dec
+index f58241d9..02c911ab 100644
+--- a/Platforms/Xiaomi/ukePkg/uke.dec
++++ b/Platforms/Xiaomi/ukePkg/uke.dec
+@@ -9,6 +9,9 @@
+   PACKAGE_GUID      = 7E3A5B2C-4D6F-4A8B-9C1D-2E3F4A5B6C7F
+   PACKAGE_VERSION   = 0.1
+ 
++[Includes]
++  Include
++
+ [Guids]
+   gUkePkgTokenSpaceGuid = { 0x7E3A5B2C, 0x4D6F, 0x4A8B, { 0x9C, 0x1D, 0x2E, 0x3F, 0x4A, 0x5B, 0x6C, 0x70 } }
+ 
+@@ -20,5 +23,28 @@
+   #  (board.toml [payload.adt] panic_region). UkeUsbLogDxe copies whatever the
+   #  previous boot left there into the log disk, so the kernel log reaches the
+   #  host without any kernel-side storage driver.
++  ## Seconds the previous-boot log stays on the panel at ReadyToBoot, for a photograph.
++  gUkePkgTokenSpaceGuid.PcdUkePanelHoldSeconds|0|UINT32|0x00000004
+   gUkePkgTokenSpaceGuid.PcdUkePramBase|0|UINT64|0x00000002
+   gUkePkgTokenSpaceGuid.PcdUkePramSize|0|UINT64|0x00000003
++  ## Report (and stop) the USB controller state this firmware hands to the kernel:
++  #  the powered/clocks/reset/halted combination QcomXnuUsbDebug's qualifier needs.
++  gUkePkgTokenSpaceGuid.PcdUkeUsbHandoff|0|UINT32|0x00000005
++  ## Seconds the USB hand-off verdict stays on the panel, after the pram window.
++  gUkePkgTokenSpaceGuid.PcdUkeUsbProbeHoldSeconds|0|UINT32|0x00000006
++  ## Where UkeUsbLogDxe publishes the boot log as a Linux ramoops console record, so a
++  #  root adb shell can read the previous boot out of /sys/fs/pstore. 0 disables it.
++  #  Android's own device tree puts the ramoops region at 0xA7000000 with a 2 MiB console
++  #  zone; the firmware volume starts at 0xA7100000, so this uses the free first megabyte.
++  gUkePkgTokenSpaceGuid.PcdUkeRamoopsBase|0|UINT64|0x0000000A
++  gUkePkgTokenSpaceGuid.PcdUkeRamoopsSize|0|UINT32|0x0000000B
++  ## Seconds each page of the previous-boot log waits for Volume Up at ReadyToBoot.
++  #  0 disables paging (only the head/tail windows are shown).
++  gUkePkgTokenSpaceGuid.PcdUkePageHoldSeconds|0|UINT32|0x0000000C
++  ## UkeProgressDxe beat period: pets Gunyah's watchdog and counts on the panel.
++  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatSeconds|0|UINT32|0x00000007
++  ## UkeProgressDxe counts every gBS->Stall (vendor timeouts) and pets the watchdog there.
++  #  Off isolates "the wrapper broke the boot" from "the vendor set broke the boot".
++  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatStallHook|0|UINT32|0x00000008
++  ## UkeProgressDxe keeps its counters in the FD-Reserved page at 0xA7000000 as well.
++  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatMarker|0|UINT32|0x00000009
+diff --git a/Platforms/Xiaomi/ukePkg/uke.dsc b/Platforms/Xiaomi/ukePkg/uke.dsc
+index dcb72d86..211c7439 100755
+--- a/Platforms/Xiaomi/ukePkg/uke.dsc
++++ b/Platforms/Xiaomi/ukePkg/uke.dsc
+@@ -26,12 +26,32 @@
+   SKUID_IDENTIFIER               = DEFAULT
+   FLASH_DEFINITION               = ukePkg/uke.fdf
+   USE_CUSTOM_DISPLAY_DRIVER      = 0
++  #
++  # Vendor hardware switches; all three gate blocks in Include/DXE.inc and
++  # Include/APRIORI.inc.
++  #
++  #   UKE_VENDOR_HW      = 1  -> the whole stock fleet, minus storage below
++  #   UKE_VENDOR_USB     = 1  -> only the clock/power/PMIC base plus the USB
++  #                              function stack (UsbfnDwc3Dxe, UsbPwrCtrlDxe,
++  #                              UsbDeviceDxe, UsbConfigDxe, UsbInitDxe).  This
++  #                              is the state XNU's QcomUsbQualify expects to
++  #                              inherit: powered GDSC, ungated USB clocks,
++  #                              de-asserted reset, DEVICE-role DWC3.  The
++  #                              charger fleet stays out because
++  #                              QcomChargerDxeLA arms a hardware watchdog
++  #                              (logfs: "ChargerPlatform_Init Enabled WDOG.")
++  #                              that nothing pets in this image.
++  #   UKE_VENDOR_STORAGE = 0  -> no UFS/SD probing (needs UKE_VENDOR_HW)
++  #
+   UKE_VENDOR_HW                  = 0
+-  # UFSDxe/SdccDxe probe real storage controllers and can hang a board whose
+-  # clock/power tree is not what the driver expects. The USB log channel needs no
+-  # storage at all (it serves a RAM disk), so this is a separate switch:
+-  #   UKE_VENDOR_STORAGE = 0  -> log channel only, no UFS/SD probing
+-  UKE_VENDOR_STORAGE             = 1
++  # Measured on hardware, the vendor chain does not survive this board: GlinkDxe and then
++  # Smp2pDxe died inside their entries, ClockDxe stops the boot (black screen, no reset) and
++  # without ClockDxe the SPMI driver takes a synchronous external abort on 0xC7E5008 (an SPMI
++  # channel address: DFSC 0x10, the bus rejected it, i.e. the controller is unclocked).
++  # The USB state that matters is read out instead, by UkeProgressDxe before the fleet and by
++  # UkeUsbLogDxe at ReadyToBoot, and the kernel side owns the controller.
++  UKE_VENDOR_USB                 = 0
++  UKE_VENDOR_STORAGE             = 0
+ 
+   #
+   # 0 = SM8635
+@@ -85,8 +105,24 @@
+   # board.toml [payload.adt] panic_region; the pram node make-uke-adt.py builds
+   # at 0xFF800000 does not reach the ADT). Keep the two in sync.
+   #
+-  gUkePkgTokenSpaceGuid.PcdUkePramBase|0x9FFE00000
+-  gUkePkgTokenSpaceGuid.PcdUkePramSize|0x200000
++  # The loader's output follows ReadyToBoot immediately, so hold the echoed log for 15 s.
++  gUkePkgTokenSpaceGuid.PcdUkePanelHoldSeconds|8
++  # XNU's embedded panic log, and the address matters: scripts/make-uke-adt.py writes the
++  # ADT's /chosen/pram reg and embedded-panic-log-size from its own constants, and those are
++  # PANIC_LOG_BASE = 0xFF800000 / PANIC_LOG_SIZE = 0x380000 (the llcc_lpi_region of the live
++  # DT, which the UEFI memory map reserves under exactly that name). board.toml's panic_region
++  # is not what the generator uses, so the firmware was reading 0x9FFE00000 - a window XNU
++  # never writes - and every previous boot reported "0 KiB of text": the pram was all zeros.
++  gUkePkgTokenSpaceGuid.PcdUkePramBase|0xFF800000
++  gUkePkgTokenSpaceGuid.PcdUkePramSize|0x00380000
++  gUkePkgTokenSpaceGuid.PcdUkeUsbHandoff|1
++  gUkePkgTokenSpaceGuid.PcdUkeUsbProbeHoldSeconds|10
++  gUkePkgTokenSpaceGuid.PcdUkeRamoopsBase|0xA7000000
++  gUkePkgTokenSpaceGuid.PcdUkeRamoopsSize|0x00100000
++  gUkePkgTokenSpaceGuid.PcdUkePageHoldSeconds|20
++  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatSeconds|1
++  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatStallHook|0
++  gUkePkgTokenSpaceGuid.PcdUkeHeartbeatMarker|0
+ 
+ [LibraryClasses]
+   #
+@@ -110,4 +146,5 @@
+   UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
+   ukePkg/Drivers/UkeBootMemoryDxe/UkeBootMemoryDxe.inf
+   ukePkg/Drivers/UkeUsbLogDxe/UkeUsbLogDxe.inf
++  ukePkg/Drivers/UkeProgressDxe/UkeProgressDxe.inf
+   DarwinBootPkg/Driver/DarwinBoot.inf

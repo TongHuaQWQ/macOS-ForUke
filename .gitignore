@@ -33,6 +33,10 @@ __pycache__/
 *.dylib
 *.efi
 *.dtb
+# ...except the one the firmware build needs: Resources/Configs/uke.toml asks for append_dtb and
+# build_uefi.py exits 1 without it. firmware/files/ is the patch set that reconstructs the firmware
+# tree from a pristine upstream, so this copy has to travel with the repository.
+!firmware/files/Resources/DTBs/uke.dtb
 *.bc
 *.spv
 *.metallib
