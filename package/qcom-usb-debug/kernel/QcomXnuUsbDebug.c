@@ -692,6 +692,17 @@ static char *append_signed(char *to, int value)
 }
 static void pram_state(void)
 {
+    /* Two lines out of one function. The pram record takes everything; the panel takes the fields the
+     * next round cannot do without, because the card clips each line at QCOM_USB_FB_WIDTH (60) columns.
+     * Order is therefore by value, not by register order (STATE 89):
+     *   PH  phase checkpoint            - how far the boot got
+     *   E   component error            - the failure code, 0 means none
+     *   CR  core result                - the negative status behind a failure
+     *   S   control stage              - which ep0 stage the core is waiting on
+     *   ER  absorbed errors            - recoverable errors polling survived
+     *   TA/TB                          - only a refused endpoint command sets them
+     * G, EV, TR, LT and the poll counter stay in the pram record: EV duplicates the T9 event history and
+     * the rest change too often to be worth a scan. */
     char text[128], panel[128];
     char *p = append_text(text, "QCOMUSB PH=");
     char *q = append_text(panel, "PH=");
@@ -705,20 +716,8 @@ static void pram_state(void)
     q = append_text(q, " CR=");
     p = append_signed(p, (int)native.status.core_result);
     q = append_signed(q, (int)native.status.core_result);
-    p = append_text(p, " G=");
-    q = append_text(q, " G=");
-    p = append_decimal(p, native.status.core_event_bytes);
-    q = append_decimal(q, native.status.core_event_bytes);
-    p = append_text(p, " EV=");
-    q = append_text(q, " EV=");
-    p = append_hex(p, native.status.core_last_event);
-    q = append_hex(q, native.status.core_last_event);
-    /* The core only traces a COMMAND when the endpoint command *failed*, and trace_a carries
-     * (ep << 16) | cmd while trace_b carries the DEPCMD result with its status field - so these two
-     * name the exact command and its refusal, which is what a CORE_POLL_FAILED after TRACE_COMMAND
-     * needs (STATE 86). */
     /* Which control stage the core is waiting on, and how many recoverable errors polling absorbed.
-     * Without these, a console that serves one descriptor and then goes deaf looks identical to a dead
+     * Without these a console that serves one descriptor and then goes deaf looks identical to a dead
      * controller (STATE 89). */
     native.status.core_errors = dwc3_errors(native.core);
     native.status.core_control_state = dwc3_control_state(native.core);
@@ -730,16 +729,21 @@ static void pram_state(void)
     q = append_text(q, " ER=");
     p = append_decimal(p, native.status.core_errors);
     q = append_decimal(q, native.status.core_errors);
+    /* The core only traces a COMMAND when the endpoint command *failed*, and trace_a carries
+     * (ep << 16) | cmd while trace_b carries the DEPCMD result with its status field - so these two
+     * name the exact command and its refusal (STATE 86). */
     p = append_text(p, " TA=");
     q = append_text(q, " TA=");
-    p = append_hex(p, native.status.trace_a);
-    q = append_hex(q, native.status.trace_a);
+    p = append_hex(p, native.status.command_a);
+    q = append_hex(q, native.status.command_a);
     p = append_text(p, " TB=");
     q = append_text(q, " TB=");
-    p = append_hex(p, native.status.trace_b);
-    q = append_hex(q, native.status.trace_b);
-    /* TR and LT stay in the pram record only: they change on every trace, and a panel payload that
-     * changes every second cannot be scanned (reported on the b101 round). */
+    p = append_hex(p, native.status.command_b);
+    q = append_hex(q, native.status.command_b);
+    p = append_text(p, " G=");
+    p = append_decimal(p, native.status.core_event_bytes);
+    p = append_text(p, " EV=");
+    p = append_hex(p, native.status.core_last_event);
     p = append_text(p, " TR=");
     p = append_decimal(p, native.status.traces);
     p = append_text(p, " LT=");
@@ -747,8 +751,8 @@ static void pram_state(void)
     p = append_text(p, " P=");
     p = append_decimal(p, pram_polls);
     pram_write(QCOM_USB_PRAM_STATE, text, (size_t)(p - text));
-    /* The panel gets the same fields without the poll counter: that counter changes every 256 polls,
-     * and repainting on every change is what made the card flicker (reported on the b96 round). */
+    /* The panel line is stable by construction: every field in it changes only on a real transition, so
+     * an unchanged report repaints nothing (reported on the b101 round). */
     fb_report(panel, 0);
 }
 /* Four hex digits, fixed width: a field that shortens when its value is small makes two records
@@ -1046,6 +1050,11 @@ static void core_trace(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t
     native.status.last_trace = (uint32_t)event;
     native.status.trace_a = a; native.status.trace_b = b;
     native.status.traces++;
+    /* A COMMAND trace only ever happens for a command the core refused; keep the last one in its own
+     * slot so the following event traces cannot erase it. */
+    if (event == DWC3_TRACE_COMMAND) {
+        native.status.command_a = a; native.status.command_b = b;
+    }
     /* Every trace is evidence that the controller posted an event and the core drained it, so the
      * count in the phase record answers "is the event path alive" on its own. The setup packet gets
      * its own slot; a periodic refresh keeps the count current without writing on every event. */
