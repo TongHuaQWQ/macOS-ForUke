@@ -5108,3 +5108,26 @@ PASS: unknown core refuses before writes; stuck command exits within 10000 one-m
 1. 主机 `dmesg` 是否出现 `cdc_acm 1-1:1.0: ttyACM0: USB ACM device`；
 2. 面板 `S` 是否在 `0 ↔ 6 ↔ 8` 之间滚动，`ER` 是否不涨；
 3. 若仍卡住，看 `S` 停在哪个值 + `TA/TB`，即可直接定位是哪一条 TRB 命令被拒。
+
+### 89h. 面板行的**列数上限**是 60，所以字段要按价值排序
+
+`QCOM_USB_FB_WIDTH = 60`（`kernel/QcomXnuUsbDebug.c`），`fb_copy()` 到 60 列就截断。原先状态行是
+`PH/E/CR/G/EV/TA/TB`，加上新的 `S=`/`ER=` 后最坏情况会到 69 列 —— `TA/TB` 正好被切掉，而那正是
+"命令被拒"时唯一有用的两个字段。改成：
+
+```
+PH=18 E=13 CR=-4 S=8 ER=12 TA=00060006 TB=00001006      ← 50 列，最坏情况
+```
+
+`G`（未读事件字节）、`EV`（最后原始事件）、`TR`/`LT`（trace 计数）、`P`（轮询计数）只留在 pram 记录里
+（`EV` 与 T9 事件历史重复，其余变化太快、不适合扫描）。
+
+**另外 `TA/TB` 换了来源。** §88j 给每个事件都加了一条 trace，而 `trace_a/trace_b` 记的是"最后一条
+trace"，于是几微秒之后 `TA` 就被事件覆盖成 `T9` 的参数了 —— 命令被拒的证据会当场消失。
+现在 `core_trace()` 里 `DWC3_TRACE_COMMAND`（只有命令失败才会产生）单独记到
+`status.command_a/command_b`，面板的 `TA/TB` 取的是这两个字段。
+
+### 89i. 本轮提交
+
+- `d21b2be` —— ep0 自己武装数据/状态阶段 + 恢复性卫生（`usb/Dwc3.c`、`usb/Dwc3.h`、`tests/test_dwc3.c`、`include/QcomXnuUsbDebug.h` 的 `core_errors/core_control_state`）；
+- `c59254d` —— 面板状态行重排 + `TA/TB` 专用槽（`kernel/QcomXnuUsbDebug.c`、`include/QcomXnuUsbDebug.h`）。
