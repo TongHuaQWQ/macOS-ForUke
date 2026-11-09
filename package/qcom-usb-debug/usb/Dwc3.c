@@ -347,7 +347,15 @@ static int setup_request(struct dwc3 *d)
     } else if (s[0] == 0xa1 && s[1] == 0x21 && index == 0 && value == 0 && length == 7) {
         reply = d->line_coding; n = 7; ok = 1;
     } else if (s[0] == 0x21 && s[1] == 0x20 && index == 0 && value == 0 && length == 7) {
-        d->control_length = 7; d->control_state = CTRL_OUT_WAIT; return 0;
+        /* SET_LINE_CODING is the only host-to-device data stage. Arm it here like every other stage;
+         * CTRL_OUT_WAIT stays as the event-driven fallback if the core refuses the pre-arm. */
+        d->control_length = 7;
+        d->control_state = CTRL_OUT_ACTIVE;
+        if (transfer(d, 0, DWC3_TRBCTL_CONTROL_DATA, 64)) {
+            d->control_state = CTRL_OUT_WAIT;
+            return -4;
+        }
+        return 0;
     } else if (s[0] == 2 && s[1] == 1 && value == 0 && length == 0 &&
                (index == 0x81 || index == 2 || index == 0x82)) {
         unsigned ep = ((index & 15u) << 1) | ((index >> 7) & 1u);

@@ -1,7 +1,36 @@
 # uke 移植现状与下一步
 
-这份文件是给**下一次会话**的交接。先读它，再读 `PROGRESS.md`（历史）和 `RECOVERY-LOG.md`（事故）。
-最后更新：2026-11-06（第 b49 轮之后）
+这份文件是给**下一次会话**的交接。它按轮次追加，已经 5000 多行，所以先看下面这张"现在在哪"再往下翻。
+
+## 0. 现在在哪（每次会话先看这 30 行）
+
+| 项 | 值 |
+|---|---|
+| 目标 | Xiaomi Pad 7（uke / SM7675 "Cliffs"）上跑 macOS 26.5.2（25F84），4 KiB 页 + arm64e/PAC 自建 XNU |
+| 当前卡点 | 内核侧 DWC3 **CDC-ACM 日志串口**枚举不起来（主机报 `-71` / `-110`），日志目前只能靠**面板二维码** |
+| 当前镜像 | `work/flash/vendor_boot_round-b105-ep0arm.img`（sha `d7352c07…`）+ `boot-round-b105-ep0arm.img`（固件，sha `6bab1734…`，自 b92b 起未变） |
+| 索引 | `work/flash/INDEX.md`（每轮镜像、sha、用途）；恢复原厂：`fastboot flash vendor_boot_a device/uke-backup/uke-backup/vendor_boot_a.img` |
+| 正在做的事 | §89–§92：ep0 三个阶段由驱动**自己武装**、`SET_ADDRESS` 地址立即写、轮询不再以错误自杀、`CONNECTDONE` 重新分配 transfer resource、看门狗不碰已挂起的传输 |
+| 下一轮要看 | 面板 `S=`（控制阶段）、`ER=`（吞掉的错误数）、`LS=`（链路状态）、`TA/TB`（最后一条被拒命令，`TB` 的 bit12..15 = `CmdStatus`）；主机是否出现 `cdc_acm … ttyACM0` |
+| 情报库 | `work/analysis/porting-kb/`（移植知识，含 `linux-dwc3` 源码副本）、`work/analysis/hw-intel/`（9 个分项 + `README.md` 排序后的行动清单，7300 行） |
+| 组件自检 | `package/qcom-usb-debug/scripts/check-component.sh`（一条命令：patch 副本 + gcc/clang `-Werror` 编译 + 28 项 sanitised 测试，几十秒） |
+
+**组件侧的铁律**（违反过，代价是 25 分钟的 CI 轮次）：改内核/归档代码前，先跑
+`scripts/check-component.sh`；任何改动都可能只在 macOS runner 上编译，所以能在主机上验证的就别留给 CI。
+
+### 章节索引
+
+| 章节 | 主题 |
+|---|---|
+| §1–§20 | 目标、已证实事实、引导链、DarwinBoot 交接 |
+| §21–§60 | XNU 重编/重链、kext、存储、显示、GIC/定时器探针 |
+| §61–§79 | 内核启动推进、panic 屏、arm64e/PAC、prelink |
+| §80–§83 | USB 复盘的起点：为什么走 `QcomXnuUsbDebug` 而不是 `QcomDwc3` |
+| §84–§88 | 面板二维码/OneSend 帧（内核→人的日志通道）|
+| §89 | ep0 自己武装各阶段 + 恢复性卫生（当前主线）|
+| §90 | 硬件情报汇总落地（A3–A6）|
+| §91 | b105 镜像、面板字段判读表、主机 `usbmon` |
+| §92 | b105 真机结果：`CONNECTDONE` 里一处 `-4`、看门狗误杀、resource 未重分配 |
 
 ---
 
@@ -5289,3 +5318,72 @@ PH=19 E=0 CR=0 S=0 ER=1 LS=0 TA=00000000 TB=00001006      ← 52 列（上限 60
 
 `tests/test_dwc3.c` 全绿（`clang -fsanitize=address,undefined -Werror`），包含
 "一条 `XferNotReady` 都不发也能走完枚举"和"预挂被拒后退回事件驱动"两个新用例。
+
+## 93. 项目自身的优化：把"25 分钟才知道"变成"几十秒就知道"
+
+这一节的出发点：情报库（`work/analysis/hw-intel/` 9 个分项 + `porting-kb/`）读完后，最该改的不是 DWC3 的某一行，
+而是**这个项目验证自己的方式**。b98 以来每一次内核侧失误都是同一个模式：改动只能在 macOS runner 上编译，
+于是 25 分钟后才在 CI 里看到一句 `error:`。下面四件事都是冲着这个模式去的。
+
+### 93a. 一条命令的组件自检：`package/qcom-usb-debug/scripts/check-component.sh`
+
+```
+bash package/qcom-usb-debug/scripts/check-component.sh          # 全量，几十秒
+bash package/qcom-usb-debug/scripts/check-component.sh --fast   # 只做静态检查，几秒
+```
+
+四步：① patch 副本一致性；② **声明顺序检查**（见 93b）；③ 每个 freestanding 单元用 **gcc 和 clang 各编一遍**
+`-Wall -Wextra -Werror`（`usb/Dwc3.c`、`soc/QcomUsbQualify.c`、`soc/QcomUsbDmaDomain.c`）；
+④ `tests/check.py` —— sanitised 模型、两个交叉编译三元组（含导入审计）、两个 SoC profile、
+`test_domain`/`test_usb_buffer`/`test_usb_control`/`test_usb_screenshot`、继承状态检查器、
+编译期必须拒绝的两个用例，以及原生控制处理器 + 主机侧 CLI。**本机实测 28 项全绿**。
+
+### 93b. 新增：`scripts/check-declaration-order.py`
+
+`kernel/QcomXnuUsbDebug.c` 在主机上编不了（要 osfmk/machine 头），所以"在定义之前就调用某个 static 帮手"
+这一整类错误只能等 CI。b106 就是这么挂的：`append_hex32` 定义在 `pram_state()` 之后，
+clang 在 CI 里报 `static declaration of 'append_hex32' follows non-static declaration` 外加三条
+`incompatible integer to pointer conversion`。这个脚本按"文件内的 static 定义 vs 首次使用行号"做文本比对，
+用**重建的那份坏文件**验证过：它准确报出 `:747: append_hex32() is used before its first declaration (line 771)`。
+
+### 93c. 测试套件本身坏了两处（难怪一直没人跑）
+
+- `tests/test_usb_buffer.c` 里还硬写着 **4 MiB**，而 ring 在"静态足迹裁剪"时已经变成 64 KiB ⇒ 整套
+  `tests/check.py` 从那次裁剪起就是红的，于是"跑一下测试"这件事自然就被放弃了。现在改成
+  `SOC_USB_LOG_BUFFER_BYTES`，并把说明文字一起更新。
+- `tests/test_domain.c` 用了 POSIX 的 `posix_memalign` 却没声明 `_POSIX_C_SOURCE`，在 `-std=c11 -Werror`
+  下直接变成编译失败（同样掩盖了真正的断言结果）。已补。
+
+**教训写进 `AGENTS.md`**：改任何公共常量/缓冲区大小时，`grep tests/` 找旧数字。
+
+### 93d. CI 提前跑组件自检
+
+`.github/workflows/build-kernel-min.yml` 在"patch 副本检查"之后加了一步
+**Component self-checks (host compiler only; never blocks the build)**，`continue-on-error: true`
+—— 它只报告、不阻塞内核构建（组件是以 kit 形式被链接进来的，一个坏检查不该挡住下一轮真机）。跑通几个轮次后
+可以去掉 `continue-on-error` 变成硬门禁。
+
+### 93e. 一轮镜像的流水线也做成一条命令：`work/round.py`
+
+今天手工做这条链踩过两次坑（把一个**旧的 zip** 当成本轮产物解包；下载写到 `/tmp` 结果沙箱每次调用都是新的，
+文件消失）。现在：
+
+```
+python3 work/round.py 42606777431 --name b106-cdres     # 拉产物→校验→打 payload→归档→写索引→打印刷写命令
+python3 work/round.py --kernel work/ci-artifacts/b106-cdres/kernel.macho --name b106-cdres  # 只重打镜像
+```
+
+它会：用 `work/analysis/fetch-artifact.sh` 按 1 MB 分段并发拉（这条链路会杀掉长连接）→ 校验字节数与 `unzip -t`
+→ 解包并要求存在 `kernel.macho` → 调 `tools/build-payload-linux.sh` → 把两张镜像拷进 `work/flash/`
+→ 在 `INDEX.md` 表头插入新行（**并保证全局只有一行标着"当前最新内核"**）、末尾"最新可用组合"整段重写
+→ 打印 `fastboot flash vendor_boot_a …` 与 `fastboot boot …`。用 b105 的内核做过一次完整预演（随后清理了预演行）。
+
+### 93f. `docs/STATE.md` 加了导航
+
+5320 行的交接文档顶部现在是"**现在在哪**"（目标/当前卡点/当前镜像/索引/正在做的事/下一轮看什么/情报库/组件自检）
+＋ 章节索引表（§1–§20 … §89–§93）。下次会话不用从 5000 行里找线索。
+
+### 93g. 顺手做完的一致性改动
+
+- `SET_LINE_CODING` 是最后一个还在等 `XferNotReady` 的路径，现在也**在 SETUP 解码时立即武装**（`CTRL_OUT_WAIT` 保留为回退）；
+- 模型里补了对应断言（TRB 类型/长度），`tests/check.py` 仍然 28 项全绿。

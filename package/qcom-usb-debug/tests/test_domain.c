@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: MIT */
+/* posix_memalign is a POSIX name; without this the strict -std=c11 build sees an implicit declaration
+ * and -Werror turns the suite into a build failure that says nothing about the component. */
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

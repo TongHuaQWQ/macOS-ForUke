@@ -271,6 +271,16 @@ static char *append_decimal(char *to, uint64_t value)
     return to;
 }
 /* Registers are read as words; decimal would make them unreadable against the manual. */
+/* Eight hex digits, fixed width, for the same reason as append_hex16 and because a 4-bit command status
+ * hides in the middle of the word: TB's bits 12..15 are CmdStatus, so TB=00001006 is a refused
+ * StartTransfer (status 1) and TB=00000006 is the same command with status 0. */
+static char *append_hex32(char *to, uint32_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    int shift;
+    for (shift = 28; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
+    return to;
+}
 static char *append_hex(char *to, uint64_t value)
 {
     static const char digits[] = "0123456789abcdef";
@@ -764,16 +774,6 @@ static void pram_state(void)
     /* The panel line is stable by construction: every field in it changes only on a real transition, so
      * an unchanged report repaints nothing (reported on the b101 round). */
     fb_report(panel, 0);
-}
-/* Eight hex digits, fixed width, for the same reason as append_hex16 and because a 4-bit command status
- * hides in the middle of the word: TB's bits 12..15 are CmdStatus, so TB=00001006 is a refused
- * StartTransfer (status 1) and TB=00000006 is the same command with status 0. */
-static char *append_hex32(char *to, uint32_t value)
-{
-    static const char digits[] = "0123456789abcdef";
-    int shift;
-    for (shift = 28; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
-    return to;
 }
 /* Four hex digits, fixed width: a field that shortens when its value is small makes two records
  * impossible to compare at a glance. */

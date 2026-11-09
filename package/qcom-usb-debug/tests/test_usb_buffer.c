@@ -74,14 +74,16 @@ static void large_backlog(void)
         for (size_t i = 0; i < sizeof(chunk); i++) chunk[i] = (uint8_t)((offset + i) * 17u);
         assert(soc_usb_buffer_write(&ring, chunk, sizeof(chunk)) == sizeof(chunk));
     }
-    assert(ring.used == 4u * 1024u * 1024u && ring.high_water == sizeof(storage));
+    /* The ring is SOC_USB_LOG_BUFFER_BYTES (64 KiB) since the static footprint was cut to fit the
+     * retained __DATA window; the hardcoded 4 MiB here was stale and broke the whole suite (STATE 93). */
+    assert(ring.used == SOC_USB_LOG_BUFFER_BYTES && ring.high_water == sizeof(storage));
     assert(soc_usb_buffer_write(&ring, "overflow", 8) == 0);
     sink_limit = 127;
     drain();
     assert(received_bytes == sizeof(storage));
     for (size_t i = 0; i < received_bytes; i++) assert(received[i] == (uint8_t)(i * 17u));
     assert(ring.overflow == 8 && ring.accepted == sizeof(storage));
-    puts("PASS: full 4 MiB backlog replays without overwrite under partial 127-byte USB-style acceptance");
+    puts("PASS: a full 64 KiB backlog replays without overwrite under partial 127-byte USB-style acceptance");
 }
 #define PRODUCERS 4u
 #define MESSAGES 10000u

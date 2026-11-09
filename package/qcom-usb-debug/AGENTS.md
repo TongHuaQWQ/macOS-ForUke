@@ -15,7 +15,8 @@ Read `README.md`, `docs/boundaries.md`, `docs/porting-other-socs.md`, then `docs
 ## Tests and evidence
 
 - Put test sources, runners and checked-in fixtures in `tests/`. Keep build, patch-management and runtime tools in `scripts/`.
-- Run `tests/check.py`, `scripts/build.py` and `tests/check_xnu.py` as described in `docs/integration.md`. New SoC profiles need an explicit test-matrix entry and matching fixtures.
+- **Run `scripts/check-component.sh` before every push.** It is the one command that needs nothing but a host C compiler: patch copies, a gcc *and* clang `-Wall -Wextra -Werror` compile of every freestanding unit, then `tests/check.py` (sanitised models, two cross-compile triples with import audits, two SoC profiles, the native control handler). Use `--fast` to skip the suite and still catch compile errors. Kernel archives only build on a macOS runner, so anything this script can catch is a 25-minute CI round saved.
+- Run `tests/check.py`, `scripts/build.py` and `tests/check_xnu.py` as described in `docs/integration.md`. New SoC profiles need an explicit test-matrix entry and matching fixtures. When a public constant or a buffer size changes, grep `tests/` for the old number: a stale expectation (a hardcoded 4 MiB ring after the 64 KiB reduction) silently disabled the whole suite.
 - Generated objects, executables and reports belong in workspace `tmp/` or `.cache/`, outside this repository. Preserve original USB captures and their command/recovery metadata under the workspace rules.
 - Report model checks, kernel compilation/linking and hardware acceptance separately. Keep resource sources, revisions, hashes, reports and unverified capabilities with the consumer's adaptation record.
 - Retain file license notices and origin hashes when moving source. Keep original identities in `docs/sources-and-evidence.md`; Git tracks current revisions.

@@ -109,6 +109,18 @@ jobs:
         working-directory: UniXNU-uke
         run: python3 scripts/check-patch-copies.py
 
+      # The kernel archives only compile here, which made every component typo a 25-minute round. This
+      # step runs the checks that need nothing but a host compiler, in under a minute. It reports and
+      # never blocks: the component is a kit checkout, so a broken check must not stop a kernel build
+      # that the next hardware round needs.
+      - name: Component self-checks (host compiler only; never blocks the build)
+        continue-on-error: true
+        working-directory: UniXNU-uke
+        run: |
+          KITS=kits/uke/qcom-usb-debug
+          [ -d "$KITS" ] || KITS=package/qcom-usb-debug
+          bash "$KITS/scripts/check-component.sh" || true
+
       - name: Record revisions
         run: |
           set -x

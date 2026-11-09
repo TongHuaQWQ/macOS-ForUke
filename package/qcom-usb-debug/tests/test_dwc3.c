@@ -264,7 +264,10 @@ int main(void)
     setup(0x21, 0x20, 0, 99, 7); /* Invalid interface must stall, never index an array. */
     assert((eptrb(0)->ctrl & (63u << 4)) == DWC3_TRBCTL_CONTROL_SETUP);
     setup(0x21, 0x20, 0, 0, 7);
-    not_ready(0, DEPEVT_STATUS_CONTROL_DATA); memcpy(dma + 8192, "1234567", 7); complete(0, 57);
+    /* Armed at SETUP decode, so no XferNotReady(DATA) is needed here either. */
+    assert((eptrb(0)->ctrl & (63u << 4)) == DWC3_TRBCTL_CONTROL_DATA && eptrb(0)->size == 64);
+    not_ready(0, DEPEVT_STATUS_CONTROL_DATA); /* A late notification is a no-op. */
+    memcpy(dma + 8192, "1234567", 7); complete(0, 57);
     status_armed(DWC3_TRBCTL_CONTROL_STATUS3);
     setup(0xa1, 0x21, 0, 0, 7);
     assert(!memcmp(dma + 8192 + 4096, "1234567", 7));
