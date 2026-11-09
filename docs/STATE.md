@@ -5387,3 +5387,31 @@ python3 work/round.py --kernel work/ci-artifacts/b106-cdres/kernel.macho --name 
 
 - `SET_LINE_CODING` 是最后一个还在等 `XferNotReady` 的路径，现在也**在 SETUP 解码时立即武装**（`CTRL_OUT_WAIT` 保留为回退）；
 - 模型里补了对应断言（TRB 类型/长度），`tests/check.py` 仍然 28 项全绿。
+
+### 93h. b107 就绪（= §92 的修复 + 本节的全部优化，同一次构建）
+
+`f6ea6f5` 的 CI（run 42609807320）全绿，且**新的自检步骤真的跑了**：
+
+```
+== declaration order
+declaration order ok (2 file(s))
+   skipped gcc (it is clang here)          ← runner 上的 gcc 就是 clang，自动跳过
+Passed 28 checks: …/.cache/component-checks/check-report.json
+component checks passed
+```
+
+镜像（用新工具 `work/round.py` 一条命令产出）：
+
+```
+work/flash/vendor_boot_round-b107-cdres.img  85782528 B  sha256 90ed5adc58c8be50…
+    kernel.macho sha256 6b7eff9f10340e9ce65da6d6e5331b9116cf5e61679f3f060e1450712db63ada
+work/flash/boot-round-b107-cdres.img          1122304 B  sha256 6bab1734de52bcbb…（固件未改）
+```
+
+```
+fastboot flash vendor_boot_a work/flash/vendor_boot_round-b107-cdres.img
+fastboot boot            work/flash/boot-round-b107-cdres.img
+```
+
+相对 b105 的实质变化：`CONNECTDONE` 重新分配 transfer resource（并给每个子步骤留 `0xc0de000N` 标记）、
+看门狗不再取消已挂起的传输、`TA/TB` 定宽八位、`SET_LINE_CODING` 也改成立即武装。
