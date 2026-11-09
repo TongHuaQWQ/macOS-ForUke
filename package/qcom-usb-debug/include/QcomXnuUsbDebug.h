@@ -92,7 +92,7 @@ typedef struct qcom_usb_debug_status {
     uint32_t control_enabled, control_hook_owned, control_reboot_state, control_rejected;
     /* Recoverable core errors and the control stage the core is waiting on, so the panel can tell a
      * wedged endpoint 0 from a dead controller (STATE 89). */
-    uint32_t core_errors, core_control_state;
+    uint32_t core_errors, core_control_state, core_link_state;
     /* The most recent *refused* endpoint command: (ep << 16) | command, and the DEPCMD result with its
      * status field. Kept apart from trace_a/trace_b because the per-event trace would otherwise
      * overwrite it within a few microseconds (STATE 89). */

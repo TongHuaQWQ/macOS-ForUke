@@ -182,7 +182,10 @@ int main(void)
     }
     descriptor_tests();
     assert(last_in_fifo == 2);
-    assert(regs[DWC3_GUSB2PHYCFG(0) / 4] == ((1u << 6) | (1u << 8)));
+    /* SUSPHY and ENBLSLPM are cleared by the first endpoint command and stay clear: the board's own
+     * device tree asks for that (snps,dis_u2_susphy_quirk), and an idle-suspended PHY between polls was
+     * a live hazard (STATE 90). */
+    assert((regs[DWC3_GUSB2PHYCFG(0) / 4] & ((1u << 6) | (1u << 8))) == 0);
     assert(dwc3_start(dev) == 0);
     assert(dwc3_queue(dev, "early log\n", 10) == 10);
     event(1u | (DWC3_DEVT_USBRST << 8));
@@ -356,7 +359,8 @@ int main(void)
     unsigned before_timeout = delays;
     assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == -4);
     assert(delays == before_timeout + 10000 && regs[DWC3_DEVTEN / 4] == 0 && regs[DWC3_DALEPENA / 4] == 0);
-    assert(regs[DWC3_GUSB2PHYCFG(0) / 4] == ((1u << 6) | (1u << 8)));
+    /* The clear is one-way now, so a failed init leaves the suspend controls clear rather than restored. */
+    assert((regs[DWC3_GUSB2PHYCFG(0) / 4] & ((1u << 6) | (1u << 8))) == 0);
     puts("PASS: unknown core refuses before writes; stuck command exits within 10000 one-microsecond polls");
     return 0;
 }

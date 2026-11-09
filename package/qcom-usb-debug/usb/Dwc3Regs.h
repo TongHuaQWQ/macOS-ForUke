@@ -335,7 +335,10 @@ typedef uint32_t u32;
 #define DWC3_DEPCMD_PARAM_SHIFT    16
 #define DWC3_DEPCMD_PARAM(x)       ((x) << DWC3_DEPCMD_PARAM_SHIFT)
 #define DWC3_DEPCMD_GET_RSC_IDX(x) (((x) >> DWC3_DEPCMD_PARAM_SHIFT) & 0x7f)
-#define DWC3_DEPCMD_STATUS(x)      (((x) >> 15) & 1)
+/* Command status is the four-bit field at bit 12; the pre-2015 macro read bit 15 and therefore decoded
+ * status 1 ("no transfer resource") as success. usb/Dwc3.c hand-codes the right field, so this is a trap
+ * for the next caller rather than a live bug (STATE 90). */
+#define DWC3_DEPCMD_STATUS(x)      (((x) >> 12) & 0xf)
 #define DWC3_DEPCMD_HIPRI_FORCERM  (1u << 11)
 #define DWC3_DEPCMD_CMDACT         (1u << 10)
 #define DWC3_DEPCMD_CMDIOC         (1u << 8)

@@ -732,6 +732,14 @@ static void pram_state(void)
     /* The core only traces a COMMAND when the endpoint command *failed*, and trace_a carries
      * (ep << 16) | cmd while trace_b carries the DEPCMD result with its status field - so these two
      * name the exact command and its refusal (STATE 86). */
+    /* DSTS.USBLNKST when the last control stage was armed: 0 = U0, 2 = L1/L2, 3 = U3. A start transfer
+     * in a suspended link may never complete, so this distinguishes "the stage was armed in a dead link"
+     * from "the core never finished the previous stage" (STATE 90). */
+    native.status.core_link_state = dwc3_link_state(native.core);
+    p = append_text(p, " LS=");
+    q = append_text(q, " LS=");
+    p = append_decimal(p, native.status.core_link_state);
+    q = append_decimal(q, native.status.core_link_state);
     p = append_text(p, " TA=");
     q = append_text(q, " TA=");
     p = append_hex(p, native.status.command_a);

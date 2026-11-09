@@ -81,6 +81,8 @@ uint32_t dwc3_last_event(const struct dwc3 *dev);
  * (CTRL_SETUP) while errors keep counting. */
 uint32_t dwc3_control_state(const struct dwc3 *dev);
 uint32_t dwc3_errors(const struct dwc3 *dev);
+/* DSTS.USBLNKST sampled when the last control stage was armed: 0 = U0, 2 = L1/L2, 3 = U3, ... */
+uint32_t dwc3_link_state(const struct dwc3 *dev);
 size_t dwc3_queued(const struct dwc3 *dev);
 uint64_t dwc3_dropped(const struct dwc3 *dev);
 size_t dwc3_rx_pending(const struct dwc3 *dev);
@@ -95,7 +97,7 @@ struct dwc3_snapshot {
     int32_t failed;
     /* Recoverable errors seen while polling. A non-zero value is not fatal: the driver keeps serving
      * events, so a console that is alive but saw bad handshakes shows up here instead of going silent. */
-    uint32_t errors, stalled_polls;
+    uint32_t errors, stalled_polls, link_state;
 };
 /* Read-only diagnostics, for callers that already own powered MMIO access. */
 void dwc3_snapshot(struct dwc3 *dev, struct dwc3_snapshot *snapshot);

@@ -39,6 +39,7 @@ struct dwc3 {
     uint8_t zlp_pending, running, initialized, full_speed, usb31;
     int failed;
     uint32_t events, commands, last_event, errors, stalled_polls;
+    uint8_t link_state;
     uint64_t dropped;
     uint8_t device_descriptor[18], manufacturer[64], product[64], serial[64];
 };
@@ -156,8 +157,11 @@ static int ep_command(struct dwc3 *d, unsigned ep, uint32_t cmd,
     int ret = 0;
     d->commands++;
     /* DWC_usb31 1.90a guide 3.2.2, also Linux dwc3_send_gadget_ep_cmd:
-     * HS/FS endpoint commands require both PHY suspend controls disabled. */
-    if (phy & suspend) wr(d, DWC3_GUSB2PHYCFG(0), phy & ~suspend);
+     * HS/FS endpoint commands require both PHY suspend controls disabled. The clear is permanent now:
+     * restoring SUSPHY after each command left the PHY idle-suspended between polls, and both the
+     * board's own device tree (snps,dis_u2_susphy_quirk) and the vendor glue (SUSPHY set => DSTS
+     * CtrlDevHalt never asserts) say the opposite (STATE 90). */
+    if (phy & suspend) { wr(d, DWC3_GUSB2PHYCFG(0), phy & ~suspend); phy = 0; }
     wr(d, DWC3_DEPCMDPAR0(ep), p0);
     wr(d, DWC3_DEPCMDPAR1(ep), p1);
     wr(d, DWC3_DEPCMDPAR2(ep), p2);
@@ -243,6 +247,10 @@ static uint32_t status_type(const struct dwc3 *d)
  * control_not_ready() can arm it when the notification does arrive. */
 static int arm_status(struct dwc3 *d, unsigned ep, uint32_t type, uint8_t active, uint8_t wait)
 {
+    /* A start transfer while the link is in L1/L2/U3 may never complete, so the link state is recorded
+     * next to the transfer it belongs to. Trace only: refusing to arm would convert a slow link into a
+     * dead console (STATE 90). */
+    d->link_state = (uint8_t)DWC3_DSTS_USBLNKST(rd(d, DWC3_DSTS));
     d->control_state = active;
     if (!transfer(d, ep, type, 0)) return 0;
     d->control_state = wait;
@@ -386,8 +394,16 @@ static int control_not_ready(struct dwc3 *d, unsigned ep, unsigned status)
         if (ep != 0 || status != DEPEVT_STATUS_CONTROL_STATUS) return 0;
         d->control_state = CTRL_STATUS_OUT_ACTIVE;
         return transfer(d, 0, status_type(d), 0);
-    default: return 0;
+    default: break;
     }
+    /* Reached only when the notification does not fit the state machine. It must not be dropped: the
+     * core filters further XferNotReady for that endpoint until software issues an endpoint command, so
+     * consuming the event and doing nothing wedges that stage for good (STATE 90). Issue ClearStall as
+     * that command - it is harmless on a clean endpoint and resets the data toggle a restart expects
+     * anyway - and record what was refused. */
+    trace(d, DWC3_TRACE_BAD_EVENT, 0x0D000000u | (ep << 8) | status, (uint32_t)d->control_state);
+    d->errors++;
+    return ep_command(d, ep, DWC3_DEPCMD_CLEARSTALL, 0, 0, 0);
 }
 static int control_complete(struct dwc3 *d, unsigned ep, uint32_t residual)
 {
@@ -558,7 +574,10 @@ int dwc3_init(void *context, size_t context_bytes,
     d->packet_size = 512;
     d->line_coding[0] = 0; d->line_coding[1] = 0xc2;
     d->line_coding[2] = 1; d->line_coding[6] = 8;
-    id = rd(d, DWC3_GSNPSID); trace(d, DWC3_TRACE_ID, id, 0);
+    /* One trace names the core (GSNPSID: 0x5533xxxx = DWC_usb3, 0x3331xxxx = DWC_usb31) and, in the
+     * second argument, GHWPARAMS3 with its endpoint counts, so a single frame settles every
+     * version-dependent branch (STATE 90). */
+    id = rd(d, DWC3_GSNPSID); trace(d, DWC3_TRACE_ID, id, rd(d, DWC3_GHWPARAMS3));
     if ((id & 0xffff0000u) != 0x55330000u && (id & 0xffff0000u) != 0x33310000u)
         return -2;
     d->usb31 = (id & 0xffff0000u) == 0x33310000u;
@@ -700,6 +719,7 @@ uint32_t dwc3_last_event(const struct dwc3 *d)
     return d ? d->last_event : 0;
 }
 uint32_t dwc3_control_state(const struct dwc3 *d) { return d ? d->control_state : 0; }
+uint32_t dwc3_link_state(const struct dwc3 *d) { return d ? d->link_state : 0; }
 uint32_t dwc3_errors(const struct dwc3 *d) { return d ? d->errors : 0; }
 int dwc3_ready(const struct dwc3 *d) { return d && d->running && !d->failed && d->configured && d->dtr; }
 size_t dwc3_queued(const struct dwc3 *d) { return d ? d->tx_used : 0; }
@@ -720,7 +740,7 @@ void dwc3_snapshot(struct dwc3 *d, struct dwc3_snapshot *s)
     s->configured = d->configured; s->dtr = d->dtr; s->queued = d->tx_used;
     s->rx_pending = d->rx_used; s->rx_generation = d->rx_generation;
     s->rx_overflow = d->rx_overflow;
-    s->errors = d->errors; s->stalled_polls = d->stalled_polls;
+    s->errors = d->errors; s->stalled_polls = d->stalled_polls; s->link_state = d->link_state;
     for (ep = 0; ep < EP_COUNT; ep++) if (d->active[ep]) s->active_endpoints |= 1u << ep;
 }
 int dwc3_stop(struct dwc3 *d)

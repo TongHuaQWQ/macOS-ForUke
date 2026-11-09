@@ -5131,3 +5131,48 @@ trace"，于是几微秒之后 `TA` 就被事件覆盖成 `T9` 的参数了 —�
 
 - `d21b2be` —— ep0 自己武装数据/状态阶段 + 恢复性卫生（`usb/Dwc3.c`、`usb/Dwc3.h`、`tests/test_dwc3.c`、`include/QcomXnuUsbDebug.h` 的 `core_errors/core_control_state`）；
 - `c59254d` —— 面板状态行重排 + `TA/TB` 专用槽（`kernel/QcomXnuUsbDebug.c`、`include/QcomXnuUsbDebug.h`）。
+
+## 90. 硬件情报汇总（9 个子代理）＋ A3–A6：SUSPHY 一次性清零、NRDY 不许吞、命令状态字段、核心身份
+
+情报库：`work/analysis/hw-intel/`（`README.md` 是排序后的行动清单，`01`–`09` 是分项报告）。
+其中几条**直接可执行**的结论已经并进这一轮：
+
+### 90a. `GUSB2PHYCFG` 的挂起位改成**一次性清零**（A3）
+
+原先 `ep_command()` 是"命令前清、命令后恢复"，于是两次轮询之间 PHY 一直处在 idle-suspend 允许状态。
+三条独立证据都指向反方向：
+
+- 板级 DT 自己就写了 `snps,dis_u2_susphy_quirk` / `snps,usb2-lpm-disable` / `snps,usb2-gadget-lpm-disable`（`hw-intel/02`、`04 §3`）；
+- vendor glue 的注释原文：**"if the SUSPHY bit of USB2PFYCFG(0) is set, then DSTS_CtrlDevHalt bit is not
+  getting set to '1'"**（`hw-intel/05 §9.1`）；
+- Linux `dwc3/core.c` 在 1.94a 之后的核心上会**重新置位** SUSPHY，只有 quirk 才拦住它（`04 §3`），
+  且 `gadget.c` 明说在 L1/L2/U3 里 `Start Transfer` *may not complete*（`04 §2`）。
+
+改法：首次命令时清掉 `SUSPHY|ENBLSLPM` 且**不再恢复**；`arm_status()` 顺手把 `DSTS.USBLNKST` 采样下来，
+面板新增 `LS=`（0=U0, 2=L1/L2, 3=U3）。`LS != 0` 就说明"阶段是在挂起的链路上武装的"。
+
+### 90b. `XferNotReady` 一旦被消费，就必须发一条端点命令（A4）
+
+databook（NXP i.MX 8M Plus RM 逐字复刻 DWC_usb3 设备章节，见 `hw-intel/07 §7`）说明：状态阶段的
+`XferNotReady` 只发**一次**，之后核心会**过滤**掉后续通知，直到软件对该端点发一条端点命令。
+我们原来的 `control_not_ready()` 在状态机不匹配时 `return 0` —— 事件被消费、命令没发 ⇒ 该阶段永久卡死，
+而且面板上什么都不显示。现在这条路径改为：记 `BAD_EVENT`（`0x0D` 前缀，带 ep/status/control_state）
+＋ `errors++` ＋ 对该 ep 发 `CLEARSTALL`（既是端点命令、又顺带复位 data toggle）。
+
+### 90c. 命令状态字段修正（A5）
+
+`usb/Dwc3Regs.h` 里的 `DWC3_DEPCMD_STATUS(x)` 还是 2015 年前那版 `(x >> 15) & 1`，会把 `CmdStatus=1`
+（Invalid Resource）读成成功。`usb/Dwc3.c` 里是手写的正确字段，所以目前是**死代码陷阱**，已改成
+`(x >> 12) & 0xf`。
+
+### 90d. 核心身份一次读全（A6）
+
+`DWC3_TRACE_ID` 的第二参数现在带 `GHWPARAMS3`，一帧就能同时看出核心型号与端点数目。顺带确认：
+b103 面板上的 `TA=33313130` 正是这个 ID，`0x3331xxxx` ⇒ **我们这颗是 DWC_usb31**，所以
+`ENDTRANSFER` 走的是"不轮询 CMDACT、固定 1 ms 延时"那条分支（`07 §13` P8）。
+
+### 90e. 情报库里**还没有**的东西（下一轮别指望）
+
+- 主机侧原始 `dmesg` / `usbmon` pcap 一份都没有存过（所有主机观察都只是 `STATE.md` 里的引述）；
+- XBL 自己的 PHY 表（`/soc/usb0/hs_phy_cfg`、`ss_phy_cfg`）在 `xbl_a.img` 里，本轮没人有权限动 `device/`；
+- XNU 下从未读过 `GSNPSID`/`GHWPARAMS`/`PHYSTATUS` 的实际值（`0x33313130` 是唯一线索）。
