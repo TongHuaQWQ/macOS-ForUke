@@ -394,6 +394,16 @@ def open_serial(path):
     attributes = termios.tcgetattr(descriptor)
     attributes[2] |= termios.CLOCAL | termios.CREAD
     termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
+    # Raise DTR before reading. The device side gates transmission on it -- its transmit path checks
+    # the host's line state (`if (!d->dtr || d->active[EP_IN]) return 0;` in usb/Dwc3.c) -- so a host
+    # that only opens the tty reads zero bytes forever and calls it "the device printed nothing".
+    # This is trap 12 in Lux12138/nabu-usb-cdc docs/03-traps.md, learned the hard way there.
+    try:
+        import fcntl
+        fcntl.ioctl(descriptor, termios.TIOCMBIS, struct.pack('I', termios.TIOCM_DTR))
+    except (ImportError, AttributeError, OSError) as error:
+        # macOS has no termios DTR; the port still opens, so degrade loudly rather than fail.
+        print(f'warning: could not raise DTR ({error}); a silent device may just be waiting for it')
     return descriptor
 
 
