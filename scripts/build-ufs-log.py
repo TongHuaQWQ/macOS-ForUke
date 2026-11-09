@@ -54,6 +54,7 @@ IOLockAlloc/Lock/Unlock, IOMallocContiguous, mach_absolute_time, ml_io_map and P
 """
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -83,6 +84,32 @@ FORBIDDEN_PREFIXES = ('__cxa_', '__gxx_', '_Unwind_', '__dynamic_cast', '__si_')
 
 def load_record(name):
     return json.loads((ROOT / name).read_text().strip().rstrip(','))
+
+
+def driver_headers():
+    """The directory holding RootCommands.h / RootDiagnostics.h / SmmuTakeover.h ...
+
+    NOT necessarily <tree>/drivers/NativeUfs: the build tree links only the components the configuration
+    selects, and this one turns CONFIG_XNU_NATIVE_UFS off, so NativeUfs is not linked into it at all --
+    which is what archive-18 reported on run 42662408667 ("'RootDiagnostics.h' file not found") after
+    the whole archive had otherwise compiled. The device checkout is handed to every archive step as
+    UNIXNU_DEVICE, and drivers/NativeUfs lives there whatever the tree does.
+    """
+    device = os.environ.get('UNIXNU_DEVICE')
+    candidates = []
+    if device:
+        candidates.append(Path(device) / 'drivers/NativeUfs')
+    candidates += [ROOT / 'drivers/NativeUfs', ROOT / 'package/native-ufs']
+    for candidate in candidates:
+        if (candidate / 'RootDiagnostics.h').is_file():
+            return candidate
+    for base in (ROOT, Path(device) if device else None):
+        if base is not None and base.is_dir():
+            for path in base.rglob('RootDiagnostics.h'):
+                return path.parent
+    raise SystemExit('cannot find the UfsLog transport headers (RootDiagnostics.h); probed '
+                     + ', '.join(str(c) for c in candidates)
+                     + (f' and searched {ROOT} and {device}' if device else f' and searched {ROOT}'))
 
 
 def find_record(candidates, what):
@@ -166,7 +193,7 @@ def main():
     """Compile both units with the kernel's own records, archive them, and assert the exports."""
     # Only the driver's own transport headers: package/UfsLogKernel.c declares the five IOKit
     # entry points it calls, so nothing here needs an include path invented from the record.
-    includes = ['-I', str(ROOT / 'drivers/NativeUfs')]
+    includes = ['-I', str(driver_headers())]
     # -Wall -Wextra without -Werror: the headers are the driver's, not this port's, and a warning here must
     # not cost a kernel round. Both logs land in the artifact and the report, so a later round can tighten.
     warnings = ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Wno-unused-parameter',

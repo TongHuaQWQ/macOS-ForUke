@@ -24,6 +24,7 @@ Exit 0 on success, 1 on the first failed step.
 """
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -125,7 +126,22 @@ def record_probing():
                 raise SystemExit(f'record probing: unhelpful failure: {failure}')
         else:
             raise SystemExit('record probing: a missing record must fail, not return something')
+        # The transport headers are NOT in <tree>/drivers/NativeUfs: the tree links only the components
+        # the configuration selects, and CONFIG_XNU_NATIVE_UFS is off here. UNIXNU_DEVICE points at the
+        # checkout that always has them -- archive-18 on run 42662408667 is what happens without this.
+        device = tree / 'device'
+        (device / 'drivers/NativeUfs').mkdir(parents=True)
+        (device / 'drivers/NativeUfs/RootDiagnostics.h').write_text('#pragma once\n')
+        empty = tree / 'tree'
+        empty.mkdir()
+        build.ROOT = empty
+        os.environ['UNIXNU_DEVICE'] = str(device)
+        found = build.driver_headers()
+        if found != device / 'drivers/NativeUfs':
+            raise SystemExit(f'driver headers: expected the device checkout, got {found}')
+        del os.environ['UNIXNU_DEVICE']
         print('PASS: compile records are probed, the fallback is named, and a missing one fails loudly')
+        print('PASS: transport headers come from UNIXNU_DEVICE when the tree does not link NativeUfs')
 
 
 def main():
