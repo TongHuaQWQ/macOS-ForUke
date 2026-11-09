@@ -4987,3 +4987,40 @@ work/flash/boot-round-b103-events.img         1122304 B  sha256 6bab1734de52bcbb
 | `T5 …` 之后无任何事件 | ep0 IN 数据阶段未完成（TRB 未提交或完成事件丢失）|
 | 有 `T4`/其它但无状态阶段事件 | `control_not_ready()` 未命中 `CTRL_STATUS_OUT_WAIT` |
 | 出现新的 `T3`（COMMAND 失败）| 状态阶段的 TRB 命令被拒（`TB` 会给状态码）|
+
+### 88i. b103 真机：**这次没有失败**（`E=0`），但 SETUP 之后没有事件
+
+用户拍到的帧（`OS B1/3 LEN 133/134`）：
+
+```
+PH 18 E 13 CR -4 … T3 6 1006 T4 2 2CDE      ← 旧失败记录（还在事件环里）
+PH 18 E 0  CR 0 G 0 EV 0 TA 33313130 TB 0 T5 80060100 40 T4 2 …   ← ★ 最新状态
+```
+
+- **`E 0 CR 0`** —— 本次**没有任何失败**，组件健康（不再有 `T3` 端点命令失败）；
+- `T5 80060100 40` = SETUP：`rt=80 rq=06 v=0100 len=0x40`（GET_DESCRIPTOR）；
+- 它之后**没有更多事件**，请求历史里也没有 `rq=0005`。
+
+结论：**SETUP 收到并应答了数据阶段，但状态阶段的事件再也没进来**，于是 `setup_phase()` 没被调用、
+ep0 不重新挂起、`SET_ADDRESS` 收不到。这是"安静地卡住"，不是错误。
+
+### 88j. 于是把**每一个端点事件**都记录下来
+
+`handle_event()` 入口新增一条 trace（`DWC3_TRACE_EVENT`，a=原始事件字，b=当时的 `control_state`）：
+
+```
+T9 <event> <control_state>
+```
+
+解码表：
+
+| 字段 | 含义 |
+|---|---|
+| `event` bit0=1 | 设备事件：`event>>8 & 0xf` 是类型（1=USBRST, 2=CONNECTDONE, 3=DISCONN）|
+| `event` bit0=0 | 端点事件：`ep=(ev>>1)&0x1f`、`type=(ev>>6)&0xf`（1=XFERCOMPLETE, 3=XFERNOTREADY）、`status=(ev>>12)&0xf`（1=Control Data, 2=Control Status）|
+| `control_state` | 0=SETUP, 1=IN_WAIT, 2=IN_ACTIVE, 3=OUT_WAIT, 4=OUT_ACTIVE, 5=STATUS_IN_WAIT, 6=STATUS_IN_ACTIVE, 7=STATUS_OUT_WAIT, 8=STATUS_OUT_ACTIVE |
+
+下一轮只要看"数据阶段完成之后，有没有 `type=3 status=2` 的事件"：
+
+- **有** ⇒ `control_not_ready()` 没匹配上 → 改匹配条件；
+- **没有** ⇒ DWC3 在这种核心上不给状态阶段的 XFERNOTREADY → 改为**数据阶段完成时直接提交 STATUS TRB**（预挂状态阶段）。

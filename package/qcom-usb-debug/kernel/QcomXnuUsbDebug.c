@@ -433,7 +433,7 @@ static unsigned fb_request_count;
 /* The last few core reports (event or command), so a stuck ep0 flow says where it stopped rather than
  * only that it stopped. Compact: "T5 80000100 40" is trace SETUP with its two arguments. */
 #define QCOM_USB_FB_TRACES 4u
-static char fb_trace_lines[QCOM_USB_FB_TRACES][28];
+static char fb_trace_lines[QCOM_USB_FB_TRACES][36];
 static unsigned fb_trace_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
@@ -1037,7 +1037,7 @@ static void core_trace(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t
      * count in the phase record answers "is the event path alive" on its own. The setup packet gets
      * its own slot; a periodic refresh keeps the count current without writing on every event. */
     {
-        char line[28];
+        char line[36];
         char *p = append_text(line, "T");
         p = append_decimal(p, (uint64_t)event);
         *p++ = ' ';

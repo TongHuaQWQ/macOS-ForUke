@@ -453,6 +453,9 @@ static int handle_event(struct dwc3 *d, uint32_t event)
 {
     unsigned ep, type, status;
     uint32_t residual;
+    /* One trace per event, carrying the control state: "T9 <event> <state>" is enough to see where a
+     * control transfer stopped when nothing reports an error. */
+    trace(d, DWC3_TRACE_EVENT, event, (uint32_t)d->control_state);
     if (event & 1u) {
         if (((event >> 1) & 127u) == 0) return device_event(d, (event >> 8) & 15u);
         trace(d, DWC3_TRACE_BAD_EVENT, event, 0); return 0;

@@ -32,7 +32,10 @@ enum dwc3_trace {
     DWC3_TRACE_SETUP,
     DWC3_TRACE_UNSUPPORTED,
     DWC3_TRACE_BAD_EVENT,
-    DWC3_TRACE_READY
+    DWC3_TRACE_READY,
+    /* Every endpoint event, raw, with the control state at that moment: the panel needs the whole
+     * sequence when the state machine stops quietly (no error, no further event). */
+    DWC3_TRACE_EVENT
 };
 
 struct dwc3_platform {
