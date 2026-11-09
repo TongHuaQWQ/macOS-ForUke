@@ -4965,3 +4965,25 @@ T8 0 0              ← READY
 - `T5`（SETUP）之后**没有**任何事件 ⇒ 数据阶段没完成 → 查 ep0 IN 的 TRB/完成事件；
 - 有数据完成、但**没有** `T5` 之前的状态阶段事件 ⇒ 两段式/三段式状态阶段没被触发 → 查 `control_not_ready()`；
 - 事件齐全但仍无 `RQ0005` ⇒ 主机侧没发（回到 descriptor/配置语义）。
+
+### 88h. b103 就位（带事件历史）
+
+```
+work/flash/vendor_boot_round-b103-events.img  85782528 B  sha256 d8016faad5be2711…
+    ← CI run 42504310429 全绿，内核 5b8a8ef434ce2262…
+work/flash/boot-round-b103-events.img         1122304 B  sha256 6bab1734de52bcbb…（同一份固件）
+```
+
+载荷顺序：`状态行 → 最近 4 条核心事件（T<类> <a> <b>）→ 最近 4 条控制请求 → 控制台日志尾部`。
+
+事件类型对照（`enum dwc3_trace`）：`1`=ID(GSNPSID)、`2`=TIMEOUT、`3`=COMMAND(仅失败时记)、
+`4`=DEVICE_EVENT、`5`=SETUP、`6`=UNSUPPORTED、`7`=BAD_EVENT、`8`=READY。
+设备事件参数 `b`/`a` 的取值：`1`=USBRST、`2`=CONNECTDONE、`3`=DISCONN、`4`=EOP、`6`=EVNTOVERFLOW。
+
+**这一轮要看的正是"SETUP(T5) 之后下一条是什么"**：
+
+| 事件序列 | 结论 |
+|---|---|
+| `T5 …` 之后无任何事件 | ep0 IN 数据阶段未完成（TRB 未提交或完成事件丢失）|
+| 有 `T4`/其它但无状态阶段事件 | `control_not_ready()` 未命中 `CTRL_STATUS_OUT_WAIT` |
+| 出现新的 `T3`（COMMAND 失败）| 状态阶段的 TRB 命令被拒（`TB` 会给状态码）|
