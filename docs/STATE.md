@@ -5176,3 +5176,54 @@ b103 面板上的 `TA=33313130` 正是这个 ID，`0x3331xxxx` ⇒ **我们这�
 - 主机侧原始 `dmesg` / `usbmon` pcap 一份都没有存过（所有主机观察都只是 `STATE.md` 里的引述）；
 - XBL 自己的 PHY 表（`/soc/usb0/hs_phy_cfg`、`ss_phy_cfg`）在 `xbl_a.img` 里，本轮没人有权限动 `device/`；
 - XNU 下从未读过 `GSNPSID`/`GHWPARAMS`/`PHYSTATUS` 的实际值（`0x33313130` 是唯一线索）。
+
+## 91. b105 已就绪（等真机）：镜像、判读表、主机侧 `usbmon`
+
+### 91a. 镜像
+
+```
+work/flash/vendor_boot_round-b105-ep0arm.img   85782528 B  sha256 d7352c07f8d06c35…
+work/flash/boot-round-b105-ep0arm.img           1122304 B  sha256 6bab1734de52bcbb…（固件未改）
+内核 894e6acec856631361428173fd6a499dcba04a36454cb19bc445b16477307cb3（CI run 42570561027 / 78c3831）
+```
+
+刷写（与以往相同）：
+
+```
+fastboot flash vendor_boot_a work/flash/vendor_boot_round-b105-ep0arm.img
+fastboot boot work/flash/boot-round-b105-ep0arm.img
+```
+
+### 91b. 面板新字段判读表
+
+状态行现在是 `PH= E= CR= S= ER= LS= TA= TB=`（50–55 列，上限 60）：
+
+| 字段 | 含义 | 健康值 |
+|---|---|---|
+| `S=` | 核心正在等的控制阶段：0=SETUP, 2=IN_ACTIVE, 4=OUT_ACTIVE, 6=STATUS_IN_ACTIVE, 8=STATUS_OUT_ACTIVE | 在 0 与非 0 之间滚动，最终回 0 |
+| `ER=` | 轮询**吞掉**的可恢复错误数（坏事件、被拒的端点命令、看门狗重启）| 不增长 |
+| `LS=` | `DSTS.USBLNKST`（武装阶段那一刻采样）：0=U0, 2=L1/L2, 3=U3 | 0 |
+| `TA=/TB=` | **最后一条被拒的端点命令**：(ep<<16)\|cmd 与 `DEPCMD` 结果（status 在 bit12..15）| `TA=0` 或旧值不动 |
+
+`T9 <event> <S>` 仍是事件历史（`type=3 status=2` 就是状态阶段的 `XferNotReady`）。
+
+### 91c. 三种结果与对应结论
+
+| 真机表现 | 结论 / 下一步 |
+|---|---|
+| 主机出现 `cdc_acm 1-1:1.0: ttyACM0: USB ACM device`，`/dev/ttyACM0` 有内核日志 | **成功**：日志通道打通，接下来把引导链推进到用户态 |
+| 请求历史出现 `RQ=0005 L=0000` 后又出现 `RQ=0006 V=0100 L=0008`，主机仍报错 | `SET_ADDRESS` 通了，卡在后面的请求；按 `RQ` 值查 `setup_request()` 的匹配分支 |
+| `S` 停在 6 或 8 且 `ER` 递增、`TA/TB` 给出命令 | 状态阶段 TRB 被拒：`TB` 的 bit12..15 是 `CmdStatus`（1=Invalid Resource）|
+| `S` 归 0、`ER` 不涨、请求历史只有 `RQ=0006` | 主机根本没发下一条 SETUP ⇒ PHY/链路层问题（此时看 `LS=` 是否为 0；不为 0 就是挂起链路）|
+
+### 91d. 免费的决定性实验：主机侧 `usbmon`（不用重编译）
+
+```bash
+sudo modprobe usbmon && ls /sys/kernel/debug/usb/usbmon/
+sudo tcpdump -i usbmon1 -w uke-b105.pcap      # 插线/开机前就开始抓
+# 结束后：
+tshark -r uke-b105.pcap -V | less             # 或 Wireshark 打开
+```
+
+这一份抓包能一次分辨：设备是否真的回 ACK、状态阶段（零长度 OUT）主机到底有没有发、数据阶段是否在总线上
+被打断、以及设备地址切换前后的行为。
