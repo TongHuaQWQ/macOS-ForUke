@@ -90,18 +90,43 @@ def rewrite(record, source, obj, extra):
     return command + extra
 
 
-def xnu_root(record):
-    """The source root the record was compiled in: the directory that owns iokit/IOKit.
+def iokit_include(record):
+    """The -I directory that makes <IOKit/IOLib.h> resolve, found from the record itself.
 
-    A record's "directory" is the working directory its command ran in, which for this tree is the
-    patched xnu source. It is normally absolute; joining it onto ROOT first makes a relative one work
-    too (ROOT / an absolute path is that path).
+    A record's "directory" is NOT the source tree: on the runner it is the object directory
+    (.../tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT), so walking up from it
+    never reaches iokit/IOKit -- that mistake cost the first writer round ("cannot locate the xnu
+    source root above .../ios-obj/iokit/DEVELOPMENT"). What does point into the source tree is the
+    record's own command line: "file" is the original source, and the -I entries are absolute paths
+    into it. Both are probed, then the patched tree this repository builds (make -C .cache/xnu-work,
+    which is what build-xnu-4k-baseline.sh runs).
+
+    Returns the directory to add to the include path, i.e. the one that CONTAINS IOKit/, not the
+    source root: <root>/iokit/IOKit/IOLocks.h is the marker.
     """
-    directory = (ROOT / record['directory']).resolve()
-    for candidate in (directory, *directory.parents):
-        if (candidate / 'iokit/IOKit/IOLocks.h').is_file():
-            return candidate
-    raise SystemExit(f'cannot locate the xnu source root above {directory}')
+    probes = []
+    arguments = record['arguments']
+    for index, argument in enumerate(arguments):
+        if argument == '-I' and index + 1 < len(arguments):
+            probes.append(arguments[index + 1])
+        elif argument.startswith('-I') and len(argument) > 2:
+            probes.append(argument[2:].lstrip('='))
+    probes.append(record.get('file') or '')
+    for name in ('xnu-work', 'xnu'):
+        probes.append(ROOT / '.cache' / name)
+    probed = []
+    for probe in probes:
+        if not probe:
+            continue
+        for candidate in ((ROOT / probe).resolve(), *(ROOT / probe).resolve().parents):
+            probed.append(candidate)
+            if (candidate / 'IOKit/IOLocks.h').is_file():
+                return candidate
+            if (candidate / 'iokit/IOKit/IOLocks.h').is_file():
+                return candidate / 'iokit'
+    shown = ', '.join(str(path) for path in probed[:6])
+    raise SystemExit(f'cannot locate IOKit/IOLocks.h from the compile record; probed {shown}'
+                     + (' (and more)' if len(probed) > 6 else ''))
 
 
 def compile_unit(source, record_name, obj, extra):
@@ -137,47 +162,53 @@ def symbols(archive):
     return defined, undefined
 
 
-cxx_record = load_record(CXX_RECORD)
-includes = ['-I', str(ROOT / 'drivers/NativeUfs'), '-I', str(xnu_root(cxx_record) / 'iokit')]
-# -Wall -Wextra without -Werror: the headers are the driver's, not this port's, and a warning here must
-# not cost a kernel round. Both logs land in the artifact and the report, so a later round can tighten.
-warnings = ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Wno-unused-parameter',
-            '-Wno-unused-function', '-Wno-deprecated-declarations']
+def main():
+    """Compile both units with the kernel's own records, archive them, and assert the exports."""
+    cxx_record = load_record(CXX_RECORD)
+    includes = ['-I', str(ROOT / 'drivers/NativeUfs'), '-I', str(iokit_include(cxx_record))]
+    # -Wall -Wextra without -Werror: the headers are the driver's, not this port's, and a warning here must
+    # not cost a kernel round. Both logs land in the artifact and the report, so a later round can tighten.
+    warnings = ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Wno-unused-parameter',
+                '-Wno-unused-function', '-Wno-deprecated-declarations']
 
-report = {}
-objects = []
-for name, record_name, extra in (
-        ('UfsLog.cpp', CXX_RECORD, includes + warnings + ['-fno-exceptions', '-fno-rtti']),
-        ('UfsLogKernel.c', C_RECORD, includes + warnings)):
-    source = ROOT / 'kits/uke' / name
-    if not source.is_file():
-        source = ROOT / 'package' / name
-    obj = OUT / (Path(name).stem + '.o')
-    source_sha, object_sha = compile_unit(source, record_name, obj, extra)
-    report[name] = {'source_sha256': source_sha, 'object_sha256': object_sha}
-    objects.append(obj)
+    report = {}
+    objects = []
+    for name, record_name, extra in (
+            ('UfsLog.cpp', CXX_RECORD, includes + warnings + ['-fno-exceptions', '-fno-rtti']),
+            ('UfsLogKernel.c', C_RECORD, includes + warnings)):
+        source = ROOT / 'kits/uke' / name
+        if not source.is_file():
+            source = ROOT / 'package' / name
+        obj = OUT / (Path(name).stem + '.o')
+        source_sha, object_sha = compile_unit(source, record_name, obj, extra)
+        report[name] = {'source_sha256': source_sha, 'object_sha256': object_sha}
+        objects.append(obj)
 
-archive = OUT / 'libUkeUfsLog.a'
-archive.unlink(missing_ok=True)
-subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, objects)], check=True, timeout=60)
+    archive = OUT / 'libUkeUfsLog.a'
+    archive.unlink(missing_ok=True)
+    subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, objects)], check=True, timeout=60)
 
-defined, undefined = symbols(archive)
-missing = [name for name in EXPORTS if name not in defined]
-if missing:
-    raise SystemExit(f'archive does not define {", ".join(missing)}: {sorted(defined)[:40]}')
-# The one thing that makes the userdata half do nothing at all: an export that is only declared.
-imported = [name for name in EXPORTS if name in undefined]
-if imported:
-    raise SystemExit(f'archive only imports {", ".join(imported)}')
-runtime = sorted(name for name in undefined if name.startswith(FORBIDDEN_PREFIXES))
-if runtime:
-    raise SystemExit('the archive reached for the C++ runtime: ' + ', '.join(runtime))
+    defined, undefined = symbols(archive)
+    missing = [name for name in EXPORTS if name not in defined]
+    if missing:
+        raise SystemExit(f'archive does not define {", ".join(missing)}: {sorted(defined)[:40]}')
+    # The one thing that makes the userdata half do nothing at all: an export that is only declared.
+    imported = [name for name in EXPORTS if name in undefined]
+    if imported:
+        raise SystemExit(f'archive only imports {", ".join(imported)}')
+    runtime = sorted(name for name in undefined if name.startswith(FORBIDDEN_PREFIXES))
+    if runtime:
+        raise SystemExit('the archive reached for the C++ runtime: ' + ', '.join(runtime))
 
-# Everything else it imports is a kernel symbol, and the list is evidence rather than a gate: the two
-# files are freestanding, so it should be the eight kernel services and nothing unexpected.
-report['archive_sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
-report['exports'] = sorted(EXPORTS)
-report['kernel_imports'] = sorted(undefined)
-report['hardware_execution'] = False
-(OUT / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
-print(f'PASS: libUkeUfsLog.a defines {", ".join(EXPORTS)}; imports {", ".join(sorted(undefined))}')
+    # Everything else it imports is a kernel symbol, and the list is evidence rather than a gate: the two
+    # files are freestanding, so it should be the eight kernel services and nothing unexpected.
+    report['archive_sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    report['exports'] = sorted(EXPORTS)
+    report['kernel_imports'] = sorted(undefined)
+    report['hardware_execution'] = False
+    (OUT / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
+    print(f'PASS: libUkeUfsLog.a defines {", ".join(EXPORTS)}; imports {", ".join(sorted(undefined))}')
+
+
+if __name__ == '__main__':
+    main()

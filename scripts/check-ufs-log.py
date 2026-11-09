@@ -21,6 +21,7 @@ Usage: python3 scripts/check-ufs-log.py [-v]
 Exit 0 on success, 1 on the first failed step.
 """
 import argparse
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -108,10 +109,46 @@ def tool(name):
     return path
 
 
+def record_resolution():
+    """Exercise build-ufs-log.py's record -> include-path resolution against a synthetic tree.
+
+    This is the step that cost the first writer round: the record's "directory" is the *object*
+    directory (.../ios-obj/.../iokit/DEVELOPMENT), not the source tree, so nothing can be found by
+    walking up from it. The fix reads the record's own file/-I arguments instead, and this rebuilds the
+    runner's layout to prove the two shapes that appear there:
+      * "-I <path>" as a pair, which is how the xnu makefiles emit them,
+      * "-I<path>" joined.
+    """
+    module = ROOT / 'scripts/build-ufs-log.py'
+    spec = importlib.util.spec_from_file_location('build_ufs_log', module)
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    with tempfile.TemporaryDirectory(prefix='ufs-log-record-') as temporary:
+        source = Path(temporary) / 'xnu-work'
+        iokit = source / 'iokit'
+        (iokit / 'IOKit').mkdir(parents=True)
+        (iokit / 'IOKit/IOLocks.h').write_text('#pragma once\n')
+        objects = source.parent / 'tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT'
+        objects.mkdir(parents=True)
+        base = {'arguments': ['clang++', '-c'], 'directory': str(objects)}
+        cases = {
+            '-I pair': dict(base, file=str(iokit / 'IOPlatformExpert.cpp'),
+                            arguments=['clang++', '-I', str(iokit), '-I', str(source / 'bsd'), '-c']),
+            '-I joined': dict(base, file=str(iokit / 'IOPlatformExpert.cpp'),
+                              arguments=['clang++', '-I' + str(iokit), '-c']),
+        }
+        for label, record in cases.items():
+            found = build.iokit_include(record)
+            if found.resolve() != iokit.resolve():
+                raise SystemExit(f'record resolution ({label}): got {found}, expected {iokit}')
+        print('PASS: the compile record resolves to ' + str(iokit))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('-v', '--verbose', action='store_true', help='show compiler output')
     options = parser.parse_args()
+    record_resolution()
     clang, clangxx = tool('clang'), tool('clang++')
     linker, nm = tool('ld.lld'), tool('llvm-nm')
 
