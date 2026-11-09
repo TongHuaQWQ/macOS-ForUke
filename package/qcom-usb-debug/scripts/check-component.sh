@@ -55,6 +55,19 @@ else
   bad "a helper is used before its declaration"
 fi
 
+# --- 2b. IOKit headers in the kernel-side unit -----------------------------------------------------
+# kernel/QcomXnuUsbDebug.c includes <pexpert/pexpert.h>, so <IOKit/IOLib.h> is not available to it:
+# IOLib.h -> IOKit/system.h -> bsd/libkern/libkern.h declares `int printf(...)` while
+# pexpert/pexpert/protos.h:45 declares `void printf(...)`, and the two conflict. That is a
+# conflicting-types error that only the macOS runner's header set can produce, and it cost a round
+# (archive-17 on run 42655528358). A grep is enough to keep it gone.
+step "kernel unit includes no IOKit header"
+if grep -nE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<IOKit/' "$HERE/kernel/QcomXnuUsbDebug.c"; then
+  bad "kernel/QcomXnuUsbDebug.c includes an IOKit header (see the IOLog comment at its top)"
+else
+  ok "no <IOKit/...> include (IOLog is declared locally)"
+fi
+
 # --- 3. freestanding compiles ----------------------------------------------------------------------
 # One command per (compiler, unit). These are the units that end up inside the kernel, plus the two SoC
 # backends, so a typo, an unused variable or an implicit declaration is caught here rather than there.

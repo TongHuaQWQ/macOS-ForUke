@@ -15,8 +15,21 @@
 #include <pexpert/pexpert.h>
 /* IOLog, for the msgbuf copy of this driver's evidence: package/UkeLastLog.c snapshots the tail of
  * msgbuf into the last 32 MiB of userdata every two seconds, so an IOLog line is readable with dd in
- * recovery while the panel and the pram both need someone standing in front of the tablet. */
-#include <IOKit/IOLib.h>
+ * recovery while the panel and the pram both need someone standing in front of the tablet.
+ *
+ * Declared here instead of including <IOKit/IOLib.h>, which cannot coexist with the pexpert header
+ * above: IOLib.h pulls in IOKit/system.h -> bsd/libkern/libkern.h, which declares
+ *
+ *     int printf(const char *, ...)          (libkern.h:185)
+ *
+ * while pexpert/pexpert/protos.h:45 has already declared
+ *
+ *     void printf(const char *fmt, ...)      (via pexpert/pexpert.h)
+ *
+ * -- a conflicting-types error, and the reason archive-17 failed on run 42655528358 ("preflight
+ * kernel/QcomXnuUsbDebug.c: ... error: conflicting types for 'printf'"). Kernel files reconcile the
+ * two through bsd/sys/systm.h, which this unit has no business including. */
+extern void IOLog(const char *format, ...);
 
 #define NATIVE_CONTEXT_BYTES DWC3_CONTEXT_BYTES
 #define GCC_BYTES QUD_GCC_BYTES
