@@ -290,5 +290,9 @@ extern "C" int native_ufs_log_write(uint64_t rel, uint32_t blocks, const void *s
 extern "C" int native_ufs_log_sync(void)
 {
   if (!gLogBlocks) return 0;
-  return hostNop() == kIOReturnSuccess;
+  // SYNCHRONIZE CACHE(10), not a NOP OUT. The record only survives the reset this channel exists for
+  // if the device has actually put it on the medium: a NOP proves the transport and leaves the writes
+  // in the controller's cache, and the next power cut takes them with it. hostSyncCache() accepts a
+  // range-less flush once either window is open, which hostLogOpen() has already made true.
+  return hostSyncCache() == kIOReturnSuccess;
 }

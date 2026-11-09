@@ -39,19 +39,16 @@ image -- which is exactly what the assertion at the end of this script is about.
 
 Checking it without a runner
 ----------------------------
-Both files are freestanding, so a host clang reproduces the whole thing:
+    python3 scripts/check-ufs-log.py -v
 
-    clang --target=aarch64-none-elf -ffreestanding -std=gnu11 -I drivers/NativeUfs \\
-          -c package/UfsLogKernel.c -o /tmp/UfsLogKernel.o
-    clang++ --target=aarch64-none-elf -ffreestanding -fno-exceptions -fno-rtti -std=c++17 \\
-          -DUKE_UFS_LOG_STANDALONE -I drivers/NativeUfs -c package/UfsLog.cpp -o /tmp/UfsLog.o
-    ld.lld -r /tmp/UfsLog.o /tmp/UfsLogKernel.o -o /tmp/ufslog.o && nm -u /tmp/ufslog.o
-
-with stub headers for pexpert/, machine/ and IOKit/IOLib.h. UKE_UFS_LOG_STANDALONE is what gives the
-host build the memcpy/bzero/strcmp the kernel already owns; without it the object only declares them,
-which is the shape that goes into the image (defining them is a duplicate symbol against
-osfmk/arm64/bcopy.s, bzero.s and subrs.c). The result is the eight kernel services and nothing else:
-IODelay, IOLockAlloc/Lock/Unlock, IOMallocContiguous, mach_absolute_time, ml_io_map, PE_parse_boot_argn.
+Both files are freestanding, so a host clang reproduces the whole thing: that script writes the four
+kernel headers they use as stubs (pexpert/pexpert.h, machine/machine_routines.h, mach/mach_time.h,
+IOKit/IOLib.h), compiles both units for aarch64-none-elf, links them with ld.lld -r and asserts the
+result defines the four exports and imports nothing but the kernel's own eight services and xnu's
+libc. UKE_UFS_LOG_STANDALONE is what gives that check the memcpy/bzero/strcmp the kernel already owns;
+without it the object only declares them, which is the shape that goes into the image (defining them
+is a duplicate symbol against osfmk/arm64/bcopy.s, bzero.s and subrs.c). The eight are IODelay,
+IOLockAlloc/Lock/Unlock, IOMallocContiguous, mach_absolute_time, ml_io_map and PE_parse_boot_argn.
 """
 import hashlib
 import json
