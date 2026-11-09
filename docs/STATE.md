@@ -5024,3 +5024,87 @@ T9 <event> <control_state>
 
 - **有** ⇒ `control_not_ready()` 没匹配上 → 改匹配条件；
 - **没有** ⇒ DWC3 在这种核心上不给状态阶段的 XFERNOTREADY → 改为**数据阶段完成时直接提交 STATUS TRB**（预挂状态阶段）。
+
+## 89. b103 之后：按 §88j 的第二个分支修 ep0 —— 数据/状态阶段**自己武装**，不再等一次性通知
+
+### 89a. 先看 Linux 自己怎么写这一步（`drivers/usb/dwc3/ep0.c`）
+
+`work/analysis/porting-kb/.ref-upstream/linux-dwc3/ep0.c` 里有一段直接说明：
+
+> Section 9.4 says we can wait for the XferNotReady(DATA) event to come before issuing Start Transfer
+> command, but if we do, we will miss situations where the host starts another SETUP phase instead of
+> the DATA phase. … Because of this scenario, SNPS decided to change the programming model of control
+> transfers and support **on-demand transfers only for the STATUS phase**. … we will always wait for
+> gadget driver to queue the DATA phase's request, then **start it right away**.
+
+也就是说：**数据阶段必须立刻提交，状态阶段才是唯一"按需"（靠 `XferNotReady(Status)`）的阶段**。
+我们的移植版把两个阶段都写成了"等通知"（`CTRL_IN_WAIT` / `CTRL_STATUS_OUT_WAIT`），而轮询驱动一旦
+漏掉那一条一次性通知，ep0 就永远不再挂起 —— 这正是 b103 的现象（`E 0 CR 0`，SETUP 之后没有任何事件）。
+
+### 89b. 三处改动（`usb/Dwc3.c`）
+
+1. **SETUP 解码时立刻武装数据阶段**：`setup_request()` 不再落到 `CTRL_IN_WAIT`，而是
+   `CTRL_IN_ACTIVE` + `transfer(ep1, CONTROL_DATA, n)`；无数据阶段（`SET_ADDRESS`/`SET_CONFIGURATION`/
+   `CLEAR_FEATURE`）则在同一步直接武装状态阶段 `CONTROL_STATUS2`（`SET_ADDRESS` 就靠这条）。
+2. **数据完成时立刻武装状态阶段**：`control_complete(CTRL_IN_ACTIVE)` 直接提交 `CONTROL_STATUS3`（ep0），
+   `control_complete(CTRL_OUT_ACTIVE)` 提交 `status_type()`（ep1）。
+3. 全部走新的 `arm_status()`：**预挂失败就退回事件驱动状态**（`CTRL_STATUS_*_WAIT`），
+   `control_not_ready()` 仍然能把那条迟到的 `XferNotReady` 用上 —— 两种核心行为都能走通。
+
+TRB 类型由 `status_type()` 统一决定（两阶段 → `CONTROL_STATUS2`，三阶段 → `CONTROL_STATUS3`），
+和 `control_not_ready()` 原来那份重复计算合并成一处。
+
+### 89c. 顺带修掉一个**自己造出来的** bug：`SET_ADDRESS` 的地址从来没写进 DCFG
+
+§87 之前为了"状态阶段完成后再写地址"，把 `DCFG.DevAddr` 的写入延迟到
+`CTRL_STATUS_OUT_ACTIVE` 分支里 —— 但 `wLength == 0` 的请求走的是 **IN 状态阶段**
+（`CTRL_STATUS_IN_ACTIVE`），延迟写入的分支永远进不去，**地址一次都没写**。已改回上游/Linux 的
+立即写入（`setup_request()` 里 `wr(DCFG, …)`）。这一处即使上一轮修好了通知问题，也必然会以
+`-71 / Device not responding to setup address` 结束。
+
+### 89d. 恢复性/卫生项（都是"别把自己卡死"）
+
+| 改动 | 原因 |
+|---|---|
+| `DEVTEN` 去掉 `EVNTOVERFLOWEN`/`ERRTICERREN` | 打开只换来一条"永久停机"的通知 |
+| 溢出/坏事件 → 记 `BAD_EVENT` + `errors++`，**不停轮询** | 之前 `d->failed = -7` 会静默杀整个会话 |
+| `dwc3_poll()` 任何错误**不再上锁**（只计数 + trace）| 一次坏握手不该结束整场会话；面板仍在画，看起来就像"死机" |
+| `EPCMDCMPLT`（type 7）也记一条 trace | `ENDTRANSFER` 是异步完成的，取消动作之前完全不可见 |
+| 控制传输**看门狗**：约 2 s（2000 次轮询）无进展且 `control_state != CTRL_SETUP` → `ENDTRANSFER` 对应的 ep，重新武装 SETUP | 主机放弃一次控制传输后，轮询驱动 otherwise 永远等下去 |
+| `XFERCOMPLETE` 命中"未挂起"的 ep → `BAD_EVENT` trace（第 3 个标志）| 之前完全静默 |
+
+### 89e. 面板新增两个字段（这样下一轮不用猜）
+
+状态行多了：
+
+- `S=` —— 核心正在等哪个控制阶段（0=SETUP, 2=IN_ACTIVE, 4=OUT_ACTIVE, 6=STATUS_IN_ACTIVE, 8=STATUS_OUT_ACTIVE）；
+- `ER=` —— 轮询**吞掉**了多少个可恢复错误（`dwc3_errors()`）。
+
+判读：`S` 回到 `0` 且 `ER` 不涨 ⇒ 控制传输正常循环；`S` 停在非 0 且 `ER` 涨 ⇒ 某个阶段的 TRB 被核心
+拒绝（`TA/TB` 会给命令和状态码）。
+
+### 89f. 本地先证明（CI 之前）
+
+`tests/test_dwc3.c` 的模型改成新契约并运行（`clang -fsanitize=address,undefined -Werror`）：
+
+```
+PASS: reset/connect, bounded event budget, GET_DESCRIPTOR, 3-stage and 2-stage control, DTR, queued early log
+PASS: invalid CDC interface rejection and exact 7-byte line-coding OUT/IN
+PASS: suspend bits cleared/restored; deconfigure/reset end active DMA with USB31 delay; aborted control restarts SETUP
+PASS: OUT residual/cache-sync ordering, finite RX overflow, reset clearing and strict length rejection
+PASS: unknown core refuses before writes; stuck command exits within 10000 one-microsecond polls
+```
+
+新增覆盖：
+- 整条枚举序列（`GET_DESCRIPTOR` → `SET_ADDRESS` → `SET_CONFIGURATION` → `SET_CONTROL_LINE_STATE`）
+  **一条 `XferNotReady` 都不发**也必须全部通过（这就是 b103 卡住的场景）；
+- 迟到/错相位的 `XferNotReady` 不得改动已挂起的 TRB（快照比对）；
+- **预挂被拒**时的回退：模型让 ep0 的一次 `STARTTRANSFER` 返回 `Invalid Resource`，
+  必须退回 `CTRL_STATUS_OUT_WAIT`、并让随后的 `XferNotReady(Status)` 把状态阶段补上、最后回到 SETUP；
+- 长度被拒现在计数（`snapshot.errors`）而不再靠 `dwc3_poll()` 返回错误码。
+
+### 89g. 下一轮要看的
+
+1. 主机 `dmesg` 是否出现 `cdc_acm 1-1:1.0: ttyACM0: USB ACM device`；
+2. 面板 `S` 是否在 `0 ↔ 6 ↔ 8` 之间滚动，`ER` 是否不涨；
+3. 若仍卡住，看 `S` 停在哪个值 + `TA/TB`，即可直接定位是哪一条 TRB 命令被拒。

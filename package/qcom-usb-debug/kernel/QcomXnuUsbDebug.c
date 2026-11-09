@@ -717,6 +717,19 @@ static void pram_state(void)
      * (ep << 16) | cmd while trace_b carries the DEPCMD result with its status field - so these two
      * name the exact command and its refusal, which is what a CORE_POLL_FAILED after TRACE_COMMAND
      * needs (STATE 86). */
+    /* Which control stage the core is waiting on, and how many recoverable errors polling absorbed.
+     * Without these, a console that serves one descriptor and then goes deaf looks identical to a dead
+     * controller (STATE 89). */
+    native.status.core_errors = dwc3_errors(native.core);
+    native.status.core_control_state = dwc3_control_state(native.core);
+    p = append_text(p, " S=");
+    q = append_text(q, " S=");
+    p = append_decimal(p, native.status.core_control_state);
+    q = append_decimal(q, native.status.core_control_state);
+    p = append_text(p, " ER=");
+    q = append_text(q, " ER=");
+    p = append_decimal(p, native.status.core_errors);
+    q = append_decimal(q, native.status.core_errors);
     p = append_text(p, " TA=");
     q = append_text(q, " TA=");
     p = append_hex(p, native.status.trace_a);

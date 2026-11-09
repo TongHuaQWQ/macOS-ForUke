@@ -76,6 +76,11 @@ int dwc3_ready(const struct dwc3 *dev);
  * an unrecognised dword means the ring holds something other than events. */
 uint32_t dwc3_event_count(const struct dwc3 *dev);
 uint32_t dwc3_last_event(const struct dwc3 *dev);
+/* Which control stage the core is waiting on (the CTRL_* enum in Dwc3.c), and how many recoverable
+ * errors polling has absorbed. A wedged control transfer shows up as a state that never returns to 0
+ * (CTRL_SETUP) while errors keep counting. */
+uint32_t dwc3_control_state(const struct dwc3 *dev);
+uint32_t dwc3_errors(const struct dwc3 *dev);
 size_t dwc3_queued(const struct dwc3 *dev);
 uint64_t dwc3_dropped(const struct dwc3 *dev);
 size_t dwc3_rx_pending(const struct dwc3 *dev);
@@ -88,6 +93,9 @@ struct dwc3_snapshot {
     uint32_t rx_pending, rx_generation;
     uint64_t rx_overflow;
     int32_t failed;
+    /* Recoverable errors seen while polling. A non-zero value is not fatal: the driver keeps serving
+     * events, so a console that is alive but saw bad handshakes shows up here instead of going silent. */
+    uint32_t errors, stalled_polls;
 };
 /* Read-only diagnostics, for callers that already own powered MMIO access. */
 void dwc3_snapshot(struct dwc3 *dev, struct dwc3_snapshot *snapshot);

@@ -36,10 +36,9 @@ struct dwc3 {
     uint8_t tx[TX_BYTES], rx[DWC3_RX_BYTES], line_coding[7], control_reply[256];
     uint16_t control_length;
     uint8_t control_state, control_three_stage, configured, dtr;
-    uint8_t pending_address, address_pending;
     uint8_t zlp_pending, running, initialized, full_speed, usb31;
     int failed;
-    uint32_t events, commands, last_event;
+    uint32_t events, commands, last_event, errors, stalled_polls;
     uint64_t dropped;
     uint8_t device_descriptor[18], manufacturer[64], product[64], serial[64];
 };
@@ -229,6 +228,26 @@ static int transfer(struct dwc3 *d, unsigned ep, uint32_t type, unsigned bytes)
     d->active[ep] = 1;
     return 0;
 }
+/* The status stage TRB type follows the transfer shape: a two-stage transfer ends with a CONTROL_STATUS2
+ * TRB, a three-stage one with CONTROL_STATUS3. */
+static uint32_t status_type(const struct dwc3 *d)
+{
+    return d->control_three_stage ? DWC3_TRBCTL_CONTROL_STATUS3 : DWC3_TRBCTL_CONTROL_STATUS2;
+}
+/* Arm a control STATUS stage without waiting for XferNotReady(Status).
+ *
+ * Linux starts the DATA phase immediately for the same reason (ep0.c: "we will always wait for gadget
+ * driver to queue the DATA phase's request, then start it right away"), and only the status phase is
+ * on-demand. Pre-arming the status TRB is the older programming model and works on hardware that does
+ * not signal XferNotReady; if the core refuses it, fall back to the event-driven state so
+ * control_not_ready() can arm it when the notification does arrive. */
+static int arm_status(struct dwc3 *d, unsigned ep, uint32_t type, uint8_t active, uint8_t wait)
+{
+    d->control_state = active;
+    if (!transfer(d, ep, type, 0)) return 0;
+    d->control_state = wait;
+    return -4;
+}
 static int setup_phase(struct dwc3 *d)
 {
     d->control_state = CTRL_SETUP;
@@ -297,13 +316,12 @@ static int setup_request(struct dwc3 *d)
         d->control_reply[0] = 0; d->control_reply[1] = 0;
         reply = d->control_reply; n = 2; ok = 1;
     } else if (s[0] == 0 && s[1] == 5 && value <= 127 && index == 0 && length == 0) {
-        /* DWC3 takes DevAddr the instant it is written, so programming it here makes the core answer
-         * the status stage from the NEW address while the host is still listening on address 0. The
-         * host then reports "Device not responding to setup address" and gives up - which is exactly
-         * what this board did, with the first GET_DESCRIPTOR served correctly (STATE 83). Hold the
-         * address until the status stage has completed. */
-        d->pending_address = (uint8_t)value;
-        d->address_pending = 1;
+        /* Written here, as upstream and Linux both do. The earlier attempt to defer it until the status
+         * stage completed was wrong twice over: the deferred write only ran on the OUT-status path,
+         * which a wLength==0 transfer never takes, so DCFG.DevAddr was never programmed at all
+         * (STATE 89). */
+        wr(d, DWC3_DCFG, (rd(d, DWC3_DCFG) & ~DWC3_DCFG_DEVADDR_MASK) |
+                         DWC3_DCFG_DEVADDR(value));
         ok = 1;
     } else if (s[0] == 0 && s[1] == 9 && index == 0 && length == 0 && value <= 1) {
         int ret = set_configuration(d, value);
@@ -334,15 +352,23 @@ static int setup_request(struct dwc3 *d)
         if (n > sizeof(d->control_reply)) return stall(d);
         copy(buffer(d, 1), reply, n);
         d->control_length = (uint16_t)n;
-        d->control_state = CTRL_IN_WAIT;
-    } else d->control_state = CTRL_STATUS_IN_WAIT;
-    return 0;
+        /* Arm the data stage here rather than waiting for XferNotReady: that notification is one-shot,
+         * and this driver polls, so a missed one leaves endpoint 0 armed with nothing and the host's
+         * next request is never seen - which is exactly the silence this board produced (STATE 89). */
+        d->control_state = CTRL_IN_ACTIVE;
+        if (transfer(d, 1, DWC3_TRBCTL_CONTROL_DATA, n)) {
+            d->control_state = CTRL_IN_WAIT;
+            return -4;
+        }
+        return 0;
+    }
+    /* No data stage (SET_ADDRESS, SET_CONFIGURATION, CLEAR_FEATURE): the status stage follows the
+     * setup immediately, so arm it now. */
+    return arm_status(d, 1, status_type(d), CTRL_STATUS_IN_ACTIVE, CTRL_STATUS_IN_WAIT);
 }
 
 static int control_not_ready(struct dwc3 *d, unsigned ep, unsigned status)
 {
-    uint32_t status_type = d->control_three_stage ? DWC3_TRBCTL_CONTROL_STATUS3 :
-                                                  DWC3_TRBCTL_CONTROL_STATUS2;
     switch (d->control_state) {
     case CTRL_IN_WAIT:
         if (ep != 1 || status != DEPEVT_STATUS_CONTROL_DATA) return 0;
@@ -355,22 +381,13 @@ static int control_not_ready(struct dwc3 *d, unsigned ep, unsigned status)
     case CTRL_STATUS_IN_WAIT:
         if (ep != 1 || status != DEPEVT_STATUS_CONTROL_STATUS) return 0;
         d->control_state = CTRL_STATUS_IN_ACTIVE;
-        return transfer(d, 1, status_type, 0);
+        return transfer(d, 1, status_type(d), 0);
     case CTRL_STATUS_OUT_WAIT:
         if (ep != 0 || status != DEPEVT_STATUS_CONTROL_STATUS) return 0;
         d->control_state = CTRL_STATUS_OUT_ACTIVE;
-        return transfer(d, 0, status_type, 0);
+        return transfer(d, 0, status_type(d), 0);
     default: return 0;
     }
-}
-/* Written only after the status stage of SET_ADDRESS has completed: the core must answer that stage
- * on the old address, and the host switches immediately afterwards. */
-static void apply_address(struct dwc3 *d)
-{
-    if (!d->address_pending) return;
-    d->address_pending = 0;
-    wr(d, DWC3_DCFG, (rd(d, DWC3_DCFG) & ~DWC3_DCFG_DEVADDR_MASK) |
-                     DWC3_DCFG_DEVADDR(d->pending_address));
 }
 static int control_complete(struct dwc3 *d, unsigned ep, uint32_t residual)
 {
@@ -381,15 +398,18 @@ static int control_complete(struct dwc3 *d, unsigned ep, uint32_t residual)
         return setup_request(d);
     case CTRL_IN_ACTIVE:
         if (ep != 1 || residual) return stall(d);
-        d->control_state = CTRL_STATUS_OUT_WAIT; return 0;
+        /* Three-stage control read: the host answers with a zero-length OUT, and the core wants a
+         * STATUS3 TRB queued for it. Arm it now for the same reason as above. */
+        return arm_status(d, 0, status_type(d),
+                          CTRL_STATUS_OUT_ACTIVE, CTRL_STATUS_OUT_WAIT);
     case CTRL_OUT_ACTIVE:
         if (ep != 0 || residual != 64u - d->control_length) return stall(d);
         sync(d, buffer(d, 0), EP_BUFFER_BYTES, DWC3_FROM_DEVICE);
         copy(d->line_coding, buffer(d, 0), 7);
-        d->control_state = CTRL_STATUS_IN_WAIT; return 0;
+        return arm_status(d, 1, status_type(d),
+                          CTRL_STATUS_IN_ACTIVE, CTRL_STATUS_IN_WAIT);
     case CTRL_STATUS_IN_ACTIVE:
     case CTRL_STATUS_OUT_ACTIVE:
-        apply_address(d);
         return setup_phase(d);
     default: return stall(d);
     }
@@ -424,7 +444,6 @@ static int device_event(struct dwc3 *d, unsigned event)
         for (i = 0; i < EP_COUNT; i++) d->active[i] = 0;
         wr(d, DWC3_DALEPENA, 3);
         wr(d, DWC3_DCFG, rd(d, DWC3_DCFG) & ~DWC3_DCFG_DEVADDR_MASK);
-        d->address_pending = 0;
         d->control_state = CTRL_SETUP;
         /* The next CONNECTDONE arms a new SETUP transfer. */
         return 0;
@@ -446,7 +465,13 @@ static int device_event(struct dwc3 *d, unsigned event)
             configure_ep(d, EP_OUT, DWC3_DEPCMD_TYPE_BULK, d->packet_size, 1)) return -4;
         return setup_phase(d);
     }
-    if (event == DWC3_DEVT_EVNTOVERFLOW || event == DWC3_DEVT_ERRTICERR) return -7;
+    if (event == DWC3_DEVT_EVNTOVERFLOW || event == DWC3_DEVT_ERRTICERR) {
+        /* Report it, then keep going: stopping here would leave endpoint 0 armed with nothing while the
+         * panel still paints, which looks exactly like a dead console (STATE 89). */
+        trace(d, DWC3_TRACE_BAD_EVENT, 0x0E000000u | event, (uint32_t)d->control_state);
+        d->errors++;
+        return 0;
+    }
     return 0;
 }
 static int handle_event(struct dwc3 *d, uint32_t event)
@@ -467,7 +492,7 @@ static int handle_event(struct dwc3 *d, uint32_t event)
         trace(d, DWC3_TRACE_BAD_EVENT, event, 1); return 0;
     }
     if (type == DWC3_DEPEVT_XFERCOMPLETE) {
-        if (!d->active[ep]) return 0;
+        if (!d->active[ep]) { trace(d, DWC3_TRACE_BAD_EVENT, event, 2); return 0; }
         sync(d, trb(d, ep), 64, DWC3_FROM_DEVICE);
         residual = trb(d, ep)->size & DWC3_TRB_SIZE_MASK;
         d->active[ep] = 0;
@@ -490,6 +515,11 @@ static int handle_event(struct dwc3 *d, uint32_t event)
         }
     } else if (type == DWC3_DEPEVT_XFERNOTREADY && !d->active[ep] && ep < 2) {
         return control_not_ready(d, ep, status);
+    } else if (type == DWC3_DEPEVT_EPCMDCMPLT) {
+        /* An ENDTRANSFER issued with HIPRI_FORCERM completes asynchronously here. Recording it makes a
+         * cancel visible on the panel instead of silent. */
+        trace(d, DWC3_TRACE_COMMAND, 0x80000000u | (ep << 8) | status,
+              (uint32_t)d->control_state);
     }
     return 0;
 }
@@ -563,8 +593,10 @@ int dwc3_init(void *context, size_t context_bytes,
     /* Mask the event IRQ; status still accumulates for polling. */
     wr(d, DWC3_GEVNTSIZ(0), EVENT_BYTES | (1u << 31));
     wr(d, DWC3_GEVNTCOUNT(0), 0);
+    /* No EVNTOVERFLOWEN/ERRTICERREN: enabling them only buys a notification the driver used to turn
+     * into a permanent stop, and a lost event is survivable (STATE 89). */
     wr(d, DWC3_DEVTEN, DWC3_DEVTEN_DISCONNEVTEN | DWC3_DEVTEN_USBRSTEN |
-         DWC3_DEVTEN_CONNECTDONEEN | DWC3_DEVTEN_EVNTOVERFLOWEN | DWC3_DEVTEN_ERRTICERREN);
+         DWC3_DEVTEN_CONNECTDONEEN);
     if (ep_command(d, 0, DWC3_DEPCMD_DEPSTARTCFG, 0, 0, 0)) goto fail;
     for (ep = 0; ep < EP_COUNT; ep++) {
         if (ep == 2) continue;
@@ -593,21 +625,45 @@ int dwc3_poll(struct dwc3 *d, unsigned budget)
     if (!d || !d->running || d->failed) return -1;
     if (budget > 256) budget = 256;
     bytes = rd(d, DWC3_GEVNTCOUNT(0)) & DWC3_GEVNTCOUNT_MASK;
-    if (bytes > EVENT_BYTES) { d->failed = -7; return -7; }
+    if (bytes > EVENT_BYTES) {
+        /* More bytes are pending than the ring holds: drain what is there and continue rather than
+         * latching a failure that no later event could ever clear (STATE 89). */
+        trace(d, DWC3_TRACE_BAD_EVENT, 0xFF000000u | bytes, (uint32_t)d->control_state);
+        d->errors++;
+        bytes = EVENT_BYTES;
+    }
     while (bytes >= 4 && done < budget) {
         uint8_t *p = d->dma_cpu + d->event_offset;
         sync(d, p, 4, DWC3_FROM_DEVICE);
         event = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
                 ((uint32_t)p[3] << 24);
         d->event_offset = (d->event_offset + 4) % EVENT_BYTES;
-        ret = handle_event(d, event);
         d->events++; d->last_event = event;
+        ret = handle_event(d, event);
         wr(d, DWC3_GEVNTCOUNT(0), 4);
         done++; bytes -= 4;
-        if (ret) { d->failed = ret; return ret; }
+        if (ret) {
+            /* One bad handshake must not end the session: the next SETUP can still succeed. */
+            trace(d, DWC3_TRACE_BAD_EVENT, 0x80000000u | (uint32_t)(-ret), event);
+            d->errors++;
+        }
     }
-    ret = pump(d);
-    if (ret) { d->failed = ret; return ret; }
+    if (pump(d)) d->errors++;
+    if (d->control_state == CTRL_SETUP || done) d->stalled_polls = 0;
+    else if (++d->stalled_polls > 2000u) {
+        /* The host walks away from a transfer that stops making progress, and a polled driver would then
+         * wait on endpoint 0 forever. About two seconds of silence with a control transfer still open
+         * is the signal to cancel it and re-arm SETUP (STATE 89). */
+        d->stalled_polls = 0;
+        trace(d, DWC3_TRACE_TIMEOUT, 0x4354524Cu, (uint32_t)d->control_state);
+        if (d->control_state == CTRL_IN_ACTIVE ||
+            d->control_state == CTRL_STATUS_IN_ACTIVE) end_transfer(d, 1);
+        if (d->control_state == CTRL_OUT_ACTIVE ||
+            d->control_state == CTRL_STATUS_OUT_ACTIVE) end_transfer(d, 0);
+        d->active[0] = d->active[1] = 0;
+        d->control_state = CTRL_SETUP;
+        if (setup_phase(d)) d->errors++;
+    }
     return (int)done;
 }
 size_t dwc3_queue(struct dwc3 *d, const void *bytes, size_t count)
@@ -643,6 +699,8 @@ uint32_t dwc3_last_event(const struct dwc3 *d)
 {
     return d ? d->last_event : 0;
 }
+uint32_t dwc3_control_state(const struct dwc3 *d) { return d ? d->control_state : 0; }
+uint32_t dwc3_errors(const struct dwc3 *d) { return d ? d->errors : 0; }
 int dwc3_ready(const struct dwc3 *d) { return d && d->running && !d->failed && d->configured && d->dtr; }
 size_t dwc3_queued(const struct dwc3 *d) { return d ? d->tx_used : 0; }
 uint64_t dwc3_dropped(const struct dwc3 *d) { return d ? d->dropped : 0; }
@@ -662,6 +720,7 @@ void dwc3_snapshot(struct dwc3 *d, struct dwc3_snapshot *s)
     s->configured = d->configured; s->dtr = d->dtr; s->queued = d->tx_used;
     s->rx_pending = d->rx_used; s->rx_generation = d->rx_generation;
     s->rx_overflow = d->rx_overflow;
+    s->errors = d->errors; s->stalled_polls = d->stalled_polls;
     for (ep = 0; ep < EP_COUNT; ep++) if (d->active[ep]) s->active_endpoints |= 1u << ep;
 }
 int dwc3_stop(struct dwc3 *d)

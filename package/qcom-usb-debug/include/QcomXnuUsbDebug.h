@@ -90,6 +90,9 @@ typedef struct qcom_usb_debug_status {
     uint64_t rx_overflow, control_replies;
     uint32_t rx_pending, rx_generation;
     uint32_t control_enabled, control_hook_owned, control_reboot_state, control_rejected;
+    /* Recoverable core errors and the control stage the core is waiting on, so the panel can tell a
+     * wedged endpoint 0 from a dead controller (STATE 89). */
+    uint32_t core_errors, core_control_state;
 } qcom_usb_debug_status;
 
 #ifdef __cplusplus

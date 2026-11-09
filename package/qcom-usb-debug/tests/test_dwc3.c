@@ -13,7 +13,7 @@ static uint32_t regs[0xd000 / 4], producer;
 static unsigned syncs, from_syncs, delays, writes, last_in_fifo;
 static void *last_from_pointer;
 static size_t last_from_bytes;
-static int timeout_commands;
+static int timeout_commands, refuse_status_arm;
 static const uint64_t dma_bus = UINT64_C(0x123400000);
 static uint32_t read32(void *c, uint32_t reg) { (void)c; assert(reg < sizeof(regs)); return regs[reg / 4]; }
 static void write32(void *c, uint32_t reg, uint32_t value)
@@ -36,6 +36,12 @@ static void write32(void *c, uint32_t reg, uint32_t value)
         unsigned ep = (reg - DWC3_DEPCMD(0)) / 16;
         unsigned cmd = value & 15;
         regs[reg / 4] = cmd;
+        if (cmd == DWC3_DEPCMD_STARTTRANSFER && refuse_status_arm && ep == 0) {
+            /* Invalid Resource: this core will only start the status stage when asked. */
+            refuse_status_arm = 0;
+            regs[reg / 4] = cmd | (1u << 12);
+            return;
+        }
         if (cmd == DWC3_DEPCMD_STARTTRANSFER) {
             uint64_t trb_bus = (uint64_t)regs[DWC3_DEPCMDPAR0(ep) / 4] << 32 |
                               regs[DWC3_DEPCMDPAR1(ep) / 4];
@@ -84,9 +90,15 @@ static void setup(uint8_t type, uint8_t request, uint16_t val, uint16_t index, u
     uint8_t packet[8] = {type, request, val & 255, val >> 8, index & 255, index >> 8, len & 255, len >> 8};
     memcpy(dma + 8192, packet, 8); complete(0, 0);
 }
-static void status_in(unsigned trbtype)
+/* Status stage of a control read, armed on demand after a refused pre-arm. */
+static void status_out_notification(unsigned trbtype)
 {
-    not_ready(1, DEPEVT_STATUS_CONTROL_STATUS);
+    not_ready(0, DEPEVT_STATUS_CONTROL_STATUS);
+    assert((eptrb(0)->ctrl & (63u << 4)) == trbtype); complete(0, 0);
+}
+/* The status stage is armed when the previous stage completes, so no XferNotReady arrives at all. */
+static void status_armed(unsigned trbtype)
+{
     assert((eptrb(1)->ctrl & (63u << 4)) == trbtype); complete(1, 0);
 }
 static void descriptor_tests(void)
@@ -179,18 +191,35 @@ int main(void)
     assert(dwc3_poll(dev, 32) == 1);
     assert(eptrb(0)->size == 8 && !dwc3_ready(dev));
     setup(0x80, 6, 0x0100, 0, 18);
-    not_ready(1, DEPEVT_STATUS_CONTROL_DATA);
+    /* The DATA stage is armed at SETUP decode: a polled driver cannot depend on a one-shot
+     * XferNotReady(DATA) notification that hardware may never send (STATE 89). */
     assert(eptrb(1)->size == 18 && dma[8192 + 4096] == 18);
-    complete(1, 0); not_ready(0, DEPEVT_STATUS_CONTROL_STATUS);
+    complete(1, 0);
     assert((eptrb(0)->ctrl & (63u << 4)) == DWC3_TRBCTL_CONTROL_STATUS3);
     complete(0, 0);
-    setup(0, 5, 42, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0, 5, 42, 0, 0);
+    status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
     assert((regs[DWC3_DCFG / 4] & DWC3_DCFG_DEVADDR_MASK) == DWC3_DCFG_DEVADDR(42));
-    setup(0, 9, 1, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0, 9, 1, 0, 0); status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
     assert(!dwc3_ready(dev));
-    setup(0x21, 0x22, 3, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0x21, 0x22, 3, 0, 0); status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
     assert(dwc3_ready(dev));
     assert(eptrb(4)->size == 4096u);
+    {
+        /* A core that refuses the pre-armed status TRB must fall back to the event-driven state, so a
+         * late XferNotReady(Status) can still finish the transfer instead of wedging endpoint 0. */
+        struct dwc3_snapshot snapshot;
+        refuse_status_arm = 1;
+        setup(0x80, 6, 0x0100, 0, 18);
+        assert(dma[8192 + 4096] == 18);
+        complete(1, 0);
+        dwc3_snapshot(dev, &snapshot);
+        assert((snapshot.active_endpoints & 1u) == 0); /* The refused arm left endpoint 0 idle. */
+        status_out_notification(DWC3_TRBCTL_CONTROL_STATUS3);
+        dwc3_snapshot(dev, &snapshot);
+        assert((snapshot.active_endpoints & 1u) == 1u); /* SETUP is armed again. */
+        assert((eptrb(0)->ctrl & (63u << 4)) == DWC3_TRBCTL_CONTROL_SETUP);
+    }
     {
         static const char first_rx[] = "SXNU1 partial\r\n";
         uint8_t received[32];
@@ -233,19 +262,20 @@ int main(void)
     assert((eptrb(0)->ctrl & (63u << 4)) == DWC3_TRBCTL_CONTROL_SETUP);
     setup(0x21, 0x20, 0, 0, 7);
     not_ready(0, DEPEVT_STATUS_CONTROL_DATA); memcpy(dma + 8192, "1234567", 7); complete(0, 57);
-    status_in(DWC3_TRBCTL_CONTROL_STATUS3);
-    setup(0xa1, 0x21, 0, 0, 7); not_ready(1, DEPEVT_STATUS_CONTROL_DATA);
+    status_armed(DWC3_TRBCTL_CONTROL_STATUS3);
+    setup(0xa1, 0x21, 0, 0, 7);
     assert(!memcmp(dma + 8192 + 4096, "1234567", 7));
-    complete(1, 0); not_ready(0, DEPEVT_STATUS_CONTROL_STATUS); complete(0, 0);
+    complete(1, 0);
+    assert((eptrb(0)->ctrl & (63u << 4)) == DWC3_TRBCTL_CONTROL_STATUS3); complete(0, 0);
     puts("PASS: invalid CDC interface rejection and exact 7-byte line-coding OUT/IN");
     assert(dwc3_queue(dev, payload, sizeof(payload)) == 512);
     assert(dwc3_poll(dev, 32) == 0);
     unsigned before_end_delay = delays;
-    setup(0, 9, 0, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0, 9, 0, 0, 0); status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
     assert(delays == before_end_delay + 2000 && !dwc3_ready(dev));
     assert(dwc3_queued(dev) == 512);
-    setup(0, 9, 1, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
-    setup(0x21, 0x22, 1, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0, 9, 1, 0, 0); status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0x21, 0x22, 1, 0, 0); status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
     assert(dwc3_ready(dev) && eptrb(5)->size == 512);
     complete(5, 0); complete(5, 0);
     assert(dwc3_queue(dev, "reset log\n", 10) == 10);
@@ -266,15 +296,16 @@ int main(void)
         assert(dwc3_rx_pending(dev) == 0);
         assert(dwc3_rx_generation(dev) != generation_before_reset);
     }
-    setup(0, 9, 1, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
-    setup(0x21, 0x22, 1, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0, 9, 1, 0, 0); status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0x21, 0x22, 1, 0, 0); status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
     assert(eptrb(5)->size == 10); complete(5, 0);
     setup(0x80, 6, 0x0100, 0, 18);
-    not_ready(1, DEPEVT_STATUS_CONTROL_STATUS); /* Wrong phase must not start DATA. */
+    assert(eptrb(1)->size == 18); /* DATA is already armed. */
+    not_ready(1, DEPEVT_STATUS_CONTROL_STATUS); /* Wrong phase: must not disturb the armed DATA. */
+    not_ready(1, DEPEVT_STATUS_CONTROL_DATA);   /* A late notification is a no-op, not a re-arm. */
     struct dwc3_snapshot snapshot;
     dwc3_snapshot(dev, &snapshot);
-    assert((snapshot.active_endpoints & 2u) == 0);
-    not_ready(1, DEPEVT_STATUS_CONTROL_DATA);
+    assert((snapshot.active_endpoints & 2u) == 2u && eptrb(1)->size == 18);
     complete(1, (DWC3_TRBSTS_SETUP_PENDING << 28));
     assert((eptrb(0)->ctrl & (63u << 4)) == DWC3_TRBCTL_CONTROL_SETUP);
     setup(0x80, 6, 0x0100, 0, 18);
@@ -298,12 +329,22 @@ int main(void)
     event(1u | (DWC3_DEVT_USBRST << 8));
     event(1u | (DWC3_DEVT_CONNECTDONE << 8));
     assert(dwc3_poll(dev, 32) == 2);
-    setup(0, 9, 1, 0, 0); status_in(DWC3_TRBCTL_CONTROL_STATUS2);
+    setup(0, 9, 1, 0, 0); status_armed(DWC3_TRBCTL_CONTROL_STATUS2);
     assert(eptrb(4)->size == 4096u);
     eptrb(4)->size = 4097u;
     eptrb(4)->ctrl &= ~DWC3_TRB_CTRL_HWO;
-    event((4u << 1) | (DWC3_DEPEVT_XFERCOMPLETE << 6));
-    assert(dwc3_poll(dev, 32) == -8);
+    {
+        struct dwc3_snapshot snapshot;
+        struct dwc3_snapshot before;
+        dwc3_snapshot(dev, &before);
+        event((4u << 1) | (DWC3_DEPEVT_XFERCOMPLETE << 6));
+        /* A rejected length is counted, not returned: stopping here would end the console session for a
+         * single bad packet. */
+        assert(dwc3_poll(dev, 32) == 1);
+        dwc3_snapshot(dev, &snapshot);
+        assert(snapshot.errors == before.errors + 1);
+        assert(!snapshot.failed);
+    }
     assert(dwc3_rx_pending(dev) == 0);
     puts("PASS: OUT residual/cache-sync ordering, finite RX overflow, reset clearing and strict length rejection");
     unsigned previous_writes = writes;
