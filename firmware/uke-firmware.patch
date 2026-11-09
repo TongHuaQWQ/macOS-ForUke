@@ -2108,10 +2108,10 @@ index 00000000..2f350c0c
 +  QcomPkg/QcomPkg.dec
 diff --git a/Platforms/Xiaomi/ukePkg/Library/MemoryMapLib/MemoryMapLib.c b/Platforms/Xiaomi/ukePkg/Library/MemoryMapLib/MemoryMapLib.c
 new file mode 100644
-index 00000000..f3403109
+index 00000000..8c75e51b
 --- /dev/null
 +++ b/Platforms/Xiaomi/ukePkg/Library/MemoryMapLib/MemoryMapLib.c
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,149 @@
 +// SPDX-License-Identifier: BSD-3-Clause
 +// uke (Xiaomi Pad 7, SM7675) UEFI memory map.
 +// Reserved-memory ranges come from the live stock DT (uke-live.dtb).
@@ -2189,7 +2189,22 @@ index 00000000..f3403109
 +  {"Sched Heap", 0xA7799000, 0x00400000, AddMem, SYS_MEM, SYS_MEM_CAP, BsData, WRITE_BACK_XN},
 +  {"FV Region", 0xA7B99000, 0x00400000, AddMem, SYS_MEM, SYS_MEM_CAP, BsData, WRITE_BACK_XN},
 +  {"UEFI RESV", 0xA7F99000, 0x00127000, AddMem, SYS_MEM, SYS_MEM_CAP, BsData, WRITE_BACK_XN},
-+  {"DXE Heap", 0xA80C0000, 0x1B940000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
++  {"DXE Heap", 0xA80C0000, 0x09F40000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
++  // The ABL's initrd lands in the middle of the 2-3 GiB hole and must not be handed to the DXE
++  // allocator. This unit's own /chosen says where it is:
++  //     linux,initrd-start = 0xB5CF2000   linux,initrd-end = 0xB7FFEDAC
++  // (work/analysis/ref/dt/live.dts:26-27), and the upstream uke device record measured the same
++  // hazard as "live ABL initrd 0xB2D51000..0xB7FFF41C overlaps the former DXE Heap
++  // 0xA8000000..0xC3A00000", fixing it by reserving the handoff before SEC/DXE and moving the heap
++  // (unixnu-docs/upstream-docs/docs/zh/devices/uke.md §固件与启动). Both units place the ramdisk so
++  // that it ends at 0xB8000000, so one 96 MiB reservation covers either.
++  //
++  // The heap is therefore two runs with this hole between them rather than one run that silently
++  // contains it. Losing allocator space costs nothing here: the FD is 5 MiB.
++  {"ABL initrd handoff", 0xB2000000, 0x06000000, AddMem, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},
++  // 0xB8000000-0xBAB00000 is left unmapped on purpose: the upstream record's fix starts its heap at
++  // 0xBAB00000, and there is no evidence this board needs those 43 MiB.
++  {"DXE Heap high", 0xBAB00000, 0x08F00000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},
 +  // High DRAM banks from the live DT /memory reg (uke-live.dtb, 12 GB device): the SM7675 puts most
 +  // RAM above 4 GiB exactly like SM8550, and the two ranges are physically adjacent, so DarwinBoot's
 +  // RunEnd merges them into one 9 GiB conventional run (0x8C0000000..0xB00000000). Declared statically
