@@ -7,8 +7,10 @@ answer the same question in about a second:
 
     clang --target=aarch64-none-elf -ffreestanding ...
 
-against the four kernel headers they actually use, which this script writes as stubs into a temporary
-directory. What it proves, in order:
+against the three kernel headers they actually use, which this script writes as stubs into a temporary
+directory. UfsLogKernel.c declares the five IOKit entry points itself, so no iokit/ header is needed at
+all -- that is also why the archive build no longer derives an include path from the compile record.
+What it proves, in order:
 
   * both units compile with -Wall -Wextra at a fixed target and no warnings that matter,
   * they link together (ld.lld -r) while their only remaining references are the kernel services the
@@ -66,29 +68,6 @@ uint64_t mach_absolute_time(void);
 }
 #endif
 ''',
-    'IOKit/IOLib.h': '''#pragma once
-/* Only what package/UfsLogKernel.c uses, with the real declarations' shapes: IOPhysicalAddress is
- * UInt64 (so `unsigned long long`, not uintptr_t) and IOMallocContiguous is deprecated. */
-#include <stdint.h>
-#include <stddef.h>
-#include <mach/mach_time.h>
-typedef uint64_t IOPhysicalAddress;
-typedef struct IOLock IOLock;
-#ifdef __cplusplus
-extern "C" {
-#endif
-void IOLog(const char *format, ...);
-void IODelay(unsigned microseconds);
-void *IOMallocContiguous(uint64_t size, uint64_t alignment,
-                         IOPhysicalAddress *physicalAddress) __attribute__((deprecated));
-void IOFreeContiguous(void *address, uint64_t size) __attribute__((deprecated));
-IOLock *IOLockAlloc(void);
-void IOLockLock(IOLock *lock);
-void IOLockUnlock(IOLock *lock);
-#ifdef __cplusplus
-}
-#endif
-''',
 }
 
 
@@ -109,46 +88,10 @@ def tool(name):
     return path
 
 
-def record_resolution():
-    """Exercise build-ufs-log.py's record -> include-path resolution against a synthetic tree.
-
-    This is the step that cost the first writer round: the record's "directory" is the *object*
-    directory (.../ios-obj/.../iokit/DEVELOPMENT), not the source tree, so nothing can be found by
-    walking up from it. The fix reads the record's own file/-I arguments instead, and this rebuilds the
-    runner's layout to prove the two shapes that appear there:
-      * "-I <path>" as a pair, which is how the xnu makefiles emit them,
-      * "-I<path>" joined.
-    """
-    module = ROOT / 'scripts/build-ufs-log.py'
-    spec = importlib.util.spec_from_file_location('build_ufs_log', module)
-    build = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(build)
-    with tempfile.TemporaryDirectory(prefix='ufs-log-record-') as temporary:
-        source = Path(temporary) / 'xnu-work'
-        iokit = source / 'iokit'
-        (iokit / 'IOKit').mkdir(parents=True)
-        (iokit / 'IOKit/IOLocks.h').write_text('#pragma once\n')
-        objects = source.parent / 'tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT'
-        objects.mkdir(parents=True)
-        base = {'arguments': ['clang++', '-c'], 'directory': str(objects)}
-        cases = {
-            '-I pair': dict(base, file=str(iokit / 'IOPlatformExpert.cpp'),
-                            arguments=['clang++', '-I', str(iokit), '-I', str(source / 'bsd'), '-c']),
-            '-I joined': dict(base, file=str(iokit / 'IOPlatformExpert.cpp'),
-                              arguments=['clang++', '-I' + str(iokit), '-c']),
-        }
-        for label, record in cases.items():
-            found = build.iokit_include(record)
-            if found.resolve() != iokit.resolve():
-                raise SystemExit(f'record resolution ({label}): got {found}, expected {iokit}')
-        print('PASS: the compile record resolves to ' + str(iokit))
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('-v', '--verbose', action='store_true', help='show compiler output')
     options = parser.parse_args()
-    record_resolution()
     clang, clangxx = tool('clang'), tool('clang++')
     linker, nm = tool('ld.lld'), tool('llvm-nm')
 

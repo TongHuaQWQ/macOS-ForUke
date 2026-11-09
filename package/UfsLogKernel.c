@@ -15,9 +15,31 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
 #include <machine/machine_routines.h>
-#include <IOKit/IOLib.h>
+
+// The IOKit entry points are declared here rather than by including <IOKit/IOLib.h>, and two things
+// make that the right trade:
+//
+//   * the compile record that builds this file is a bsd unit's, so its -I set has no iokit/ in it.
+//     Reaching IOLib.h therefore meant inventing an include path from the record, and getting that
+//     wrong is what killed archive-18 on the first writer round ("cannot locate the xnu source root
+//     above .../ios-obj/iokit/DEVELOPMENT"). Three headers that every kernel unit can already see
+//     beat one that only some can.
+//   * the declarations below are copied from iokit/IOKit/IOLib.h (251, 269, 643 and IOLocks.h:78), on
+//     arm64, where IOPhysicalAddress is UInt64 -- so every call site in this file is still checked
+//     against the real shapes, including the deprecated attribute on IOMallocContiguous.
+typedef uint64_t IOPhysicalAddress;
+typedef struct IOLock IOLock;
+extern void  IOLog(const char *format, ...) __attribute__((format(printf, 1, 2)));
+extern void  IODelay(unsigned microseconds);
+extern void *IOMallocContiguous(uintptr_t size, uintptr_t alignment,
+                                IOPhysicalAddress *physicalAddress)
+  __attribute__((deprecated));
+extern IOLock *IOLockAlloc(void);
+extern void    IOLockLock(IOLock *lock);
+extern void    IOLockUnlock(IOLock *lock);
 
 #define UFSLOG_HC_BASE      0x01d84000ULL
 #define UFSLOG_HC_SIZE      0x00003000ULL

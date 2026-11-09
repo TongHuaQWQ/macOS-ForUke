@@ -27,8 +27,10 @@ The split
 
 Both are compiled with this kernel's own compile records, so the target triple, the arm64e PAC
 options and the kernel include set are the ones the rest of the kernel used. The record only supplies
-the command line that *would* have compiled an existing kernel object; `record['directory']` gives the
-working directory and the source root that owns `iokit/IOKit`.
+the command line that *would* have compiled an existing kernel object. Nothing is added to its -I set
+except drivers/NativeUfs, which is this repository's own directory: UfsLogKernel.c declares the five
+IOKit entry points it calls instead of including <IOKit/IOLib.h>, because a bsd record has no iokit/
+on its include path and deriving one from the record cost the first writer round.
 
 Linking
 -------
@@ -90,45 +92,6 @@ def rewrite(record, source, obj, extra):
     return command + extra
 
 
-def iokit_include(record):
-    """The -I directory that makes <IOKit/IOLib.h> resolve, found from the record itself.
-
-    A record's "directory" is NOT the source tree: on the runner it is the object directory
-    (.../tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT), so walking up from it
-    never reaches iokit/IOKit -- that mistake cost the first writer round ("cannot locate the xnu
-    source root above .../ios-obj/iokit/DEVELOPMENT"). What does point into the source tree is the
-    record's own command line: "file" is the original source, and the -I entries are absolute paths
-    into it. Both are probed, then the patched tree this repository builds (make -C .cache/xnu-work,
-    which is what build-xnu-4k-baseline.sh runs).
-
-    Returns the directory to add to the include path, i.e. the one that CONTAINS IOKit/, not the
-    source root: <root>/iokit/IOKit/IOLocks.h is the marker.
-    """
-    probes = []
-    arguments = record['arguments']
-    for index, argument in enumerate(arguments):
-        if argument == '-I' and index + 1 < len(arguments):
-            probes.append(arguments[index + 1])
-        elif argument.startswith('-I') and len(argument) > 2:
-            probes.append(argument[2:].lstrip('='))
-    probes.append(record.get('file') or '')
-    for name in ('xnu-work', 'xnu'):
-        probes.append(ROOT / '.cache' / name)
-    probed = []
-    for probe in probes:
-        if not probe:
-            continue
-        for candidate in ((ROOT / probe).resolve(), *(ROOT / probe).resolve().parents):
-            probed.append(candidate)
-            if (candidate / 'IOKit/IOLocks.h').is_file():
-                return candidate
-            if (candidate / 'iokit/IOKit/IOLocks.h').is_file():
-                return candidate / 'iokit'
-    shown = ', '.join(str(path) for path in probed[:6])
-    raise SystemExit(f'cannot locate IOKit/IOLocks.h from the compile record; probed {shown}'
-                     + (' (and more)' if len(probed) > 6 else ''))
-
-
 def compile_unit(source, record_name, obj, extra):
     record = load_record(record_name)
     command = rewrite(record, source, obj, extra)
@@ -164,8 +127,9 @@ def symbols(archive):
 
 def main():
     """Compile both units with the kernel's own records, archive them, and assert the exports."""
-    cxx_record = load_record(CXX_RECORD)
-    includes = ['-I', str(ROOT / 'drivers/NativeUfs'), '-I', str(iokit_include(cxx_record))]
+    # Only the driver's own transport headers: package/UfsLogKernel.c declares the five IOKit
+    # entry points it calls, so nothing here needs an include path invented from the record.
+    includes = ['-I', str(ROOT / 'drivers/NativeUfs')]
     # -Wall -Wextra without -Werror: the headers are the driver's, not this port's, and a warning here must
     # not cost a kernel round. Both logs land in the artifact and the report, so a later round can tighten.
     warnings = ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Wno-unused-parameter',
