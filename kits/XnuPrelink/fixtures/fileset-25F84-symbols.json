@@ -183,8 +183,8 @@
    "original": "0xfffffe000c09c31c",
    "original_size": 412,
    "original_sha256": "81abe50637db9839f380d020b071bed40bcb4495043441e9eb953bcfae253662",
-   "native_symbol": "_SecureDTGetPropertyInternal",
-   "evidence": "6 native addresses compete between _SecureDTFindNodeWithPropertyEqualToValueHelper and _SecureDTInitEntryIterator, so position does not decide; behaviour does: the original and _SecureDTGetPropertyInternal share 4.0 symbolic features (_panic, _strcmp) and no other candidate comes close."
+   "native_symbol": "_SecureDTGetProperty",
+   "evidence": "6 native addresses compete between _SecureDTFindNodeWithPropertyEqualToValueHelper and _SecureDTInitEntryIterator, so position does not decide; behaviour does: the original and _SecureDTGetPropertyInternal share 4.0 symbolic features (_panic, _strcmp) and no other candidate comes close. CORRECTION (_SecureDTGetProperty): kernel.release.t8142 names this 412-byte position _SecureDTGetProperty and that is the unique KDK name for its shape. _SecureDTGetPropertyInternal is not defined in the release kernel."
   },
   {
    "original": "0xfffffe000bd831f4",
@@ -204,15 +204,15 @@
    "original": "0xfffffe000bda4834",
    "original_size": 128,
    "original_sha256": "6a60420abb167cd0490c14ac86d48fd70d4112284df11dde1489d7b4921c0078",
-   "native_symbol": "_kernel_sysctl",
-   "evidence": "Link order: _sysctl_handle_string and _sysctl_root bracket this function; 2 native addresses compete in that range, and source order picks _kernel_sysctl alone. Source order: bsd/kern/kern_newsysctl.c:142 lies between _sysctl_handle_string:1426 and _sysctl_root:140."
+   "native_symbol": "_sysctl_handle_opaque",
+   "evidence": "Link order: _sysctl_handle_string and _sysctl_root bracket this function; 2 native addresses compete in that range, and source order picks _kernel_sysctl alone. Source order: bsd/kern/kern_newsysctl.c:142 lies between _sysctl_handle_string:1426 and _sysctl_root:140. CORRECTION (_sysctl_handle_opaque): kernel.release.t8142 names this position _sysctl_handle_opaque and the entry shape is unique with exactly that one name in the KDK development table. _kernel_sysctl is not defined anywhere in the release kernel."
   },
   {
    "original": "0xfffffe000b95eac4",
    "original_size": 8,
    "original_sha256": "224d4df0836ae187285a713f6eab38d506f106d5205135a58ab1548d5684fce9",
-   "native_symbol": "_cpu_idle_tickle",
-   "evidence": "Link order: _cpu_doshutdown and _cpu_broadcast_xcall_internal bracket this function; 4 native addresses compete in that range, and source order picks _cpu_idle_tickle alone. Source order: osfmk/arm/cpu_common.c:190 lies between _cpu_doshutdown:179 and _cpu_broadcast_xcall_internal:247."
+   "native_symbol": "_cpu_broadcast_xcall",
+   "evidence": "Link order: _cpu_doshutdown and _cpu_broadcast_xcall_internal bracket this function; 4 native addresses compete in that range, and source order picks _cpu_idle_tickle alone. Source order: osfmk/arm/cpu_common.c:190 lies between _cpu_doshutdown:179 and _cpu_broadcast_xcall_internal:247. CORRECTION (_cpu_broadcast_xcall): referee only. kernel.release.t8142 names this 8-byte thunk _cpu_broadcast_xcall; the shape is shared by many 8-byte stubs, so the digest oracle cannot vote, but the position sits inside a 23 023/23 025 digest-equal alignment."
   },
   {
    "original": "0xfffffe000ba414f8",
@@ -274,8 +274,8 @@
    "original": "0xfffffe000b9fcff0",
    "original_size": 780,
    "original_sha256": "f754654cca74ab030c4f240c17cf31509b8d2d4bd659ef32bc00ddc0033805e9",
-   "native_symbol": "_name_cache_lock",
-   "evidence": "4 native addresses compete between _vnode_putname_printable and _vnode_uncache_credentials, so position does not decide; behaviour does: the original and _name_cache_lock share 2.0 symbolic features (_IORWLockWrite) and no other candidate comes close."
+   "native_symbol": "_vnode_setasfirmlink",
+   "evidence": "4 native addresses compete between _vnode_putname_printable and _vnode_uncache_credentials, so position does not decide; behaviour does: the original and _name_cache_lock share 2.0 symbolic features (_IORWLockWrite) and no other candidate comes close. CORRECTION (_vnode_setasfirmlink): the same-build referee and the digest oracle agree. kernel.release.t8142 names this position _vnode_setasfirmlink, and the shape is unique in the entry with exactly that one name in the KDK development table (a different compilation). 780 bytes; no 4-way contender survives this."
   },
   {
    "original": "0xfffffe000ba51d38",
@@ -393,8 +393,8 @@
    "original": "0xfffffe000b7fcadc",
    "original_size": 12,
    "original_sha256": "2e0ef9f8c6a1011b3d13ec83d0e691a0a3723f570db65ac8999e92b1dc359595",
-   "native_symbol": "_lck_mtx_gate_handoff",
-   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+   "native_symbol": "_lck_mtx_gate_steal",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly. CORRECTION (_lck_mtx_gate_steal): transposition, not a guess. kernel.release.t8142 defines _lck_mtx_gate_handoff at 0xfffffe0007390acc and _lck_mtx_gate_steal at 0xfffffe0007390adc, so the pinned originals 0xfffffe000b7fcacc and 0xfffffe000b7fcadc carry each other names."
   },
   {
    "original": "0xfffffe000b7fc7c4",

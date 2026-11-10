@@ -40,6 +40,24 @@ never emitted; compiler-generated names and graph-only guesses do not transfer.
 The map records the comparison image hash. The standalone matcher calls this
 option `--reference-kernel FILE`.
 
+The same two options also accept the comparison kernel written down as data:
+`reference-names.json[.gz]`, one `(shape digest, length, symbols)` row per
+function start of the comparison in address order. Function *i* of a
+same-build entry is function *i* of that kernel, so the row position replaces
+the address and the file holds no code, no offset and no address. It is
+generated once from a symbol-bearing kernel (`tools/build_reference_names.py`
+in the UniXNU measurement directory) and shipped as a fixture, which is how a
+public repository can carry Apple's same-build naming evidence at all. Names
+are bound by digest and length and then by position, both followed by the
+native kernel's own unique symbol; the map records the table hash and is
+refused if a different table is supplied.
+
+`--root`'s closure also needs *data* names, which a function table cannot
+carry. The kernelcache names those itself: the `com.apple.kernel` entry's own
+symbol table is read as `declared_names()` and binds every function and data
+object whose declared name the native kernel defines exactly once. That needs
+no external file, and it is what takes `unresolved closure references` to 0.
+
 Missing mappings stop output and are listed in the JSON report beside the
 requested image. `--allow-missing` explicitly permits an experimental image
 with unresolved references. Pairings are inferred from stripped code;

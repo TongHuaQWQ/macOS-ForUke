@@ -4,6 +4,7 @@ import argparse
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
+import gzip
 import hashlib
 import json
 import struct
@@ -13,16 +14,27 @@ from kc_image import Image, scan
 from fileset_shape import checked_shape
 
 EXEC_SEGMENTS = ('__TEXT_EXEC', '__TEXT_BOOT_EXEC', '__KLD', '__LAST')
-MATCHER_VERSION = 8
+MATCHER_VERSION = 9
+# The format of a data-only naming reference, as written by tools/build_reference_names.py.
+REFERENCE_NAMES_FORMAT = 'xnu-reference-names/1'
+# Names a symbol-bearing build cannot be trusted to identify a function with.
+SKIP_PARTS = ('.cold.', 'OUTLINED_FUNCTION', '.llvm.')
 
 
-def matcher_signature():
-    """Invalidate cached maps when analysis code or reviewed evidence changes."""
+def matcher_signature(evidence=()):
+    """Invalidate cached maps when analysis code, reviewed evidence or a naming reference changes."""
     root = Path(__file__).parent
     digest = hashlib.sha256()
     for path in [Path(__file__),root/'kc_image.py',root/'fileset_shape.py',*sorted((root/'fixtures').glob('fileset-*-symbols.json'))]:
         digest.update(path.name.encode()+b'\0'+path.read_bytes())
+    for name, value in sorted(evidence):
+        digest.update(str(name).encode()+b'\0'+str(value).encode())
     return digest.hexdigest()
+
+
+def map_signature(payload):
+    """The signature a cached map must carry: code hashes plus the reference it was built from."""
+    return matcher_signature((payload.get('evidence') or {}).items())
 
 
 def vtable_slots(side, base):
@@ -126,6 +138,57 @@ class Side:
         return f"{section['segment']},{section['name']}" if section else '?'
 
 
+class ReferenceNames:
+    """A measured naming reference: one symbol-bearing kernel as `digest, length, symbols` rows.
+
+    `--reference-kernel` needs the reference as a Mach-O because it pairs the two images to
+    find where each identity comes from. For a **release kernel of the same build** that
+    pairing is positional: the entry is this build relocated per segment, so function i of
+    the entry is function i of the reference, and 23 023 of 23 025 positions carry the same
+    shape. A table of those rows is therefore equivalent to the image for naming, and it
+    holds no code, no image offsets and no addresses — only a shape digest of each function,
+    its length, and the symbols the build kept.
+    """
+
+    def __init__(self, rows, sha256, source):
+        self.rows, self.sha256, self.source = rows, sha256, source
+        named = defaultdict(set)
+        for digest, length, symbols in rows:
+            named[digest, length].update(symbols)
+        self.named_shapes = named
+
+    @classmethod
+    def load(cls, data):
+        """Read `reference-names.json` or `reference-names.json.gz`."""
+        if data[:2] == b'\x1f\x8b':
+            data = gzip.decompress(data)
+        table = json.loads(data)
+        if table.get('format') != REFERENCE_NAMES_FORMAT:
+            raise ValueError(f'reference names format {table.get("format")!r} is not {REFERENCE_NAMES_FORMAT}')
+        rows = [(digest, int(length), tuple(symbols or ()))
+                for digest, length, symbols in table['functions']]
+        source = dict(table.get('kernel') or {}, rows=len(rows))
+        return cls(rows, hashlib.sha256(data).hexdigest(), source)
+
+    @property
+    def evidence(self):
+        """What a cached map must record to prove it was built from this table."""
+        return {'reference-names': self.sha256, 'rows': len(self.rows)}
+
+    def names_at(self, position):
+        return self.rows[position][2] if position < len(self.rows) else ()
+
+
+def reference_input(data):
+    """A naming reference is either a Mach-O image or the data-only table; both are accepted.
+
+    Returns `(image_bytes, ReferenceNames)` with exactly one of the two set.
+    """
+    if data[:2] == b'\x1f\x8b' or data[:1] == b'{':
+        return None, ReferenceNames.load(data)
+    return data, None
+
+
 class Matcher:
     """Bind original functions to native functions; every bind must survive its checks."""
 
@@ -133,6 +196,7 @@ class Matcher:
         self.original, self.native = original, native
         self.pairs, self.reverse, self.how = {}, {}, {}
         self.conflicts = []
+        self.evidence = {}
 
     def bind(self, orig, native, how):
         if self.pairs.get(orig) == native:
@@ -213,6 +277,104 @@ class Matcher:
             if len(targets) == 1:
                 bound += self.bind(orig, next(iter(targets)), 'reference-symbol')
         return bound
+
+    def declared_names(self):
+        """Entry address -> the one native address its own declared symbol names.
+
+        The collection is Apple's own prelinked image, so its symbol table is the build's
+        own statement of which name sits at which address of *this* entry — the names the
+        build exported to kexts, and nothing inferred. A declared name is usable when the
+        native kernel defines it exactly once; the native address comes from the native
+        kernel, never from the declaration.
+        """
+        declared, stats = {}, Counter()
+        # Every name the native kernel defines, at a function or a data address: a declared
+        # variable matters as much as a declared function, and `named_functions` is code only.
+        natives = defaultdict(set)
+        for address, symbols in self.native.symbol_names.items():
+            for name in symbols:
+                natives[name].add(address)
+        for address, found in sorted(self.original.symbol_names.items()):
+            stats['declared'] += 1
+            usable = [name for name in dict.fromkeys(found) if not any(p in name for p in SKIP_PARTS)]
+            targets = {target for name in usable for target in natives.get(name, ())}
+            if not targets:
+                stats['absent-in-native' if usable else 'unusable-in-native'] += 1
+                continue
+            if len(targets) != 1:
+                stats['ambiguous'] += 1
+                continue
+            declared[address] = next(iter(targets))
+        self.declared_stats = stats
+        return declared
+
+    def anchor_declared_functions(self, declared):
+        """Bind functions the entry names itself; stronger evidence than any reference image."""
+        bound = sum(self.bind(orig, native, 'declared')
+                    for orig, native in sorted(declared.items()) if orig in self.original.functions)
+        return bound
+
+    def anchor_declared_data(self, declared, known):
+        """Bind data objects the entry names itself, including the kext-facing ones."""
+        added = 0
+        for orig, native in sorted(declared.items()):
+            if orig in self.original.functions or orig in known or not self.original.in_mapped(orig):
+                continue
+            known[orig] = (native, 'declared')
+            added += 1
+        return added
+
+    def anchor_reference_names(self, names):
+        """Name functions from a data-only same-build reference: shape first, then address order.
+
+        The two stages are the ones the binary path already uses, in the same order
+        (`anchor_reference`, then `anchor_reference_order`):
+
+        1. **digest+length.** A shape that occurs once in the entry and has exactly one name
+           in the table identifies its function without any position. This is the part that
+           keeps working when the reference is not the same build.
+        2. **address order.** Every other function is read from the row at its own position
+           in the reference, which is where a same-build kernel keeps it. Row i is the i-th
+           function start of the reference, so the row order *is* the address, and the
+           digest-and-length check at that row is the same per-position check
+           `anchor_reference_order` makes against a Mach-O.
+
+        Both stages take the final address from the native kernel's symbol table: the table
+        names a function, it never supplies an address.
+        """
+        stats = Counter()
+
+        def bind(orig, symbols, how, prefix):
+            targets = {self.native.named_functions[name] for name in symbols
+                       if name in self.native.named_functions}
+            if not symbols:
+                return
+            stats[f'{prefix}-named'] += 1
+            if len(targets) != 1:
+                stats[f'{prefix}-absent-in-native' if not targets else f'{prefix}-ambiguous'] += 1
+                return
+            stats[f'{prefix}-bindable'] += 1
+            stats[f'{prefix}-bound'] += self.bind(orig, next(iter(targets)), how)
+
+        shapes = Counter((fn['digest'], fn['length']) for fn in self.original.checked_functions.values())
+        for orig, fn in sorted(self.original.checked_functions.items()):
+            if shapes[fn['digest'], fn['length']] != 1:
+                continue
+            stats['shape-unique'] += 1
+            bind(orig, names.named_shapes.get((fn['digest'], fn['length']), ()), 'reference-name', 'shape')
+        for position, orig in enumerate(sorted(self.original.checked_functions)):
+            if position >= len(names.rows):
+                break
+            digest, length, symbols = names.rows[position]
+            stats['positions'] += 1
+            fn = self.original.checked_functions[orig]
+            if (fn['digest'], fn['length']) != (digest, length):
+                stats['positions-digest-mismatch'] += 1
+                continue
+            stats['positions-digest-equal'] += 1
+            bind(orig, symbols, 'reference-name-order', 'order')
+        stats['bound'] = stats['shape-bound'] + stats['order-bound']
+        return stats
 
     def anchor_reference_order(self, reference, pairing, rounds=4):
         """Fill gaps between ordered reference pairs, then transfer names like anchor_reference.
@@ -979,7 +1141,8 @@ class Matcher:
                                        'how': self.how[orig]}
         payload = {
             'matcher_version': MATCHER_VERSION,
-            'matcher_signature': matcher_signature(),
+            'matcher_signature': matcher_signature(self.evidence.items()),
+            'evidence': dict(self.evidence),
             'functions': functions,
             'data': {f'{orig:#x}': {'native': f'{native:#x}', 'name': self.native.name_at(native)[0],
                                     'how': how, 'sections': [self.original.section_of(orig),
@@ -999,8 +1162,15 @@ class Matcher:
         return payload
 
 
-def match_images(raw, native_data, entry_name='com.apple.kernel', max_rounds=40, reference_data=None, pure_leaves=True):
-    """Build a map bound to the exact two input images."""
+def match_images(raw, native_data, entry_name='com.apple.kernel', max_rounds=40, reference_data=None,
+                 pure_leaves=True, reference_names=None):
+    """Build a map bound to the exact two input images.
+
+    `reference_data` is a symbol-bearing kernel image and `reference_names` the same
+    reference as a data-only `digest, length, symbols` table (`ReferenceNames`). Both only
+    add or referee identities; neither changes an emitted instruction, and a map records
+    the reference hashes it was built from so a stale map cannot be reused.
+    """
     cache = Image(raw)
     if entry_name not in cache.entries:
         raise ValueError(f'No fileset entry {entry_name!r}')
@@ -1017,6 +1187,20 @@ def match_images(raw, native_data, entry_name='com.apple.kernel', max_rounds=40,
     inputs = {'kernelcache_sha256': hashlib.sha256(raw).hexdigest(),
               'native_sha256': hashlib.sha256(native_data).hexdigest(), 'entry': entry_name}
     print(f'reviewed anchors: {matcher.anchor_reviewed(inputs)}')
+    declared = matcher.declared_names()
+    print(f'declared names: {matcher.anchor_declared_functions(declared)} functions '
+          f'({len(declared)} of {matcher.declared_stats["declared"]} symbols usable, '
+          f'{matcher.declared_stats["absent-in-native"]} absent, {matcher.declared_stats["ambiguous"]} ambiguous)')
+    if reference_names is not None:
+        # A data-only reference names by shape and then by address order; it is the same
+        # evidence as `reference_data`, minus Apple's bytes, for a same-build reference.
+        stats = matcher.anchor_reference_names(reference_names)
+        matcher.evidence.update(reference_names.evidence)
+        print(f'reference names anchors: {stats["bound"]} '
+              f'({stats["shape-unique"]} unique shapes, {stats["shape-bound"]} by digest+length, '
+              f'{stats["order-bound"]} by address order, '
+              f'{stats["positions-digest-equal"]}/{stats["positions"]} positions digest-equal, '
+              f'{stats["positions-digest-mismatch"]} mismatched)')
     if reference_data is not None:
         # Pure-leaf binds carry behaviour, not identity, so the naming reference must not use them.
         reference_pairing = match_images(raw, reference_data, entry_name, max_rounds, pure_leaves=False)
@@ -1032,6 +1216,7 @@ def match_images(raw, native_data, entry_name='com.apple.kernel', max_rounds=40,
     inside = lambda address: any(b <= address < e for b, e in kernel)
     targets = {fix[0] for site, fix in fixups.items() if inside(fix[0]) and not inside(site)}
     print(f'reviewed data: {matcher.reviewed_data(inputs, data)}')
+    print(f'declared data: {matcher.anchor_declared_data(declared, data)}')
     if reference_data is not None:
         print(f'reference data names: {matcher.reference_data(reference, reference_pairing, targets, data)}')
     for _ in range(max_rounds):
@@ -1073,10 +1258,21 @@ def main():
     parser.add_argument('--out', help='write the pairing as JSON to this path')
     parser.add_argument('--max-rounds', type=int, default=40, help='call graph propagation rounds')
     parser.add_argument('--reference-kernel', type=Path, help='additional symbol-bearing kernel for unique code matches')
+    parser.add_argument('--reference-names', type=Path,
+                        help='the same reference as a data-only digest/length/symbol table '
+                             '(reference-names.json[.gz]); accepted by --reference-kernel too')
     args = parser.parse_args()
+    reference_data = args.reference_kernel.read_bytes() if args.reference_kernel else None
+    reference_names = None
+    if reference_data is not None:
+        reference_data, reference_names = reference_input(reference_data)
+    if args.reference_names is not None:
+        if reference_names is not None or reference_data is not None:
+            parser.error('give one naming reference, not both')
+        reference_names = ReferenceNames.load(args.reference_names.read_bytes())
     payload = match_images(Path(args.kernelcache).read_bytes(), Path(args.native).read_bytes(),
-                           args.entry, args.max_rounds,
-                           args.reference_kernel.read_bytes() if args.reference_kernel else None)
+                           args.entry, args.max_rounds, reference_data,
+                           reference_names=reference_names)
     if args.out:
         Path(args.out).write_text(json.dumps(payload, indent=1))
         print(f'wrote {args.out}')

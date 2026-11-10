@@ -316,7 +316,9 @@ def main():
     parser.add_argument('--early-security-init', action='append', default=[], metavar='BUNDLE=ORIGINAL_VA',
                         help='Explicit original void(void) policy initializer, called before lockdown; requires source ABI')
     parser.add_argument('--fileset-map', type=Path, help='existing exact-input pairing for an MH_FILESET cache')
-    parser.add_argument('--fileset-reference', type=Path, help='symbol-bearing comparison kernel for fileset matching')
+    parser.add_argument('--fileset-reference', type=Path,
+                        help='symbol-bearing comparison kernel for fileset matching, or the same '
+                             'reference as a data-only reference-names.json[.gz] table')
     parser.add_argument('--allow-missing', action='store_true',
                         help='MH_FILESET only: emit an experimental image with incomplete mappings')
     args = parser.parse_args()
@@ -331,30 +333,36 @@ def main():
     native_data, original_data = args.kernel.read_bytes(), args.prelinked.read_bytes()
     if len(original_data) >= 16 and struct.unpack_from('<I', original_data, 12)[0] == 12:
         from fileset_emit import atomic_write, emit_images, validate_map, write_candidate
-        from fileset_match import match_images, MATCHER_VERSION, matcher_signature
-        reference_data = args.fileset_reference.read_bytes() if args.fileset_reference else None
+        from fileset_match import match_images, MATCHER_VERSION, map_signature, reference_input
+        reference_data, reference_names = reference_input(args.fileset_reference.read_bytes()) \
+            if args.fileset_reference else (None, None)
         reference_hash = hashlib.sha256(reference_data).hexdigest() if reference_data is not None else None
+        evidence = dict(reference_names.evidence) if reference_names is not None else {}
         map_path = args.fileset_map or args.output.with_suffix('.map.json')
         if args.fileset_map:
             pairing = json.loads(map_path.read_text())
             validate_map(original_data, native_data, pairing)
-            if pairing.get('matcher_version') != MATCHER_VERSION or pairing.get('matcher_signature') != matcher_signature():
+            if pairing.get('matcher_version') != MATCHER_VERSION or pairing.get('matcher_signature') != map_signature(pairing):
                 parser.error('fileset map predates the current matching checks; regenerate it')
             if reference_data is not None and pairing.get('reference_sha256') != reference_hash:
                 parser.error('fileset map does not match the supplied reference kernel')
+            if pairing.get('evidence', {}) != evidence:
+                parser.error('fileset map does not match the supplied reference names')
         else:
             pairing = None
             if map_path.is_file():
                 cached = json.loads(map_path.read_text())
                 try:
                     validate_map(original_data, native_data, cached)
-                    if (cached.get('matcher_version') == MATCHER_VERSION and cached.get('matcher_signature') == matcher_signature()
-                            and cached.get('reference_sha256') == reference_hash):
+                    if (cached.get('matcher_version') == MATCHER_VERSION and cached.get('matcher_signature') == map_signature(cached)
+                            and cached.get('reference_sha256') == reference_hash
+                            and cached.get('evidence', {}) == evidence):
                         pairing = cached
                 except ValueError:
                     pass
             if pairing is None:
-                pairing = match_images(original_data, native_data, reference_data=reference_data)
+                pairing = match_images(original_data, native_data, reference_data=reference_data,
+                                       reference_names=reference_names)
                 atomic_write(map_path, (json.dumps(pairing, indent=2) + '\n').encode())
         # An experimental image binds every unmatched function start to the
         # panic stub, so an unknown call reports its site instead of jumping to
