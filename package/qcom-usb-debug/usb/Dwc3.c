@@ -15,6 +15,15 @@
 #define EP_BUFFER_BYTES 4096u
 #define TX_BYTES DWC3_TX_BYTES
 #define COMMAND_POLLS 10000u
+/* The core soft reset and the halt handshake are not endpoint commands and do not finish in an
+ * endpoint command's budget. Linux gives the soft reset 100 ms (dwc3_core_soft_reset: 1000 tries of
+ * usleep_range(10, 20)) and relies on CSftRst being self-clearing "within a few microseconds of the
+ * core clock being active" -- which is the qualifier this driver was missing: ten milliseconds of 1 us
+ * polls is enough while the clock is fast and not enough when it is not, so the same code cleared
+ * CSftRst on b107 and reported QCOM_USB_DEBUG_CORE_INIT_FAILED / -3 with DCTL=0x40f00000 on b108
+ * (trace T2 = TIMEOUT, reg 0xc704 = DCTL, bit 30 = CSftRst still set). */
+#define RESET_POLLS 10000u
+#define RESET_PAUSE_US 10u
 #define CONFIG_ACTION_MODIFY (2u << 30)
 
 enum control_state {
@@ -138,15 +147,26 @@ static void rx_push(struct dwc3 *d, const uint8_t *bytes, size_t count)
     d->rx_used += (uint32_t)accepted;
     d->rx_overflow += count - accepted;
 }
-static int wait_mask(struct dwc3 *d, uint32_t reg, uint32_t mask, uint32_t want)
+static int wait_mask_slow(struct dwc3 *d, uint32_t reg, uint32_t mask, uint32_t want,
+                          unsigned polls, unsigned pause_us)
 {
     unsigned i;
-    for (i = 0; i < COMMAND_POLLS; i++) {
+    for (i = 0; i < polls; i++) {
         if ((rd(d, reg) & mask) == want) return 0;
-        d->io.delay_us(d->io.cookie, 1);
+        d->io.delay_us(d->io.cookie, pause_us);
     }
     trace(d, DWC3_TRACE_TIMEOUT, reg, rd(d, reg));
     return -3;
+}
+static int wait_mask(struct dwc3 *d, uint32_t reg, uint32_t mask, uint32_t want)
+{
+    return wait_mask_slow(d, reg, mask, want, COMMAND_POLLS, 1u);
+}
+/* For the two resets' waits at the top of dwc3_init(): 100 ms, which is what the core is actually
+ * allowed to take. */
+static int wait_reset(struct dwc3 *d, uint32_t reg, uint32_t mask, uint32_t want)
+{
+    return wait_mask_slow(d, reg, mask, want, RESET_POLLS, RESET_PAUSE_US);
 }
 static int ep_command(struct dwc3 *d, unsigned ep, uint32_t cmd,
                       uint32_t p0, uint32_t p1, uint32_t p2)
@@ -611,9 +631,9 @@ int dwc3_init(void *context, size_t context_bytes,
     interrupts = (rd(d, DWC3_GHWPARAMS1) >> 15) & 63u;
     if (!interrupts || interrupts > 32) return -2;
     wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) & ~DWC3_DCTL_RUN_STOP);
-    if (wait_mask(d, DWC3_DSTS, DWC3_DSTS_DEVCTRLHLT, DWC3_DSTS_DEVCTRLHLT)) return -3;
+    if (wait_reset(d, DWC3_DSTS, DWC3_DSTS_DEVCTRLHLT, DWC3_DSTS_DEVCTRLHLT)) return -3;
     wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) | DWC3_DCTL_CSFTRST);
-    if (wait_mask(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0)) return -3;
+    if (wait_reset(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0)) return -3;
     wr(d, DWC3_DEVTEN, 0); wr(d, DWC3_DALEPENA, 0);
     /* A previous USB owner may have left other interrupters and unacknowledged
      * event counts. Halt precedes replacing any event-DMA mapping. */
