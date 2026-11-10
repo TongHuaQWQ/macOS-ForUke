@@ -263,6 +263,11 @@ int native_ufs_log_sync(void);
 // enough to ride out an early failure and still stop for good afterwards.
 #define UKE_UFS_START_ATTEMPTS 5
 int ufs_log_start(const char **why);
+// The pram beacon slot (+0x1100) is what the firmware's menu prints on the NEXT boot when it finds no
+// panic text, so it is the one channel that says whether the userdata writer got anywhere without a
+// working USB console, a readable window, or a surviving msgbuf. Declared here because its definition
+// is below this half of the file, and a helper used above its definition is what broke b106.
+static void uke_last_log_beacon(const char *text);
 #endif
 
 #if UKE_LOG_USERDATA
@@ -337,11 +342,13 @@ uke_ufs_publish(void)
 			}
 			IOLog("UkeLastLog: userdata log transport unavailable: %s\n",
 			    why != NULL && why[0] != '\0' ? why : "(no reason)");
+			uke_last_log_beacon("UKELOG-NOTRANSPORT");
 			ukeUfsRefused = true;
 			return;
 		}
 		ukeUfsStarted = true;
 		IOLog("UkeLastLog: userdata log transport attached\n");
+		uke_last_log_beacon("UKELOG-TRANSPORT-OK");
 	}
 	if (!ukeUfsOpen) {
 		const char *why = "";
@@ -352,6 +359,7 @@ uke_ufs_publish(void)
 			// change on a later tick.
 			IOLog("UkeLastLog: userdata log window unavailable: %s\n",
 			    why != NULL && why[0] != '\0' ? why : "(no reason)");
+			uke_last_log_beacon("UKELOG-NOWINDOW");
 			ukeUfsRefused = true;
 			return;
 		}
@@ -361,6 +369,8 @@ uke_ufs_publish(void)
 		ukeUfsOpen = true;
 		IOLog("UkeLastLog: userdata log window at lba %llu, %llu blocks\n",
 		    (unsigned long long)first, (unsigned long long)blocks);
+		// Distinguishable from TRANSPORT-OK on the menu even when the window then never fills.
+		uke_last_log_beacon("UKELOG-WINDOW-OPEN");
 	}
 
 	bzero(ukeUfsBuffer, sizeof(ukeUfsBuffer));
