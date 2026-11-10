@@ -18,10 +18,10 @@
 /* The core soft reset and the halt handshake are not endpoint commands and do not finish in an
  * endpoint command's budget. Linux gives the soft reset 100 ms (dwc3_core_soft_reset: 1000 tries of
  * usleep_range(10, 20)) and relies on CSftRst being self-clearing "within a few microseconds of the
- * core clock being active" -- which is the qualifier this driver was missing: ten milliseconds of 1 us
- * polls is enough while the clock is fast and not enough when it is not, so the same code cleared
- * CSftRst on b107 and reported QCOM_USB_DEBUG_CORE_INIT_FAILED / -3 with DCTL=0x40f00000 on b108
- * (trace T2 = TIMEOUT, reg 0xc704 = DCTL, bit 30 = CSftRst still set). */
+ * core clock being active". b108 spent that budget and still reported QCOM_USB_DEBUG_CORE_INIT_FAILED
+ * / -3 with DCTL=0x40f00000 (trace T2 = TIMEOUT, reg 0xc704 = DCTL, bit 30 = CSftRst still set); the
+ * firmware log shows why - see the takeover branch in dwc3_init(). The budget stays for the inherited
+ * state that does need the reset. */
 #define RESET_POLLS 10000u
 #define RESET_PAUSE_US 10u
 #define CONFIG_ACTION_MODIFY (2u << 30)
@@ -590,7 +590,8 @@ int dwc3_init(void *context, size_t context_bytes,
 {
     struct dwc3 *d = context;
     unsigned ep, interrupts, total_eps, in_eps;
-    uint32_t id, params;
+    uint32_t id, params, ctl;
+    int inherited_halted;
     size_t manufacturer_chars, product_chars, serial_chars;
     if (!context || ((uintptr_t)context & 7u) || context_bytes < sizeof(*d) ||
         !platform || !platform->read32 || !platform->write32 || !platform->delay_us ||
@@ -630,10 +631,27 @@ int dwc3_init(void *context, size_t context_bytes,
         return -2;
     interrupts = (rd(d, DWC3_GHWPARAMS1) >> 15) & 63u;
     if (!interrupts || interrupts > 32) return -2;
-    wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) & ~DWC3_DCTL_RUN_STOP);
+    /* Takeover. The firmware this board boots from hands the core over halted - RUN_STOP clear,
+     * DEVCTRLHLT set - with the previous USB stack's DCTL 20:23 still set: DCTL=0x00F00000,
+     * DSTS=0x00420004 (uke-20190100-000038.log:726). CSftRst does not self-clear in that state: b108
+     * wrote DCTL |= CSftRst and the panel still decoded DCTL=0x40f00000 when the budget ran out, and
+     * the vendor stack's own DCTL init sequence sets those same bits. A core soft reset only has to
+     * bring an unknown core to a halted, reprogrammable state, and this core is halted already while
+     * everything below (DEVTEN, DALEPENA, every GEVNT*, GCTL role, DCFG, endpoints) is rewritten
+     * unconditionally - so clear the residue and keep the reset for every other inherited state,
+     * which is the only one this driver can prove. */
+    ctl = rd(d, DWC3_DCTL);
+    inherited_halted = !(ctl & DWC3_DCTL_RUN_STOP) && (rd(d, DWC3_DSTS) & DWC3_DSTS_DEVCTRLHLT);
+    wr(d, DWC3_DCTL, ctl & ~(DWC3_DCTL_RUN_STOP |
+         (inherited_halted ? DWC3_DCTL_INHERITED_RESIDUE : 0u)));
     if (wait_reset(d, DWC3_DSTS, DWC3_DSTS_DEVCTRLHLT, DWC3_DSTS_DEVCTRLHLT)) return -3;
-    wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) | DWC3_DCTL_CSFTRST);
-    if (wait_reset(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0)) return -3;
+    if (inherited_halted) {
+        /* "HALT": inherited halted, so no soft reset; the inherited DCTL is the second argument. */
+        trace(d, DWC3_TRACE_READY, 0x48414C54u, ctl);
+    } else {
+        wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) | DWC3_DCTL_CSFTRST);
+        if (wait_reset(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0)) return -3;
+    }
     wr(d, DWC3_DEVTEN, 0); wr(d, DWC3_DALEPENA, 0);
     /* A previous USB owner may have left other interrupters and unacknowledged
      * event counts. Halt precedes replacing any event-DMA mapping. */

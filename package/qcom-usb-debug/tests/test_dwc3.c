@@ -14,6 +14,8 @@ static unsigned syncs, from_syncs, delays, writes, last_in_fifo;
 static void *last_from_pointer;
 static size_t last_from_bytes;
 static int timeout_commands, refuse_status_arm;
+static unsigned csftrst_writes;
+static int stuck_csftrst;
 static const uint64_t dma_bus = UINT64_C(0x123400000);
 static uint32_t read32(void *c, uint32_t reg) { (void)c; assert(reg < sizeof(regs)); return regs[reg / 4]; }
 static void write32(void *c, uint32_t reg, uint32_t value)
@@ -23,13 +25,20 @@ static void write32(void *c, uint32_t reg, uint32_t value)
     if (reg == DWC3_GEVNTCOUNT(0)) { regs[reg / 4] -= value; return; }
     regs[reg / 4] = value;
     if (reg == DWC3_DCTL) {
-        regs[reg / 4] &= ~DWC3_DCTL_CSFTRST;
+        if (value & DWC3_DCTL_CSFTRST) csftrst_writes++;
+        /* stuck_csftrst models the core this board actually has: CSftRst never self-clears on a
+         * core handed over halted (b108 read DCTL=0x40f00000 for the whole budget). */
+        if (!stuck_csftrst) regs[reg / 4] &= ~DWC3_DCTL_CSFTRST;
         /* Model the DWC3 core soft reset clearing its event DMA offset. This
          * is not a USB bus/protocol reset and does not change core behavior. */
-        if (value & DWC3_DCTL_CSFTRST) producer = 0;
+        if ((value & DWC3_DCTL_CSFTRST) && !stuck_csftrst) producer = 0;
         if (value & DWC3_DCTL_RUN_STOP) regs[DWC3_DSTS / 4] &= ~DWC3_DSTS_DEVCTRLHLT;
         else regs[DWC3_DSTS / 4] |= DWC3_DSTS_DEVCTRLHLT;
     }
+    /* Programming the event ring address is the only thing that can restart the ring when the
+     * driver takes over a halted core and skips the soft reset; the model puts the core's write
+     * pointer at the base it was given. */
+    if (reg == DWC3_GEVNTADRLO(0)) producer = 0;
     if (reg >= DWC3_DEPCMD(0) && reg <= DWC3_DEPCMD(5) && (reg & 15) == 12) {
         assert((regs[DWC3_GUSB2PHYCFG(0) / 4] & ((1u << 6) | (1u << 8))) == 0);
         if (timeout_commands) return;
@@ -365,5 +374,42 @@ int main(void)
     /* The clear is one-way now, so a failed init leaves the suspend controls clear rather than restored. */
     assert((regs[DWC3_GUSB2PHYCFG(0) / 4] & ((1u << 6) | (1u << 8))) == 0);
     puts("PASS: unknown core refuses before writes; stuck command exits within 10000 one-microsecond polls");
+    /* The takeover of the state the firmware now proves it leaves: halted, with the previous stack's
+     * DCTL 20:23 still set (DCTL=0x00F00000, DSTS=0x00420004 in uke-20190100-000038.log:726). This
+     * core never self-clears CSftRst - that is exactly b108's DCTL=0x40f00000 - so issuing the reset
+     * here would spend the whole 100 ms budget and fail. */
+    timeout_commands = 0;
+    stuck_csftrst = 1;
+    {
+        unsigned resets_before = csftrst_writes, delays_before = delays;
+        regs[DWC3_DCTL / 4] = 0x00F00000u;
+        regs[DWC3_DSTS / 4] = 0x00420004u;
+        assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
+        assert(csftrst_writes == resets_before);   /* no core soft reset on this path */
+        assert(delays == delays_before);           /* so none of the 100 ms was spent on one */
+        assert((regs[DWC3_DCTL / 4] & (DWC3_DCTL_INHERITED_RESIDUE | DWC3_DCTL_RUN_STOP)) == 0);
+        assert(regs[DWC3_DALEPENA / 4] == 3);      /* the takeover itself completed */
+        puts("PASS: a halted inherited core is taken over without the core soft reset");
+    }
+    /* Every other inherited state still gets the full reset, unchanged. */
+    stuck_csftrst = 0;
+    {
+        unsigned resets_before = csftrst_writes;
+        regs[DWC3_DCTL / 4] = DWC3_DCTL_RUN_STOP | DWC3_DCTL_INHERITED_RESIDUE;
+        regs[DWC3_DSTS / 4] = 0;                   /* running: DEVCTRLHLT clear */
+        assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
+        assert(csftrst_writes == resets_before + 1);
+    }
+    /* And a reset that cannot complete on that path still fails inside the same budget. */
+    stuck_csftrst = 1;
+    {
+        unsigned delays_before = delays;
+        regs[DWC3_DCTL / 4] = DWC3_DCTL_RUN_STOP;
+        regs[DWC3_DSTS / 4] = 0;
+        assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == -3);
+        assert(delays == delays_before + 10000 * 10);
+    }
+    stuck_csftrst = 0;
+    puts("PASS: an inherited running core keeps the core soft reset, and a stuck one still fails");
     return 0;
 }

@@ -230,6 +230,13 @@ typedef uint32_t u32;
 
 #define DWC3_DCTL_APPL1RES (1u << 23)
 
+/* The whole of DCTL 20:23, which is what the previous owner leaves behind. Only bit 23 has a name
+ * here; 20:22 are named by neither block below (TRGTULST covers 17:20 for 1.87a and earlier, and
+ * 1.94a and later names only 16:19), so their field names are unverified -- no datasheet is in this
+ * tree. The board's firmware halts the core with exactly these bits set (DCTL=0x00F00000), and the
+ * vendor Dwc3Dxe writes them itself during its own init: `orr w1, w0, #0xf00000` on DCTL. */
+#define DWC3_DCTL_INHERITED_RESIDUE (DWC3_DCTL_APPL1RES | (7u << 20))
+
 /* These apply for core versions 1.87a and earlier */
 #define DWC3_DCTL_TRGTULST_MASK     (0x0fu << 17)
 #define DWC3_DCTL_TRGTULST(n)       ((n) << 17)
