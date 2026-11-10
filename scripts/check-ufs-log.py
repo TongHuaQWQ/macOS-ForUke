@@ -54,10 +54,17 @@ int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_arg);
 #endif
 ''',
     'machine/machine_routines.h': '''#pragma once
+/* The real osfmk/arm/machine_routines.h declares the IO-mapping services only under
+ * PEXPERT_KERNEL_PRIVATE or MACH_KERNEL_PRIVATE; the stub keeps that guard so a missing define is a
+ * compile error here instead of a lost kernel round (run 42665918419). */
 #include <stdint.h>
 typedef uintptr_t vm_offset_t;
 typedef uintptr_t vm_size_t;
+#if defined(PEXPERT_KERNEL_PRIVATE) || defined(MACH_KERNEL_PRIVATE)
 vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+#else
+unsigned long long ml_io_read(uintptr_t iovaddr, int iovsz);
+#endif
 ''',
     'mach/mach_time.h': '''#pragma once
 #include <stdint.h>
@@ -161,8 +168,9 @@ def main():
                   '-Wno-unused-parameter', '-Wno-unused-function']
         glue = work / 'UfsLogKernel.o'
         transport = work / 'UfsLog.o'
-        run([clang, '--target=' + TARGET, '-ffreestanding', '-std=gnu11', *common,
-             '-c', ROOT / 'package/UfsLogKernel.c', '-o', glue], 'UfsLogKernel.c', options.verbose)
+        run([clang, '--target=' + TARGET, '-ffreestanding', '-std=gnu11', '-DPEXPERT_KERNEL_PRIVATE',
+             *common, '-c', ROOT / 'package/UfsLogKernel.c', '-o', glue],
+            'UfsLogKernel.c', options.verbose)
         run([clangxx, '--target=' + TARGET, '-ffreestanding', '-fno-exceptions', '-fno-rtti',
              '-std=c++17', '-DUKE_UFS_LOG_STANDALONE', *common,
              '-c', ROOT / 'package/UfsLog.cpp', '-o', transport], 'UfsLog.cpp', options.verbose)

@@ -198,6 +198,16 @@ def main():
     # not cost a kernel round. Both logs land in the artifact and the report, so a later round can tighten.
     warnings = ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Wno-unused-parameter',
                 '-Wno-unused-function', '-Wno-deprecated-declarations']
+    # ml_io_map is not in the exported machine_routines.h by default: osfmk/arm/machine_routines.h
+    # declares the whole "IO memory map services" block (io_map, ml_io_map, ml_io_map_wcomb,
+    # ml_io_map_unmappable) under
+    #
+    #     #if defined(PEXPERT_KERNEL_PRIVATE) || defined(MACH_KERNEL_PRIVATE)
+    #
+    # and the bsd unit's record defines neither, which is what run 42665918419 reported:
+    # "call to undeclared function 'ml_io_map' ... did you mean 'ml_io_read'?". The USB component
+    # compiles with PEXPERT_KERNEL_PRIVATE for the same reason, so that is the one this port adds.
+    platform_private = ['-DPEXPERT_KERNEL_PRIVATE']
 
     report = {}
     objects = []
@@ -206,7 +216,7 @@ def main():
         # two are appended after the record's own command line, and clang takes the last -x / -std.
         ('UfsLog.cpp', (CXX_RECORD,) + CXX_RECORD_ALTERNATES,
          includes + warnings + ['-fno-exceptions', '-fno-rtti'], ['-x', 'c++', '-std=c++17']),
-        ('UfsLogKernel.c', (C_RECORD,) + C_RECORD_ALTERNATES, includes + warnings, []),
+        ('UfsLogKernel.c', (C_RECORD,) + C_RECORD_ALTERNATES, includes + warnings + platform_private, []),
     )
     for name, candidates, extra, language in units:
         source = ROOT / 'kits/uke' / name
