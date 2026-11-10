@@ -42,7 +42,7 @@ Nothing pins this repository; it is the top of the graph. What it pins, and wher
 | `ArmCpu`, `https://github.com/TongHuaQWQ/ArmCpu.git` | `commit = "6288238"`, plus board copy `local = "drivers/ArmCpu"` | `feeds.toml` `[[source]] name = "ArmCpu"` |
 | `XnuPrelink` | board copy `local = "kits/XnuPrelink"` (no git pin — first-wins resolution) | `feeds.toml` `[[source]] name = "XnuPrelink"`, consumed by `board.toml` `[kernel.prelink] tool = "kits/XnuPrelink/emit_prelink.py"` |
 | `DarwinBoot` | no pin here: it arrives as the core's `drivers/DarwinBoot` submodule | `board.toml` `[firmware] packages = [… "{tree}/drivers/DarwinBoot" …]` |
-| `ShengUfs`, `ShengNovatekTouch` | board copies only | `feeds.toml` `local = "drivers/NativeUfs"`, `drivers/NativeNovatekTouch"` |
+| `ShengUfs`, `ShengNovatekTouch` | board copies only | `feeds.toml` `local = "drivers/NativeUfs"` and `local = "drivers/NativeNovatekTouch"` |
 | `Adreno740`, `GopFramebuffer`, `AdrenoMetal` | `Allenwdk/NativeAdreno@c950906…`, `Allenwdk/NativeMobileDisplay@cd8a7b2…`, `Allenwdk/AdrenoMetal@739de5b…` | `feeds.toml` |
 
 Boot chain on the tablet: `fastboot` → ABL → UEFI (`boot_a`) → `UniXNU.efi` → DarwinBoot (in the
