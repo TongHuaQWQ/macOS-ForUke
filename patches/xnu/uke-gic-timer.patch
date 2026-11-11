@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,512 @@
+@@ -1050,3 +1056,524 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -48,8 +48,14 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +#define UKE_GICR_TYPER             0x0008u
 +#define UKE_GICR_TYPER_LAST        (1ull << 4)
 +#define UKE_GICR_WAKER             0x0014u
-+#define UKE_GICR_WAKER_SLEEP       0x2u
-+#define UKE_GICR_WAKER_ASLEEP      0x4u
++/* GICv3 GICR_WAKER: bit 0 = ProcessorSleep (1 = asleep), bit 1 = ChildrenAsleep (1 = the SGI_base
++ * frame is not accessible yet), bit 2 reserved. This file used to call 0x2 "sleep" and test 0x4 for
++ * "asleep", so the whole wake block below was dead: bit 2 never reads set, ProcessorSleep was never
++ * cleared and ChildrenAsleep was never awaited, which is why GICR_IGROUPR0 aborted even after ARE
++ * was set. The loader measures GICR_WAKER = 0x00000002 on this board, i.e. ProcessorSleep = 0 with
++ * ChildrenAsleep = 1, so this is exactly the state that needs waiting on. */
++#define UKE_GICR_WAKER_PSLEEP      0x1u
++#define UKE_GICR_WAKER_ASLEEP      0x2u
 +#define UKE_GICR_IGROUPR0          0x10080u
 +#define UKE_GICR_ISENABLER0        0x10100u
 +#define UKE_GICR_ICENABLER0        0x10180u
@@ -259,14 +265,23 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	}
 +
 +	waker = uke_gic_read32(redistributor + UKE_GICR_WAKER);
-+	if (waker & UKE_GICR_WAKER_ASLEEP) {
-+		uke_gic_write32(redistributor + UKE_GICR_WAKER, waker & ~UKE_GICR_WAKER_SLEEP);
++	if (waker & UKE_GICR_WAKER_PSLEEP) {
++		uke_gic_write32(redistributor + UKE_GICR_WAKER, waker & ~UKE_GICR_WAKER_PSLEEP);
++	}
++	/*
++	 * ChildrenAsleep is what gates the SGI_base frame, and it can be set while ProcessorSleep is
++	 * already clear -- which is this board's state at hand-off. The wait therefore runs whether or
++	 * not ProcessorSleep had to be cleared, and if it never clears the SGI frame is left alone: the
++	 * frame aborts when it is not accessible, and a timer that does not tick is a hang the stall
++	 * probe reports, while an abort here is a panic before IOPlatformIO exists.
++	 */
++	if (uke_gic_read32(redistributor + UKE_GICR_WAKER) & UKE_GICR_WAKER_ASLEEP) {
 +		deadline = 0;
 +		nanoseconds_to_deadline(1000000000ull, &deadline);
-+		while (uke_gic_read32(redistributor + UKE_GICR_WAKER) & UKE_GICR_WAKER_ASLEEP) {
++		while ((waker = uke_gic_read32(redistributor + UKE_GICR_WAKER)) & UKE_GICR_WAKER_ASLEEP) {
 +			if ((deadline != 0) && (mach_absolute_time() > deadline)) {
-+				printf("uke-gic: redistributor %#llx stayed asleep\n",
-+				    (unsigned long long)redistributor);
++				printf("uke-gic: redistributor %#llx stays asleep (waker %#x), not touching "
++				    "the SGI frame\n", (unsigned long long)redistributor, waker);
 +				return;
 +			}
 +		}

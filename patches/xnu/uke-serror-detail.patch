@@ -1,7 +1,7 @@
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -550,9 +550,80 @@
+@@ -550,9 +550,82 @@
  static void
  arm64_implementation_specific_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far)
  {
@@ -23,17 +23,19 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 +	 * this core, which is asynchronous and imprecise: far is then only a hint, so pc and lr are
 +	 * what place it in the kernel.
 +	 */
-+	uint64_t uke_pc   = (state != NULL) ? get_saved_state_pc(state) : 0;
-+	uint64_t uke_lr   = (state != NULL) ? get_saved_state_lr(state) : 0;
-+	uint64_t uke_sp   = (state != NULL) ? get_saved_state_sp(state) : 0;
-+	uint64_t uke_cpsr = (state != NULL) ? get_saved_state_cpsr(state) : 0;
++	uint64_t uke_pc = (state != NULL) ? get_saved_state_pc(state) : 0;
 +
-+	panic_plain("Unhandled implementation specific error: esr 0x%016llx far 0x%016llx "
-+	    "pc 0x%016llx lr 0x%016llx sp 0x%016llx cpsr 0x%016llx ec 0x%02x iss 0x%06x cpu %u state %s\n",
++	/*
++	 * One line on purpose. The panel is the only console here and a photograph of it is the
++	 * read-out, so every field that survives has to earn its place: this is ~108 characters, which
++	 * fits a panel row and the 128-byte PanicLine the firmware shows in its menu. iss is dropped
++	 * because it is the low bits of esr (iss = esr & 0x1ffffff) and can be derived from it; lr, sp
++	 * and cpsr moved to the round notes because without the other fields they are unreadable.
++	 */
++	panic_plain("Unhandled platform error: esr 0x%016llx far 0x%016llx pc 0x%016llx "
++	    "ec 0x%02x cpu %u\n",
 +	    (unsigned long long)esr, (unsigned long long)far, (unsigned long long)uke_pc,
-+	    (unsigned long long)uke_lr, (unsigned long long)uke_sp, (unsigned long long)uke_cpsr,
-+	    (unsigned int)ESR_EC(esr), (unsigned int)ESR_ISS(esr),
-+	    (unsigned int)getCpuDatap()->cpu_id, (state != NULL) ? "ok" : "null");
++	    (unsigned int)ESR_EC(esr), (unsigned int)getCpuDatap()->cpu_id);
 +}
 +
 +#if DEVELOPMENT || DEBUG
@@ -85,7 +87,7 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
  
  #if CONFIG_KERNEL_INTEGRITY
  #pragma clang diagnostic push
-@@ -612,6 +683,11 @@
+@@ -612,6 +685,11 @@
  	} else if (cdp->platform_error_handler != NULL) {
  		cdp->platform_error_handler(cdp->cpu_id, far);
  	} else {

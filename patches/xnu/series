@@ -116,6 +116,13 @@ uke-stall-probe.patch
 # the write that set ARE sat 0x74 bytes further on in the same function; TYPER and WAKER, both in RD_base,
 # had already been read successfully. The block now clears the group enable, sets ARE, verifies the read-back
 # and only then touches the SGI frame, so a GIC that refuses ARE costs a timer instead of a boot.
+# The SAME frame needed a second fix, found on hardware one round later: GICR_WAKER was mis-decoded
+# (0x2 called ProcessorSleep and 0x4 tested for ChildrenAsleep - 0x2 is ChildrenAsleep and 0x4 is a
+# reserved bit, so the whole wake block was dead code). The loader measures GICR_WAKER = 0x00000002,
+# i.e. ProcessorSleep clear while ChildrenAsleep is set, and ChildrenAsleep is exactly what gates the
+# SGI_base frame. b129 set ARE correctly, the read-back proved it, and GICR_IGROUPR0 still aborted at
+# _uke_gic_arm_cpu+0x308. The block now always clears ProcessorSleep, waits for ChildrenAsleep with a
+# bound, and leaves the frame alone - naming the waker value - if it never clears.
 uke-gic-timer.patch
 
 # uke-serror-detail: every platform error on this machine ends as arm64_implementation_specific_error(),
