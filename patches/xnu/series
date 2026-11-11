@@ -106,6 +106,16 @@ uke-stall-probe.patch
 # up from the kernel itself: it maps the GIC, wakes this core's redistributor, puts the timer PPI in group 1
 # (IRQ, where XNU's sleh_irq path ends the interrupt) and dispatches a taken PPI 27 to rtclock_intr.
 # The earlier 800 kHz storm came from the group 0/FIQ design this file no longer uses. uke-gic=0 disables it.
+# ARE before the SGI frame: this patch used to program GICR_IGROUPR0 / GICR_ISENABLER0 while the distributor
+# was still in ARE_NS=0, which is the state the loader leaves it in (0x00000002), and in that mode the
+# SGI_base frame at GICR+0x10000 is not implemented in the non-secure view -- only RD_base decodes. The
+# hardware answered the first read with a bus error, which is the panic every round has been chasing:
+#   esr 0x96000010   (EC 0x25 data abort, DFSC 0x10 sync external abort, WnR 0 = a load)
+#   far 0xfffffffbf9fafc08   pc _uke_gic_arm_cpu+0x2c0   lr _uke_gic_arm_cpu+0xc0   cpu 0
+# `ldr w9, [x8, #128]` at +0x2c0 with x8 = redistributor + 0x10000 is exactly the GICR_IGROUPR0 read, and
+# the write that set ARE sat 0x74 bytes further on in the same function; TYPER and WAKER, both in RD_base,
+# had already been read successfully. The block now clears the group enable, sets ARE, verifies the read-back
+# and only then touches the SGI frame, so a GIC that refuses ARE costs a timer instead of a boot.
 uke-gic-timer.patch
 
 # uke-serror-detail: every platform error on this machine ends as arm64_implementation_specific_error(),

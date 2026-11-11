@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,472 @@
+@@ -1050,3 +1056,512 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -283,6 +283,46 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		printf("uke-gic: ICC_SRE_EL1.SRE stays 0 (%#llx), leaving the GIC alone\n",
 +		    (unsigned long long)sre);
 +		return;
++	}
++
++	/*
++	 * uke-gic ARE-before-SGI: affinity routing has to be on before the first access to the
++	 * redistributor's SGI frame, or the bus refuses that access.
++	 *
++	 * This board reaches the kernel with GICD_CTLR.ARE_NS = 0: the loader measures 0x00000002 before
++	 * the kernel branch and restores it after its own probe. With affinity routing disabled the SGI_base
++	 * frame -- everything at GICR + 0x10000, which is where IGROUPR0, ISENABLER0 and the priorities
++	 * live -- is not implemented in the non-secure view; only the RD_base registers (TYPER, WAKER, the
++	 * pending/propagate tables) decode. So the first read of GICR_IGROUPR0 comes back as a bus error,
++	 * and that is exactly what the hardware did:
++	 *
++	 *   Unhandled implementation specific error: esr 0x96000010 far 0xfffffffbf9fafc08
++	 *   pc _uke_gic_arm_cpu+0x2c0 lr _uke_gic_arm_cpu+0xc0 ... ec 0x25 iss 0x10 cpu 0
++	 *
++	 * ESR 0x96000010 is a data abort (EC 0x25) with DFSC 0x10 -- a synchronous external abort, not on a
++	 * translation table walk -- and WnR = 0, i.e. a load. Disassembling uke_gic_arm_cpu puts the
++	 * faulting instruction at +0x2c0 as `ldr w9, [x8, #128]` with x8 = redistributor + 0x10000, the
++	 * GICR_IGROUPR0 read below, while the write that sets ARE sat 0x74 bytes later in the same
++	 * function. TYPER (RD_base + 0x08) and WAKER (RD_base + 0x14) are read before it and succeed, so
++	 * this is a frame problem, not a mapping problem.
++	 *
++	 * ARE may only be changed while the group is disabled, so the group enable is cleared here and set
++	 * again at the end of this function, and the read-back decides whether to go on. If ARE does not
++	 * take, leaving the GIC alone costs a timer that never ticks, which the stall probe reports as a
++	 * hang; touching the SGI frame costs a panic before IOPlatformIO exists.
++	 */
++	uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
++	if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE) == 0) {
++		uint32_t armed = (uke_gic_dist_ctlr & ~UKE_GIC_CTLR_ENABLE_GRP0) | UKE_GIC_CTLR_ARE;
++
++		uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, armed);
++		__builtin_arm_isb(ISB_SY);
++		uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
++		if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE) == 0) {
++			printf("uke-gic: GICD_CTLR.ARE stays 0 (%#x), not touching the SGI frame\n",
++			    uke_gic_dist_ctlr);
++			return;
++		}
 +	}
 +
 +	/*
