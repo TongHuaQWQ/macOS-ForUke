@@ -49,6 +49,21 @@ jobs:
           path: UniXNU
           submodules: recursive
 
+      # Two cores, because this repository needs two different things from them and they do not live in
+      # the same place. The upstream uke-gpu checkout above is what carries drivers/NativeAdreno, which
+      # the host profile test compiles against. The patches/xnu series, however, is authored against the
+      # fork the kernel build at build-kernel-min.yml actually uses (TongHuaQWQ/UniXNU@macos, its
+      # UKE_CORE_REPO/UKE_CORE_REF defaults); checking the device patches against the upstream series
+      # instead reports a conflict that no build can see, which is what this step did until now --
+      # native-smp-secondary-bcm2837.patch failed on osfmk/arm64/start.s:143 while the fork the build
+      # uses applies all 145 patches cleanly.
+      - name: Check out the core the device patch series is written against
+        uses: actions/checkout@v4
+        with:
+          repository: TongHuaQWQ/UniXNU
+          ref: macos
+          path: UniXNU-macos
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -77,4 +92,10 @@ jobs:
 
       - name: Apply the XNU patch set to a clean tree
         working-directory: UniXNU-uke
+        # board.toml [kernel] patch_series is resolved against this core: arch, then OS, then device.
+        # It is the same 145-patch series, in the same order, that the kernel build applies -- the
+        # script reads the three series files instead of globbing the patch catalogs, because the
+        # catalogs hold patches no profile selects.
+        env:
+          UNIXNU_CORE: ${{ github.workspace }}/UniXNU-macos
         run: bash scripts/check-xnu-patch-set.sh
