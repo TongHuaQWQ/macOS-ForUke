@@ -108,6 +108,22 @@ uke-stall-probe.patch
 # The earlier 800 kHz storm came from the group 0/FIQ design this file no longer uses. uke-gic=0 disables it.
 uke-gic-timer.patch
 
+# uke-serror-detail: every platform error on this machine ends as arm64_implementation_specific_error(),
+# whose whole report was the sentence "Unhandled implementation specific error" - no fault status, no
+# address, no core - so each one cost a flash and a photograph and still ended in a guess. The escalation
+# path is narrow and exact: sleh_synchronous() diverts any abort whose fault status is an external abort,
+# a parity error or a table-walk error (is_platform_error) here, and sleh_async_serror() sends every
+# SError here, but PE_handle_platform_error() only reaches the device's IOPlatformIO once ArmDTPlatform
+# has published it, so before that point nothing handles the fault. The panic now carries esr/far/pc/lr/
+# sp/cpsr and the core, and because panic() stages its text into the pram panic header, the boot after
+# this one prints it from UkeBootMemoryDxe ("UKEMEM: panic line from pram+...") and shows it in the menu
+# even if this boot's screen never becomes legible.
+# uke-serror-resume=N additionally continues past an asynchronous error instead of stopping, which is
+# right for an error raised by a block this port has no driver for and wrong for one the kernel asked
+# for; N caps how many are tolerated so a storm cannot hide the machine behind a console that never
+# stops scrolling. Inert without the boot argument.
+uke-serror-detail.patch
+
 # From the gate probe on, the sampler reports samples/last_pc/cpus and arms the stall detector. ArmCpu's own
 # flags cannot be printed from the kernel: ArmCpu is a kext the emitter links after the kernel, so its symbols
 # do not exist at kernel link time (that was a link error). Whether the platform layer came up is read from
