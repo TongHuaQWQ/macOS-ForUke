@@ -679,6 +679,23 @@ crypto-hash-method = "sha2-384"
 boot-nonce = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 boot-manifest-hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5139ec7b580d63ca9319e218962a2236f23faca"
 
+# /chosen/machine-timeouts: XNU's own watchdog for "preemption was disabled too long". Round b142 tripped
+# it and died at
+#   Preemption disable timeout exceeded: 141.579 ms >= 6.250 ms (start: 993638512, end: 996356831)
+# before printing anything else worth reading. Two things make that trip uninformative here rather than
+# decisive:
+#   * the skip predicate (kprintf_spam_mt_pred, osfmk/arm/preemption_disable.c:459) treats "no serial
+#     output" as "kprintf spam is off", so on a board with no UART the watchdog stays armed even though
+#     the text console is the only way out of this kernel, and
+#   * a 141 ms window is the kext-load/security-policy stall this board is already known to sit in
+#     (AppleImage4 waits for a nonce slot that does not exist; see the security keys above), not a
+#     separate fault: the watchdog fires inside the wait it is supposed to diagnose.
+# Traced, not disabled: SCHED_HYGIENE_MODE_TRACE (1) keeps the measurement and its telemetry and drops
+# only the panic, so this can be turned back into a panic the moment the wait itself is fixed. The value
+# lives in the ADT because the command line has 16 bytes of headroom under DarwinBoot's 1000-byte cap.
+[adt.chosen.machine-timeouts.u32]
+sched-preemption-disable-mode = 1
+
 [adt.defaults.u32]
 sleep-disabled = 1
 # AppleImage4 matches on /defaults, not /chosen (see the evb10 device record), so the security state it
