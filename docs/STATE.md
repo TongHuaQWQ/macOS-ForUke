@@ -5415,3 +5415,135 @@ fastboot boot            work/flash/boot-round-b107-cdres.img
 
 相对 b105 的实质变化：`CONNECTDONE` 重新分配 transfer resource（并给每个子步骤留 `0xc0de000N` 标记）、
 看门狗不再取消已挂起的传输、`TA/TB` 定宽八位、`SET_LINE_CODING` 也改成立即武装。
+
+---
+
+## 94. 2026-11-11 夜：27.3 身份、交棒后 panic 的根因、通道现状（英文）
+
+*This section is appended, not a rewrite: §1–§93 above are untouched. It is in English because the
+whole day's analysis was written in English (`work/analysis/2026-11-11-*.md`); the surrounding document
+is Chinese. Where it disagrees with §0, this section is newer: the target is 27.3, the current image is
+`b130-waker`, and the post-hand-off panic has a named cause. The ledger is
+[`PROBLEMS.md`](PROBLEMS.md) (23 rows, ordered by cost); the loop is [`DEBUG-LOOP.md`](DEBUG-LOOP.md).*
+
+**Verdict box**
+
+| question | answer |
+|---|---|
+| what OS identity does the board claim now | `macos-27.3-uke`, macOS 27.3 / `26C5035r` / `Mac17,11` / `k114cap` (`board.toml`, commit `63b8618`) |
+| is XNU different | no — still `12377.121.6` at `ac9718f`; only the identity, the IPSW and the os-layer series changed |
+| why the kernel died seconds after hand-off | GIC arming order (`ARE` written after the first SGI-frame access, `f8491f2`) **and** a wrong `GICR_WAKER` bit decode (`bc05f07`) |
+| is that on hardware | no. `b130-waker` (kernel `3faca2b8…`) was packaged at 22:00 and has **no** device result |
+| has anything been built with the 27.3 identity | not successfully: b131 (patch `zzz-boot-progress`), b132 (`macos-owner-data-firmlinks`), b133 (link: `_native_exit_trace`), b134 (corrupt patch in `macos-droidvm-k27-parity`) |
+| what reads a failure today | a photograph of the panel, plus the panel QR export. Everything else is half-built or dead (`DEBUG-LOOP.md` §3) |
+
+### 94a. The 27.3 identity switch (`63b8618`)
+
+`board.toml` now selects `os_profile = "macos-27.3-uke"` — a **fork-owned thin profile**
+(`profiles/os/macos-27.3-uke/`, `[os] [ipsw] [kernel.prelink]` only) rather than upstream's
+`macos-27.3-26C5035r`. That is not stylistic: `profiles.load()` merges the OS profile **before**
+`board.toml`, so any key the board does not set survives verbatim, and taking upstream's profile whole
+would have added 59 keys to uke's merged configuration, including two that would have broken things
+silently — `early_security_init = 0xfffffe0009840dd4` (mac17j's AMFI wrapper address, run on a
+Snapdragon) and the **absence** of `extra_args`, which would have dropped the fork's
+`--fileset-reference` naming table (`work/analysis/macos-27.3-uke-profile.md` §4).
+
+Eleven semantic keys changed, all OS identity or `[ipsw]`-derived. Three of them are **inherited, not
+measured**: `kernelcache_sha256 = d1003b51…` is `kernelcache.release.mac17j` (there is no `26C5035r`
+image in this tree), `slide = "-0x1000000"` was chosen for the mac17g collection, and
+`trust_cache_sha256` is commented out — a wrong trust cache would be accepted rather than rejected
+(§7 of the same file). The series is 145 entries = 69 arch + 52 os + 24 device; two patches had to be
+regenerated and **none were dropped** (145/145 apply in one pass,
+`work/analysis/2026-11-11-27.3-series-conflicts.md` §7).
+
+### 94b. The post-hand-off panic, named after months
+
+`Unhandled implementation specific error` was our own GIC block. It read `GICR_IGROUPR0` in the
+SGI_base frame at a moment when the distributor still had `GICD_CTLR.ARE_NS = 0` — the state the loader
+leaves (`0x00000002`) and which it prints in its own `gic-probe` line. With affinity routing off that
+frame is not implemented in the non-secure view, so the load was answered with a bus error; the write
+that enabled ARE sat 0x74 bytes later in the same function.
+
+b127 finally printed the registers, and because the collection keeps its linked addresses (no slide) the
+`pc` symbolised directly:
+
+```
+Unhandled implementation specific error: esr 0x96000010 far 0xfffffffbf9fafc08
+pc 0xfffffff00c0321e4  lr 0xbced7ef00c031fe4  ec 0x25  iss 0x000010  cpu 0
+  pc -> _uke_gic_arm_cpu+0x2c0 -> ldr w9, [x8, #128]!   (x8 = this core's redistributor + 0x10000)
+```
+
+`f8491f2` put the ARE write before the first SGI-frame access, with a read-back check. b129 disproved
+that as sufficient — ARE took and the frame still aborted, at `+0x308` — and the rest was a decoding
+mistake in the same function: `GICR_WAKER` had `ProcessorSleep`/`ChildrenAsleep` swapped in the
+`#define`s, so `ProcessorSleep` was never cleared and `ChildrenAsleep` (which is what gates SGI_base,
+and which this board reports as set: `0x00000002`) was never awaited. `bc05f07` fixes that.
+
+Both fixes are in `patches/xnu/uke-gic-timer.patch`, and the **combination** has not been on hardware:
+b129 ran the ARE half alone (the bit took, and the frame aborted anyway, which is how the second half
+was found), and `b130-waker` is the first image carrying both. The prediction that makes it testable:
+either the boot gets past the SGI frame and `uke-stall-probe: samples` becomes non-zero (timer live), or
+the block prints the waker value and leaves the frame alone (a hang, not a panic) — which is a strictly
+better failure than the one we had.
+
+### 94c. The DAIF finding: an idle CPU is not a hang
+
+Separate from the panic, and only visible once the timer is live: with interrupts arriving, **every**
+interrupt of an idle CPU lands on the instruction just after the `DAIFClr` in `machine_idle()`'s return
+path, so the stall sampler sees a perfect "same place" window and calls a correctly parked CPU a hang
+(measured in the `uke-gic=2` round, `d7a2e12`). `machine_idle()` now marks its CPU idle for the duration
+(including the WFE recommendation path, which unmasks interrupts inside) and the sampler drops idle
+samples. This guard cannot be validated until the timer actually ticks — it is a fix for a false positive
+we have not been able to produce yet.
+
+### 94d. The channels, and the two addresses
+
+**XNU writes `0x9FFE00000`; the firmware used to read `0xFF800000`.** The kernel's window is the ADT's
+`[payload.adt] panic_region` (`board.toml`, `0x9FFE00000:0x200000`, emitted into `/chosen/pram` by
+`unixnu/devicetree.py`); `PcdUkePramBase`/`PcdUkePramSize` named the other address, and
+`make-uke-adt.py`'s `PANIC_LOG_BASE = 0xFF800000` is dead code. Every "the kernel never wrote pram"
+conclusion before this was fixed — everything up to b129 — was the firmware reading the *other* window. `UkeBootMemoryDxe.c` now scans **both**
+windows, this port's first, and parses XNU's `embedded_panic_header` (`0x46554E4B`) instead of scanning
+for a line beginning with `panic(`.
+
+Retention is still the weak half: the record is plain DRAM, reliable only across a warm reset, and the
+routine power cycle here is a 10-second power-key hold (`docs/RECOVERY-LOG.md:90-91`) — see
+`PROBLEMS.md` row 5. Which leaves the honest inventory in `DEBUG-LOOP.md` §3: a photograph of the panel
+and the QR export are **proven**; the pram read-back, the userdata ring and the menu's `last panic:` line
+are **not**; pstore is **disproven**; the USB console does not enumerate; there is no UART.
+
+### 94e. What is in flight, and what is not
+
+- `b130-waker` is packaged and never flashed (`work/flash/INDEX.md`). It is the first image that contains
+  both GIC fixes.
+- The 27.3 rounds stopped at b134. `work/logs/b133-job.log` and `b134-job.log` hold the two causes, and
+  `PROBLEMS.md` rows 10 and 11 hold the fixes — neither is on a branch CI has built.
+- `work/ci-heartbeat.py` now watches the workflow and writes `work/logs/ci-heartbeat.log`, because run
+  `43039399682` failed and nobody noticed until the hardware owner said so.
+- The fork replay (our 35 commits onto upstream's tip) exists **only** in the scratch clone
+  `work/tmp/sync/final` (`macos-next` = `3e7e48e`). `work/push/UniXNU` is still `1f3192e`, 273 commits
+  behind `mine/macos`. Nothing was pushed.
+- The firmware changes that make rows 3 and 5 of the ledger usable are **uncommitted** in
+  `workspace/uefi-uke` (`PROBLEMS.md` row 22).
+
+### 94f. Open, and where each one is written down
+
+| open problem | ledger row |
+|---|---|
+| `GICR_WAKER` / timer: fix built, not run on hardware | 2 |
+| pram read-back from `0x9FFE00000` never observed | 3 |
+| pram does not survive the power cycle | 5 |
+| USB CDC-ACM console never enumerates (`-71`/`-110`) | 4 |
+| timer has still never ticked; the probes are tautological until it does | 7 |
+| `uke_defconfig` (first-console) cannot build — pre-existing | 8 |
+| 27.3: `native_exit_trace` `weak_import`, and a corrupt patch after the fix | 10, 11 |
+| fork replay not landed; upstream force-pushes | 6 |
+| firmware work is uncommitted | 22 |
+| `embedded-panic-log-size 0x380000` vs `panic_region 0x200000` | 20 |
+
+Two smaller things worth knowing before the next round: the panic line is now ~108 characters on
+purpose, so one photograph of the panel and the firmware's 128-byte `PanicLine` both carry the whole
+report; and `platform_error` is documented in this tree (`osfmk/arm64/sleh.c`, `is_platform_error()`) as
+reachable only for `FSC_SYNC_PARITY` (`0x18`), yet b127 reached it with `0x10`. That contradiction is
+unresolved and is recorded as `PROBLEMS.md` row 21 — it did not affect the diagnosis, but it is the kind
+of thing that quietly invalidates one later.
