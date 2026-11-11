@@ -1,0 +1,47 @@
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+index 6824ed8..824ba32 100644
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -450,9 +450,42 @@ void userServerAckTimerExpired(void *, void *);
+ 
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
++#if DEVELOPMENT || DEBUG
++/*
++ * uke-heartbeat: a stuck kext and a console that stopped refreshing look identical on the panel.
++ * A line every two seconds from a thread call tells them apart: heartbeats that keep coming mean the
++ * kernel still runs and one thread is blocked, while silence means the console itself stopped.
++ */
++static thread_call_t gUkeHeartbeatCall;
++
++static void
++ukeHeartbeat(thread_call_param_t p0, thread_call_param_t p1)
++{
++	static uint64_t beats;
++	uint64_t deadline = 0;
++
++	beats++;
++	kprintf("uke-heartbeat %llu\n", beats);
++	clock_interval_to_deadline(2, kSecondScale, &deadline);
++	thread_call_enter_delayed(gUkeHeartbeatCall, deadline);
++}
++#endif /* DEVELOPMENT || DEBUG */
++
+ void
+ IOService::initialize( void )
+ {
++#if DEVELOPMENT || DEBUG
++	{
++		uint64_t heartbeatDeadline = 0;
++
++		gUkeHeartbeatCall = thread_call_allocate(ukeHeartbeat, NULL);
++		if (gUkeHeartbeatCall) {
++			clock_interval_to_deadline(2, kSecondScale, &heartbeatDeadline);
++			thread_call_enter_delayed(gUkeHeartbeatCall, heartbeatDeadline);
++		}
++	}
++#endif /* DEVELOPMENT || DEBUG */
++
+ 	kern_return_t       err;
+ 
+ 	gIOServicePlane     = IORegistryEntry::makePlane( kIOServicePlane );

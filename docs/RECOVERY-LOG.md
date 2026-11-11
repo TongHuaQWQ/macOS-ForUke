@@ -4,8 +4,15 @@
 
 ## 前提
 
-- 内核带 `sheng-log=1`（board.toml 已含），且 UFS root layout 已就绪。启动日志里应出现：
-  `UkeLastLog: userdata log window at lba <abs>, 8192 blocks`
+- 内核带 `sheng-log=1`（board.toml 已含）**并且**用 `CONFIG_XNU_LOG_USERDATA=y` 的配置构建（`configs/uke-macos_defconfig` 已开）：前者拉起写者线程，后者才把 userdata 那半个写者编进去。启动日志里应依次出现：
+
+  ```
+  UkeLastLog: userdata log transport attached
+  UkeLastLog: userdata log window at lba 61941755, 8192 blocks
+  ```
+
+  第一行表示控制器接管成功（映射 0x1d84000 与 apps SMMU、停掉固件请求队列、给 stream 0x60 配 SMMU、NOP OUT 通过），第二行的 lba 是**绝对** LBA，必须等于下面第 3 步 `dd` 读的那个窗口（`skip` 加上分区首块）。窗口几何来自 `board.toml [payload] kernel_args` 的 `uke-log-first=2961408` / `uke-log-last=61949946`（userdata 绝对首/末块），不是内核自己找的。
+- 两行缺哪一行就打印了拒绝原因：`userdata log transport unavailable: <原因>`（`controller map` / `dma buffer` / `lock` / `NOP OUT` / `transport quarantined`）或 `userdata log window unavailable: <原因>`（`no geometry` / `partition too small` / `window refused`）。这些都不需要再等下一 tick，写者只会自己关掉。
 - 读日志必须进 TWRP：先刷回原厂 boot/vendor_boot（XNU 镜像起不了 recovery）。
 
 ## 步骤
@@ -119,7 +126,7 @@ for i in range(len(a) // 16384):
 - 在 XNU 里没有 adb；测试后长按电源关机，再按住电源 + 音量减进 fastboot。
 - 窗口是 userdata 最后 8192 个 4K 块；`blockdev --getsz` 的单位是 512 B 扇区，所以要 `/8`。
 - 原厂 `boot.img` / `vendor_boot.img` 在 `/home/allenwdk/UniXNU/uke-images/`。刷过 XNU 镜像后必须换回，否则 TWRP 起不来。
-- 读不到记录时，先 grep 内核日志里的 `UkeLastLog:`，写入端会打印拒绝原因（`off` / `no root layout` 等）。
+- 读不到记录时，先 grep 内核日志里的 `UkeLastLog:`：写入端会打印拒绝原因（`transport unavailable: …` / `window unavailable: …`，见上文）。一条都没有，说明镜像里根本没有 userdata 那半个写者——检查配置是否带 `CONFIG_XNU_LOG_USERDATA=y` 且 `libUkeUfsLog.a` 被 `-force_load`（`build/uke-ufs-log/build-report.json` 的 `exports`）。
 
 ## 崩溃探针（sheng-crashlog=1）
 

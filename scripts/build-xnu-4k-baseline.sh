@@ -881,6 +881,22 @@ PY_BINDINGS
   # The archive builders run after the bootstrap pass, so the writer archive is
   # absent while the bootstrap links and present for the real kernel link. The
   # archive carries both the pram writer and the launchd watchdog policy.
+  # USB log console (QcomXnuUsbDebug). The six hook units take -DXNU_QCOM_USB_DEBUG and the module's
+  # include directory; the archive must be force-loaded or the hooks link against nothing.
+  if [ "${XNU_QCOM_USB_DEBUG:-0}" = 1 ]; then
+    # The component ships in the device repository's package/, which the tree links as kits/uke; in this
+    # script $ROOT is whichever tree is being built, so try the kit path first and the checkout second.
+    QUD_MODULE="$ROOT/kits/uke/qcom-usb-debug"
+    test -d "$QUD_MODULE/include" || QUD_MODULE="$ROOT/package/qcom-usb-debug"
+    QUD_ARCHIVE="$ROOT/.cache/qcom-usb-debug/libQcomXnuUsbDebug.a"
+    test -d "$QUD_MODULE/include"
+    test -f "$QUD_ARCHIVE"
+    EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_QCOM_USB_DEBUG=1 -I$QUD_MODULE/include"
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$QUD_ARCHIVE"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $QUD_ARCHIVE"
+  else
+    EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_QCOM_USB_DEBUG=0"
+  fi
   if [ "$BOOT_LOG" = 1 ] || [ "$WATCHDOG_POLICY" = 1 ]; then
     LAST_LOG_ARCHIVE=$ROOT/build/uke-last-log/libUkeLastLog.a
     if [ -f "$LAST_LOG_ARCHIVE" ]; then
@@ -929,14 +945,37 @@ if not stamp.exists() or stamp.read_text() != identity:
 PY
 EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS"
 EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_WATCHDOG_POLICY=$WATCHDOG_POLICY"
+# Which guest OS the kernel is built FOR. Apple's macOS kernel is compiled with XNU_TARGET_OS_OSX, and
+# the XNU_TARGET_OS_* macros decide which code is compiled in at all -- not just which deployment flag
+# is attached. Hosting macOS kexts on an iOS-target kernel leaves whole families out, so a fileset
+# prelink has nothing to pair those kext calls with. The core version of this script has had the
+# switch for a while; this device copy shadowed it and pinned iOS (docs/11 §34).
+DEPLOY_OS=${XNU_DEPLOYMENT_OS:-ios}
+DEPLOY_VERSION=${XNU_DEPLOYMENT_VERSION:-${IOS_VERSION}}
+if [ "$DEPLOY_OS" = macos ]; then
+  DEPLOY_TARGET_FLAGS="-mmacosx-version-min=$DEPLOY_VERSION -DXNU_TARGET_OS_OSX"
+  DEPLOY_LINKER_FLAGS="-Wl,-macosx_version_min,$DEPLOY_VERSION"
+else
+  DEPLOY_TARGET_FLAGS="-miphoneos-version-min=$DEPLOY_VERSION -DXNU_TARGET_OS_IOS"
+  DEPLOY_LINKER_FLAGS="-Wl,-ios_version_min,$DEPLOY_VERSION"
+fi
+# Apple ships kernelcache.release.* as an LTO build; a non-LTO reconstruction differs wherever Apple
+# inlined, which is what the prelink pairing statistics measure (docs/11 §33).
+BUILD_LTO_MODE=${XNU_BUILD_LTO:-0}
+if [ "$BUILD_LTO_MODE" != 0 ] && [ "$BUILD_LTO_MODE" != 1 ]; then
+  echo 'XNU_BUILD_LTO must be 0 or 1' >&2
+  exit 1
+fi
+echo "build-xnu-4k-baseline: target $DEPLOY_OS $DEPLOY_VERSION, LTO $BUILD_LTO_MODE, arch $XNU_ARCH_STRING" >&2
 make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iphoneos}" ARCH_CONFIGS=ARM64 \
   MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG="$XNU_ARCH_STRING" LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
   ARM64_LINK_ADDR=0xfffffff007004000 ARM64_PLKSEG_ADDR=0xfffffff004004000 \
-  DEPLOYMENT_TARGET_FLAGS="-miphoneos-version-min=$IOS_VERSION -DXNU_TARGET_OS_IOS" \
-  DEPLOYMENT_LINKER_FLAGS="-Wl,-ios_version_min,$IOS_VERSION" \
+  DEPLOYMENT_TARGET_FLAGS="$DEPLOY_TARGET_FLAGS" \
+  DEPLOYMENT_LINKER_FLAGS="$DEPLOY_LINKER_FLAGS" \
   RC_DARWIN_KERNEL_VERSION="$XNU_DARWIN" RC_ProjectSourceVersion="$XNU_VERSION" \
-  BUILD_LTO=0 BOUND_CHECKS=0 BUILD_WERROR="${XNU_BUILD_WERROR:-0}" MAKEJOBS=-j"${JOBS:-4}" \
+  BUILD_LTO="$BUILD_LTO_MODE" BOUND_CHECKS=0 BUILD_WERROR="${XNU_BUILD_WERROR:-0}" MAKEJOBS=-j"${JOBS:-4}" \
+  LDFLAGS_KERNEL_LTO="-miphoneos-version-min=$DEPLOY_VERSION -Wl,-mllvm,-inline-threshold=100" \
   CFLAGS_EXTRA="$EXTRA_CFLAGS" "${EXTRA_MAKE_ARGS[@]}" ${XNU_HOST_MAKE_ARGS[@]+"${XNU_HOST_MAKE_ARGS[@]}"} \
   OBJROOT="$ROOT/build/xnu/ios-obj" SYMROOT="$ROOT/build/xnu/ios-sym" DSTROOT="$ROOT/build/xnu/ios-dst"
 if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$CRYPTO_BOOTSTRAP_MODE" = source ]; then

@@ -1,0 +1,25 @@
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index d0149a6..a11b007 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -1471,6 +1471,20 @@ IOPlatformExpert::publishNVRAM( void )
+ 	}
+ 	if (gIOOptionsEntry != NULL) {
+ 		gIOOptionsEntry->registerService();
++		/*
++		 * Publish the "IONVRAM" resource here as well, which on Apple platforms happens in
++		 * registerNVRAMController() below when a platform NVRAM controller registers with us.
++		 * This kernel has no such controller: the IODTNVRAM instance comes from the device tree's
++		 * /options node via createNVRAM(), but nothing ever registers a controller for it, so
++		 * publishResource("IONVRAM") is never reached and every waiter blocks forever.
++		 *
++		 * AppleImage4 is one of those waiters, with no timeout:
++		 *   serviceMatching("IONVRAM") -> waitForMatchingService(matching, UINT64_MAX)
++		 * and it stops there for good, which on the console is indistinguishable from a hang.
++		 * publishResource() only sets a property on the IOResources instance and re-registers it,
++		 * so the resource claims exactly what is true: an IODTNVRAM service exists.
++		 */
++		IOService::publishResource("IONVRAM");
+ 	}
+ }
+ 

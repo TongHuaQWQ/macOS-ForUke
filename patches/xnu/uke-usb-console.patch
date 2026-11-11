@@ -1,0 +1,37 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index bb558ee..82e3e51 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -506,6 +506,19 @@ bsd_init(void)
+ 	throttle_init();
+ 
+ 	printf(copyright);
++	{
++		extern void uke_usb_console_start(void);
++		/* Probe before the console starts: the console hands its ring to the host once, so
++		 * anything printed afterwards never reaches the capture. */
++		+		uke_usb_console_start();
++		/* Start the block driver on the controller the probe left ready, after the console: the
++		 * console ring keeps replaying, so a panic inside the driver still leaves its lines and
++		 * everything before them reachable from the host. */
++	}
+ 
+ #if CONFIG_DEV_KMEM
+ 	bsd_init_kprintf("calling dev_kmem_init\n");
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index e6d38d3..3a02700 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -259,6 +259,12 @@ _cnputc(char c, bool poll)
+ 	if (c == '\n') {
+ 		_cnputc('\r', poll);
+ 	}
++	{
++		extern void uke_usb_log_char(char);
++		/* stored once per character, after the CR expansion,
++		 * recursive '\r' also lands here and is stored exactly once. */
++		uke_usb_log_char(c);
++	}
+ 
+ 	cons_ops[idx].putc(c, poll);
+ }

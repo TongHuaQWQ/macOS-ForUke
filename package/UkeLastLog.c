@@ -18,11 +18,13 @@
 #include <kern/sched.h>
 #include <kern/startup.h>
 #include <kern/thread.h>
+#include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <sys/msgbuf.h>
 #include <IOKit/IOLib.h>
 
 extern vm_offset_t gPanicBase;
+extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 extern unsigned int gPanicSize;
 extern int desiredvnodes;
 extern uint64_t sane_size;
@@ -233,15 +235,42 @@ uke_last_log_write(void)
 //   [32] payload (the newest bytes of the kernel message buffer)
 //
 // A reader sorts by sequence and concatenates the contiguous run it finds.
+//
+// The userdata window needs NativeUfs (`CONFIG_XNU_NATIVE_UFS`), which the macOS
+// prelink configuration turns off. Defining UKE_LOG_USERDATA=1 in a configuration
+// that links it brings the second copy back; without it only the pram half is
+// built, which is the half the UEFI side reads back over USB.
+//
+#ifndef UKE_LOG_USERDATA
+#define UKE_LOG_USERDATA 0
+#endif
+
 #define UKE_UFS_RECORD_BYTES   (16 * 1024)
 #define UKE_UFS_RECORD_BLOCKS  (UKE_UFS_RECORD_BYTES / 4096)
 #define UKE_UFS_PAYLOAD_BYTES  (UKE_UFS_RECORD_BYTES - 32)
 #define UKE_UFS_INTERVAL_MS    2000
 
+#if UKE_LOG_USERDATA
 int native_ufs_log_open(uint64_t *firstLba, uint64_t *blocks, const char **why);
 int native_ufs_log_write(uint64_t rel, uint32_t blocks, const void *src);
 int native_ufs_log_sync(void);
+// package/UfsLogKernel.c: maps the host controller and apps-SMMU windows, allocates the transport
+// buffer and lock, stops the firmware's request list, programs the UFS stream's SMMU context and
+// proves the result with a NOP OUT. Three symbols above then serve the window it attached to.
+//
+// Called once, not on every tick: it rewrites SMMU routing and stops the boot chain's request list,
+// so an unbounded retry would keep re-entering that sequence. UKE_UFS_START_ATTEMPTS spaced ticks is
+// enough to ride out an early failure and still stop for good afterwards.
+#define UKE_UFS_START_ATTEMPTS 5
+int ufs_log_start(const char **why);
+// The pram beacon slot (+0x1100) is what the firmware's menu prints on the NEXT boot when it finds no
+// panic text, so it is the one channel that says whether the userdata writer got anywhere without a
+// working USB console, a readable window, or a surviving msgbuf. Declared here because its definition
+// is below this half of the file, and a helper used above its definition is what broke b106.
+static void uke_last_log_beacon(const char *text);
+#endif
 
+#if UKE_LOG_USERDATA
 static uint32_t
 uke_crc32(const uint8_t *data, size_t length)
 {
@@ -256,12 +285,16 @@ uke_crc32(const uint8_t *data, size_t length)
 }
 
 static uint8_t ukeUfsBuffer[UKE_UFS_RECORD_BYTES] __attribute__((aligned(4096)));
+static bool ukeUfsStarted;
+static unsigned ukeUfsStartAttempts;
 static bool ukeUfsOpen;
 static bool ukeUfsRefused;
 static uint64_t ukeUfsBlocks;
 static uint64_t ukeUfsSeq;
 static uint64_t ukeUfsCursor;
+#endif /* UKE_LOG_USERDATA */
 
+#if UKE_LOG_USERDATA
 // One record: the newest UKE_UFS_PAYLOAD_BYTES of the message buffer.
 static size_t
 uke_snapshot(uint8_t *out, size_t capacity)
@@ -297,17 +330,37 @@ uke_ufs_publish(void)
 	if (ukeUfsRefused) {
 		return;
 	}
+	// Before the window: the transport that serves it. UfsLogKernel.c owns everything the kernel has
+	// to do itself -- map 0x01d84000+0x3000 and the apps SMMU, allocate the contiguous request list,
+	// stop the firmware's list, program stream 0x60 and send one NOP OUT. It is idempotent once it
+	// succeeds, and it is what makes native_ufs_log_* exist at all without CONFIG_XNU_NATIVE_UFS.
+	if (!ukeUfsStarted) {
+		const char *why = "";
+		if (!ufs_log_start(&why)) {
+			if (++ukeUfsStartAttempts < UKE_UFS_START_ATTEMPTS) {
+				return;
+			}
+			IOLog("UkeLastLog: userdata log transport unavailable: %s\n",
+			    why != NULL && why[0] != '\0' ? why : "(no reason)");
+			uke_last_log_beacon("UKELOG-NOTRANSPORT");
+			ukeUfsRefused = true;
+			return;
+		}
+		ukeUfsStarted = true;
+		IOLog("UkeLastLog: userdata log transport attached\n");
+		uke_last_log_beacon("UKELOG-TRANSPORT-OK");
+	}
 	if (!ukeUfsOpen) {
 		const char *why = "";
 		uint64_t first = 0, blocks = 0;
 		if (!native_ufs_log_open(&first, &blocks, &why)) {
-			// "off" and "no root layout" are the normal states before the
-			// storage driver has started; anything else will not change.
-			if (why != NULL && strcmp(why, "off") != 0 &&
-			    strcmp(why, "no root layout") != 0) {
-				IOLog("UkeLastLog: userdata log window unavailable: %s\n", why);
-				ukeUfsRefused = true;
-			}
+			// The geometry arrives as uke-log-first/uke-log-last from board.toml, and hostLogOpen
+			// already knows the transport answered a NOP OUT, so none of these reasons is going to
+			// change on a later tick.
+			IOLog("UkeLastLog: userdata log window unavailable: %s\n",
+			    why != NULL && why[0] != '\0' ? why : "(no reason)");
+			uke_last_log_beacon("UKELOG-NOWINDOW");
+			ukeUfsRefused = true;
 			return;
 		}
 		ukeUfsBlocks = blocks;
@@ -316,6 +369,8 @@ uke_ufs_publish(void)
 		ukeUfsOpen = true;
 		IOLog("UkeLastLog: userdata log window at lba %llu, %llu blocks\n",
 		    (unsigned long long)first, (unsigned long long)blocks);
+		// Distinguishable from TRANSPORT-OK on the menu even when the window then never fills.
+		uke_last_log_beacon("UKELOG-WINDOW-OPEN");
 	}
 
 	bzero(ukeUfsBuffer, sizeof(ukeUfsBuffer));
@@ -342,6 +397,7 @@ uke_ufs_publish(void)
 	ukeUfsCursor = (ukeUfsCursor + UKE_UFS_RECORD_BLOCKS) % ukeUfsBlocks;
 	ukeUfsCursor -= ukeUfsCursor % UKE_UFS_RECORD_BLOCKS;
 }
+#endif /* UKE_LOG_USERDATA */
 
 /* Panic-time staging in the pram: [magic][length][text]. It is only a hand-off:
  * the next boot's writer copies the text into the userdata log window (disk). */
@@ -444,11 +500,54 @@ uke_last_log_writer(void *arg, wait_result_t result)
 		// seventeen minutes and discard the start of the boot, which is what
 		// this copy exists to keep. Two seconds stretches the ring to about an
 		// hour.
-		if ((tick++ % (UKE_UFS_INTERVAL_MS / UKE_LAST_LOG_INTERVAL_MS)) == 0) {
+#if UKE_LOG_USERDATA
+		if ((tick % (UKE_UFS_INTERVAL_MS / UKE_LAST_LOG_INTERVAL_MS)) == 0) {
 			uke_ufs_publish();
 		}
+#endif
+		tick++;
 		IOSleep(UKE_LAST_LOG_INTERVAL_MS);
 	}
+}
+
+/* A pram beacon of its own: this STARTUP and the USB one are the two places whose threads have
+ * never produced observable output, so each says whether it ran at all in a slot the firmware's
+ * printable-run scan can read on the next boot. 0xFF800000 is the /pram window the ADT declares. */
+static void
+uke_last_log_beacon(const char *text)
+{
+	static vm_offset_t va;
+	char *slot;
+	unsigned i = 0;
+
+	if (va == 0) {
+		va = ml_io_map_wcomb(0xFF800000ull, 0x2000);
+		if (va == 0) {
+			return;
+		}
+	}
+	slot = (char *)(va + 0x1100);
+	while (i < 63 && text[i] != '\0') {
+		slot[i] = text[i];
+		i++;
+	}
+	while (i < 64) {
+		slot[i++] = 0;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+/* Defined below, but called by the external entry above it: without this prototype the call is an
+ * implicit declaration error, which is exactly how the last round's archive build failed. */
+static void uke_last_log_start(void);
+
+/* External entry, for the csr_check and bsd_init hooks: the STARTUP registration alone has never
+ * produced observable output in this kernel. */
+void
+uke_last_log_hook_entry(const char *who)
+{
+	uke_last_log_beacon(who);
+	uke_last_log_start();
 }
 
 static void
@@ -457,11 +556,16 @@ uke_last_log_start(void)
 	uint32_t enabled = 0;
 	thread_t thread;
 
+	uke_last_log_beacon("UKELASTLOG-STARTUP-ENTERED");
 	if (!PE_parse_boot_argn("sheng-log", &enabled, (int)sizeof(enabled)) || enabled != 1) {
+		uke_last_log_beacon("UKELASTLOG-DISABLED");
 		return;
 	}
 	if (kernel_thread_start_priority(uke_last_log_writer, NULL, BASEPRI_KERNEL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
+		uke_last_log_beacon("UKELASTLOG-THREAD-STARTED");
+	} else {
+		uke_last_log_beacon("UKELASTLOG-THREAD-FAILED");
 	}
 }
 

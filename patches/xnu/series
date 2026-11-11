@@ -20,3 +20,164 @@ zzzzzzzzzzz-uke-trustcache-headers.patch
 # zzzzzzzzzzz-uke-vm-alloc-log.patch
 zzzzzzzzzzzz-uke-gpu-sandbox-client-grant.patch
 zzzzzzzzzzzz-uke-gpu-addon-stage-log.patch
+
+# kext-vtable-padding: the kexts this kernel loads come from a Mac kernelcache, whose classes carry
+# OSMetaClassDeclareReservedUnused() slots. XNU emits those only for XNU_TARGET_OS_OSX, and this
+# kernel builds as PLATFORM=iPhoneOS, so every virtual method after the first padding block sits at
+# a lower vtable index here than in the kext's headers. AppleImage4 then calls
+# obj->vtable[0x2d8] expecting IORegistryEntry::getProperty and lands on IOService::handleOpen,
+# whose signing salt differs, so the authenticated call fails:
+#   "PAC failure from kernel with IA key while branching to X8" at pc 0xfffffff009581910.
+# Measured on 25F84: 296 of 298 kernel classes order their virtuals identically to Apple's, 150 are
+# index-identical once the padding is dropped and 146 differ only by insertions.
+# Only correct while the loaded collection is a Mac collection: an iPad collection expects padding
+# off, so this patch belongs to the macOS profiles and must not be shared with an iOS series.
+kext-vtable-padding.patch
+
+# fileset-wait-probe: a kext waiting for a service this kernel never publishes produces no output at
+# all (waitForService(matching, NULL) becomes UINT64_MAX). AppleImage4 blocks exactly that way after
+# its nonce magazine reports "failed to read nonce slot data", because it waits for "IONVRAM" and
+# "IOAESAccelerator" and neither exists in this collection. Inert unless the boot args are passed:
+#   fileset-wait-log=1        print each request (provider class + timeout) before the wait
+#   fileset-wait-cap-ms=N     cap an unbounded wait at N ms so the caller takes its own error path
+fileset-wait-probe.patch
+
+# publish-ionvram-resource: AppleImage4 waits with no timeout for the "IONVRAM" resource
+# (resourceMatching("IONVRAM") = IOResources + IOResourceMatch). Apple publishes that resource from
+# IOPlatformExpert::registerNVRAMController() when a platform NVRAM controller registers; this kernel
+# creates its IODTNVRAM from the device tree's /options node but never registers a controller, so the
+# resource never appears and the wait never returns. Publishing it where the IODTNVRAM instance is
+# registered claims exactly what is true and lets the kext continue.
+publish-ionvram-resource.patch
+
+# lck-gate-probe: B14 still stopped with the same 12 nonce-magazine lines and printed no
+# fileset-wait: line at all, so AppleImage4 never reached a waitForService. In that function
+# (0x958922c) the calls right after the magazine read are IOLockLock / lck_mtx_gate_close /
+# IOLockUnlock, and both a stuck mutex and gate_ilock() (a spin on the gate's interlock bit with no
+# timeout) hang silently. This prints at the entry of every lck_mtx_gate_* call and on every
+# contended lck_mtx_lock, so one boot says which of the two it is.
+lck-gate-probe.patch
+
+# uke-heartbeat: a stuck kext and a console that stopped refreshing look identical on the panel,
+# which is the ambiguity B12..B15 kept hitting (AppleImage4 prints twelve nonce-magazine lines and
+# then nothing changes). Two seconds apart, a thread call prints "uke-heartbeat <n>": if those keep
+# appearing the kernel still runs and only one thread is blocked, and if they stop the console itself
+# stopped updating.
+uke-heartbeat.patch
+
+# uke-stage-last-panic: B22's panel showed the gate probe firing (lck-gate: alloc_init) and then the
+# twelve AppleImage4 nonce-magazine lines, and after that not one uke-heartbeat line: the whole kernel
+# or at least the console path stopped, which is exactly why the deferred panic-flush and ramoops
+# patches existed. Those need UkeLastLog's staging block and a consumer, so this is the self-contained
+# version: the panic funnel formats its text into the pram panic header that check_for_panic_log()
+# already copies at boot, and the enabled last-panic-print patch shows it once the framebuffer console
+# attaches. A panic that never reached the screen therefore reports itself on the next boot.
+uke-stage-last-panic.patch
+
+# uke-gate-last-panic: B23 staged the panic text in the pram header and last-panic-print() shows it
+# from vcattach(), but the two panels taken after that boot start at AppleImage4's own banner: the
+# line had already scrolled off. The gate probe does print where the panel still updates, so it now
+# carries the staged text on its first call, immediately before the point where the screen stops.
+# "(no previous panic captured)" means the last boot did not panic at all — a spin, not a panic.
+uke-gate-last-panic.patch
+
+# uke-spin-watchdog: B25's panel shows "PREVIOUS XNU LOG (no previous panic captured)" next to the
+# gate probe, so the freeze is not a panic at all — it is a wait that never ends, and it takes the
+# console with it. hw_spin_should_keep_spinning() is where a "no timeout" policy spins forever, so a
+# lock that stays contended for millions of passes now panics with the lock address and the caller,
+# and that panic text is staged in pram (uke-stage-last-panic) so the next boot prints it.
+# The gate probe line also reports the pram region, because "(no previous panic captured)" only means
+# something if the staging area is real.
+uke-spin-watchdog.patch
+# The timer interrupt samples the interrupted PC, so a hang with interrupts enabled (a
+# driver polling a register that never changes, a stub returning nonsense) or one with them
+# masked (a spin, caught by another CPU going quiet) panics with the address instead of
+# freezing the panel. Every threshold is a boot arg, so tuning needs no rebuild.
+uke-stall-probe.patch
+
+# The virtual timer's PPI 27 is enabled in the GIC from the boot CPU and from every secondary, because
+# on this platform nothing else ever did: pe_fiq.c (the only code that does it) is compiled for VMAPPLE
+# only, so the timer counted down and no interrupt was ever forwarded. Group 0 (FIQ) when the
+# distributor is single-security-state, group 1 (IRQ) otherwise, in which case sleh_irq dispatches it.
+# uke-gic=0 turns the whole thing off.
+# uke-gic-timer.patch is restored. ArmCpu is the component that is *meant* to arm the GIC and the
+# architectural timer, and four rounds of probes ended with the proof that its start() is never called at
+# all (b47: no panic, no output). Rather than keep bisecting the IOKit matching above it, this brings PPI 27
+# up from the kernel itself: it maps the GIC, wakes this core's redistributor, puts the timer PPI in group 1
+# (IRQ, where XNU's sleh_irq path ends the interrupt) and dispatches a taken PPI 27 to rtclock_intr.
+# The earlier 800 kHz storm came from the group 0/FIQ design this file no longer uses. uke-gic=0 disables it.
+# ARE before the SGI frame: this patch used to program GICR_IGROUPR0 / GICR_ISENABLER0 while the distributor
+# was still in ARE_NS=0, which is the state the loader leaves it in (0x00000002), and in that mode the
+# SGI_base frame at GICR+0x10000 is not implemented in the non-secure view -- only RD_base decodes. The
+# hardware answered the first read with a bus error, which is the panic every round has been chasing:
+#   esr 0x96000010   (EC 0x25 data abort, DFSC 0x10 sync external abort, WnR 0 = a load)
+#   far 0xfffffffbf9fafc08   pc _uke_gic_arm_cpu+0x2c0   lr _uke_gic_arm_cpu+0xc0   cpu 0
+# `ldr w9, [x8, #128]` at +0x2c0 with x8 = redistributor + 0x10000 is exactly the GICR_IGROUPR0 read, and
+# the write that set ARE sat 0x74 bytes further on in the same function; TYPER and WAKER, both in RD_base,
+# had already been read successfully. The block now clears the group enable, sets ARE, verifies the read-back
+# and only then touches the SGI frame, so a GIC that refuses ARE costs a timer instead of a boot.
+# The SAME frame needed a second fix, found on hardware one round later: GICR_WAKER was mis-decoded
+# (0x2 called ProcessorSleep and 0x4 tested for ChildrenAsleep - 0x2 is ChildrenAsleep and 0x4 is a
+# reserved bit, so the whole wake block was dead code). The loader measures GICR_WAKER = 0x00000002,
+# i.e. ProcessorSleep clear while ChildrenAsleep is set, and ChildrenAsleep is exactly what gates the
+# SGI_base frame. b129 set ARE correctly, the read-back proved it, and GICR_IGROUPR0 still aborted at
+# _uke_gic_arm_cpu+0x308. The block now always clears ProcessorSleep, waits for ChildrenAsleep with a
+# bound, and leaves the frame alone - naming the waker value - if it never clears.
+uke-gic-timer.patch
+
+# uke-serror-detail: every platform error on this machine ends as arm64_implementation_specific_error(),
+# whose whole report was the sentence "Unhandled implementation specific error" - no fault status, no
+# address, no core - so each one cost a flash and a photograph and still ended in a guess. The escalation
+# path is narrow and exact: sleh_synchronous() diverts any abort whose fault status is an external abort,
+# a parity error or a table-walk error (is_platform_error) here, and sleh_async_serror() sends every
+# SError here, but PE_handle_platform_error() only reaches the device's IOPlatformIO once ArmDTPlatform
+# has published it, so before that point nothing handles the fault. The panic now carries esr/far/pc/lr/
+# sp/cpsr and the core, and because panic() stages its text into the pram panic header, the boot after
+# this one prints it from UkeBootMemoryDxe ("UKEMEM: panic line from pram+...") and shows it in the menu
+# even if this boot's screen never becomes legible.
+# uke-serror-resume=N additionally continues past an asynchronous error instead of stopping, which is
+# right for an error raised by a block this port has no driver for and wrong for one the kernel asked
+# for; N caps how many are tolerated so a storm cannot hide the machine behind a console that never
+# stops scrolling. Inert without the boot argument.
+uke-serror-detail.patch
+
+# From the gate probe on, the sampler reports samples/last_pc/cpus and arms the stall detector. ArmCpu's own
+# flags cannot be printed from the kernel: ArmCpu is a kext the emitter links after the kernel, so its symbols
+# do not exist at kernel link time (that was a link error). Whether the platform layer came up is read from
+# behaviour instead - samples > 0 means the architectural timer is delivering.
+# uke-armcpu-probe.patch is held back while uke-gic-timer.patch is enabled: both patch osfmk/arm/rtclock.c,
+# osfmk/arm64/machine_routines.c and osfmk/kern/locks.c, so whichever applies second fails on context. The
+# GIC patch carries the reporting this round needs (its own uke-gic: lines and the interrupt count), so it
+# goes first; the sampler returns once this question is answered.
+# uke-armcpu-probe.patch
+
+# AppleImage4's start waits without a timeout for a class IOAESAccelerator service; the class is prelinked but
+# no instance exists. uke-aes-stub=1 publishes an instance of the original class at the wait itself (no vtable
+# binding needed), and the wait probe moved onto waitForMatchingServiceWithToken, the implementation every path
+# funnels through, because the wrapper produced no output at all.
+uke-aes-stub.patch
+
+# USB log console (QcomXnuUsbDebug, package/qcom-usb-debug) is NOT applied. Its patch sets target
+# xnu-8796 (darwin22) and xnu-10063 (darwin23), while this kernel builds xnu-12377.121.6 — see
+# "xnu_version" in UniXNU profiles/os/macos-26.5.2-25F84/profile.toml, and this series' own
+# patches/xnu-12377/ entries. Run 42263483616 measured the consequence: the darwin23 pair dies on
+# pe_kprintf.c:13, kern/debug.c:1133 and kern/printf.c:911 in a 170-patch tree, and 3 of those
+# failures (pe_kprintf, printf and the console files) came from the revision alone, not from an
+# earlier patch. Porting the pair to 12377 is its own round; until then the board's own in-kernel
+# driver (package/uke_usb.c, which reads msgbuf and needs no XNU patch) is the USB console.
+# zzzzzzzzzzzzzzz-uke-usb-console.patch
+# zzzzzzzzzzzzzzz-uke-usb-worker.patch
+
+# Board hooks straight from bsd_init(): the STARTUP()-registered entries in package/*.c have never
+# produced observable output in this kernel (silent pram beacon, silent probe, no panic), while the
+# patched call sites above demonstrably run. csr_check calls the same hooks, so whichever fires is
+# visible in the pram beacon string.
+zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch
+
+# USB log console, the core component package/qcom-usb-debug (same one alioth and munch ship).
+# Its own patch sets stop at xnu-10063; package/qcom-usb-debug/patches/darwin24/README.md records the
+# rebase onto this kernel's xnu-12377.121.6 (ac9718f) and both files here are byte-identical copies of
+# that rebased pair. The worker starts from bsd_autoconf() right after kminit(), which always runs -
+# unlike the STARTUP() route the board's own driver uses. Runtime is opt-in: qcom-usb-debug=1.
+zzzzzzzzzzzzzzzzzz-qcom-usb-debug-console.patch
+zzzzzzzzzzzzzzzzzz-qcom-usb-debug-worker.patch

@@ -1,0 +1,71 @@
+diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
+index aa700c0..be4ad1e 100644
+--- a/osfmk/kern/locks.c
++++ b/osfmk/kern/locks.c
+@@ -232,6 +232,25 @@ hw_spin_should_keep_spinning(
+ #endif /* __x86_64__ */
+ 
+ 	if (__improbable(to.hwst_timeout == 0)) {
++		/*
++		 * uke-spin-watchdog: this is the "wait forever" policy, so a lock whose owner never releases
++		 * it hangs the CPU and, through the console lock, the panel as well — which is exactly what
++		 * AppleImage4's last twelve lines look like. Counting the passes turns that silence into a
++		 * panic naming the lock and its caller, and the panic text is staged in pram so the *next*
++		 * boot prints it.
++		 */
++		static void *uke_spin_lock;
++		static uint64_t uke_spin_passes;
++
++		if (uke_spin_lock == lock) {
++			if (++uke_spin_passes > 2000000ULL) {
++				panic("uke: spinning forever on lock %p (locked from %p)",
++				    lock, __builtin_return_address(0));
++			}
++		} else {
++			uke_spin_lock = lock;
++			uke_spin_passes = 0;
++		}
+ 		return true;
+ 	}
+ 
+@@ -3431,8 +3450,12 @@ lck_gate_probe(const char *what, lck_mtx_t *lock, gate_t *gate)
+ 		 * once-only line scrolls away before the interesting call happens.
+ 		 */
+ 		extern const char *uke_last_panic_text(void);
++		extern uintptr_t uke_panic_pram_base(void);
++		extern unsigned int uke_panic_pram_size(void);
+ 
+-		printf("PREVIOUS XNU LOG: %s\n", uke_last_panic_text());
++		printf("PREVIOUS XNU LOG (pram=%llx size=%u): %s\n",
++		    (unsigned long long)uke_panic_pram_base(), uke_panic_pram_size(),
++		    uke_last_panic_text());
+ 	}
+ 	printf("lck-gate: %s lock=%p gate=%p data=%llx\n", what, (void *)lock, (void *)gate,
+ 	    (unsigned long long)(gate ? gate->gt_data : 0));
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index a3d8f3a..47cdaac 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -243,6 +243,22 @@ check_for_panic_log(void)
+  * uke-last-panic-text: the staged text of the boot that died, for probes that print where the panel
+  * still updates. vcattach() prints it far too early to survive on a panel that stops scrolling.
+  */
++/*
++ * uke-panic-pram: where the staged text lives, so a probe can show whether the staging area is even
++ * usable. "(no previous panic captured)" is only meaningful when this is a real region.
++ */
++uintptr_t
++uke_panic_pram_base(void)
++{
++	return (uintptr_t)gPanicBase;
++}
++
++unsigned int
++uke_panic_pram_size(void)
++{
++	return gPanicSize;
++}
++
+ const char *
+ uke_last_panic_text(void)
+ {

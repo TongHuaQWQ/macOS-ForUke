@@ -15,3 +15,9 @@
 *.bin binary
 *.a binary
 *.o binary
+
+# The firmware patch set must be stored byte for byte. uke-firmware.patch carries CRLF context lines
+# from upstream EDK2 sources, and the *.patch rule above normalises them to LF -- after which
+# "git apply" no longer matches those files on a pristine upstream checkout. Verified by diffing the
+# committed blob against the generated patch: the normalised copy had 0 CRLF, the real one has 76.
+firmware/*.patch -text -eol

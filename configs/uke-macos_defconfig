@@ -55,6 +55,19 @@
 # CONFIG_XNU_<NAME> becomes XNU_<NAME> for the kernel build.
 
 CONFIG_XNU_BUILD_ARCHIVES=y
+# ROUND B experiment (branch round-b-lto): apple's kernelcache.release.* is an LTO build, and the
+# fileset prelink pairs each kext call against our kernel by comparing code. A non-LTO reconstruction
+# differs wherever Apple inlined, which is why the last full-closure report named only 1,508 of the
+# 3,826 kext-facing targets. Watch `functions matched` and `kext-facing targets named` in the prelink
+# log: they are directly comparable to the 8,781 / 1508 baseline (docs/11 §32.1).
+CONFIG_XNU_BUILD_LTO=y
+# NOT CONFIG_XNU_DEPLOYMENT_OS="macos" yet. The switch is real and wired, and it is the right direction
+# -- Apple's macOS kernel is an XNU_TARGET_OS_OSX build, and those macros decide which code exists at
+# all (docs/11 §34) -- but this tree is built with SDKROOT=iphoneos. Turning it on pulls in macOS-only
+# kernel code (osfmk/vm/vm_compressor.c, vm_swap_file.c, vm_unix.c, vm_compressor_backing_store.c) whose
+# identifiers the iphoneos SDK headers do not declare: 7 errors, one round (docs/11 §35). Doing this for
+# real means a macOS-SDK kernel build (SDKROOT=macosx), which is a project of its own.
+# CONFIG_XNU_DEPLOYMENT_OS="macos"
 # Link the kernel the way a kernel *collection* needs it: `-Wl,-add_split_seg_info -Wl,-kernel`
 # instead of the standalone `-fuse-ld=ld-classic -Wl,-threaded_starts_section` pair
 # (patches/xnu-12377/arm64e-threaded-starts.patch switches on this define).
@@ -71,7 +84,10 @@ CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
 # CONFIG_XNU_NATIVE_UFS is not set
-# CONFIG_XNU_NATIVE_AES is not set
+# CONFIG_XNU_NATIVE_AES is not set   # sheng (iPadOS 26/27) never sets it either: SoftwareAES
+# provides IOAESAccelerator through build-software-aes-bindings.py, and turning this on would only
+# trip build-xnu-4k-baseline.sh's "requires the qualified original AES/crypto prelink closure"
+# guard, whose condition is CRYPTO_BOOTSTRAP=prelinked, which this profile is not.
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 CONFIG_XNU_SOURCE_MOCKFS=y
 CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
@@ -128,6 +144,32 @@ CONFIG_XNU_NATIVE_PAN=y
 # __TEXT_EXEC,__text, and `prelinked` leaves no such section to reseal. The same switch is what the
 # iOS 26/27 boards set (UniXNU-sheng: CONFIG_XNU_CRYPTO_BOOTSTRAP="source").
 CONFIG_XNU_CRYPTO_BOOTSTRAP="source"
-CONFIG_XNU_EXTRA_LD_ARCHIVES=""
+# CONFIG_XNU_BOOT_LOG links build/uke-last-log/libUkeLastLog.a with -force_load, which is
+# what makes the pram writer exist in the kernel at all: build-boot-log.py only *builds* the
+# archive, and build-xnu-4k-baseline.sh adds it to LD_KERNEL_ARCHIVES on BOOT_LOG=1 or
+# WATCHDOG_POLICY=1. Without this switch the archive was never linked (b56/b58 carry no
+# UkeLastLog string at all), so the msgbuf -> pram path did not exist even though sheng-log=1
+# was in kernel_args.
+CONFIG_XNU_BOOT_LOG=y
+# The second half of the log survives a reset: every two seconds the same writer appends a 16 KiB
+# record to the last 32 MiB of userdata (UKELLOG1 magic, sequence, CRC), which TWRP can read with dd
+# without a second boot and without losing the start of the boot to the ring. Without this switch
+# UkeLastLog.c compiles the pram half only, which is what every earlier round did -- the window was
+# verified zero-filled because the writer was never in the image.
+#
+# The symbols it needs are not NativeUfs's: build-ufs-log.py builds package/UfsLog.cpp (the driver's
+# IOKit-free transport: request list, SCSI layer, SMMU takeover, NOP OUT) and package/UfsLogKernel.c
+# (register windows, one contiguous DMA area, one lock) into libUkeUfsLog.a, and
+# CONFIG_XNU_EXTRA_LD_ARCHIVES force-loads it below. The window's geometry arrives on the command line
+# as uke-log-first/uke-log-last (board.toml [payload] kernel_args).
+CONFIG_XNU_LOG_USERDATA=y
+# The USB log console (package/qcom-usb-debug): the component's darwin24 pair is in the series (rebased
+# onto xnu-12377.121.6, see package/qcom-usb-debug/patches/darwin24/README.md) and
+# build/qcom-usb-debug/libQcomXnuUsbDebug.a is force-loaded. Runtime stays opt-in with qcom-usb-debug=1.
+CONFIG_XNU_QCOM_USB_DEBUG=y
+# Force-loaded straight into the kernel link (build-xnu-4k-baseline.sh appends XNU_EXTRA_LD_ARCHIVES
+# verbatim, so the -force_load comes from here). {tree} is the build tree, which is also what the
+# script's $ROOT is -- the same substitution uke-full-plus_defconfig's two *_ARCHIVE keys use.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a"
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n

@@ -1,0 +1,44 @@
+diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
+index ff20b3e..aa700c0 100644
+--- a/osfmk/kern/locks.c
++++ b/osfmk/kern/locks.c
+@@ -3424,6 +3424,16 @@ lck_gate_probe(const char *what, lck_mtx_t *lock, gate_t *gate)
+ {
+ 	extern int printf(const char *format, ...) __printflike(1, 2);
+ 
++	{
++		/*
++		 * On every gate call, not just the first: another component in the collection reaches a
++		 * gate long before AppleImage4 does, and this panel only keeps about twenty rows, so a
++		 * once-only line scrolls away before the interesting call happens.
++		 */
++		extern const char *uke_last_panic_text(void);
++
++		printf("PREVIOUS XNU LOG: %s\n", uke_last_panic_text());
++	}
+ 	printf("lck-gate: %s lock=%p gate=%p data=%llx\n", what, (void *)lock, (void *)gate,
+ 	    (unsigned long long)(gate ? gate->gt_data : 0));
+ }
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index b262c90..a3d8f3a 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -238,6 +238,18 @@ check_for_panic_log(void)
+  * check_for_panic_log() already copies out at boot, so a panic that never reached the screen is
+  * printed by pe_print_last_panic() on the following boot.
+  */
++#if DEVELOPMENT || DEBUG
++/*
++ * uke-last-panic-text: the staged text of the boot that died, for probes that print where the panel
++ * still updates. vcattach() prints it far too early to survive on a panel that stops scrolling.
++ */
++const char *
++uke_last_panic_text(void)
++{
++	return last_panic_text_valid ? last_panic_text : "(no previous panic captured)";
++}
++#endif /* DEVELOPMENT || DEBUG */
++
+ void
+ uke_stage_last_panic(const char *text)
+ {

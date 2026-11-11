@@ -101,11 +101,33 @@ jobs:
           ref: ${{ env.UKE_CORE_REF }}
           path: UniXNU
 
+      # Cheap guard against an expensive failure: patches/xnu/series applies the *copies* in patches/xnu/,
+      # while the component owns the originals under package/qcom-usb-debug/patches/. A fix written in one
+      # place only is invisible until the kernel compile dies on it, eight minutes into the link step
+      # (STATE 73). This runs before any build work, so drift costs seconds instead of a round.
+      - name: Check the component patch copies against the component
+        working-directory: UniXNU-uke
+        run: python3 scripts/check-patch-copies.py
+
+      # The kernel archives only compile here, which made every component typo a 25-minute round. This
+      # step runs the checks that need nothing but a host compiler, in under a minute. It reports and
+      # never blocks: the component is a kit checkout, so a broken check must not stop a kernel build
+      # that the next hardware round needs.
+      - name: Component self-checks (host compiler only; never blocks the build)
+        continue-on-error: true
+        working-directory: UniXNU-uke
+        run: |
+          KITS=kits/uke/qcom-usb-debug
+          [ -d "$KITS" ] || KITS=package/qcom-usb-debug
+          bash "$KITS/scripts/check-component.sh" || true
+
       - name: Record revisions
         run: |
           set -x
           git -C UniXNU-uke rev-parse HEAD
           git -C UniXNU rev-parse HEAD
+          # The XnuPrelink submodule is initialised later, by the tree step, so this must not fail here.
+          git -C UniXNU/kits/XnuPrelink rev-parse HEAD 2>/dev/null || echo 'kits/XnuPrelink not initialised yet'
 
       - name: Install the host tools (with retry)
         run: |
@@ -390,6 +412,27 @@ jobs:
           ls -l "$OUT/kernel"
           test -f "$OUT/kernel/kernel.macho"
 
+      # Judging a round needs the pairing numbers, but the job log and the artifact both require
+      # authentication while the run page does not. Putting the numbers in the step summary is what makes
+      # a round readable from outside the runner — the same reason the failure report below exists.
+      - name: Report the pairing numbers (on success)
+        if: success()
+        working-directory: UniXNU
+        run: |
+          set -x
+          logs=$(ls -1 out/uke/*/*/logs/prelink.log out/uke/*/*/logs/*fileset*-reference*.log 2>/dev/null || true)
+          echo "pairing sources: ${logs:-<none>}"
+          {
+            echo "## Pairing"
+            echo
+            echo "\`${{ env.UKE_DEFCONFIG }}\` · core \`${{ env.UKE_CORE_REPO }}@${{ env.UKE_CORE_REF }}\`"
+            echo
+            echo '```'
+            grep -h -E '^functions:|^data:|^kext-facing targets named:|^conflicts:|^unresolved closure references:|^removed [0-9]+ unavailable|reference leaves [0-9]+ undefined' $logs 2>/dev/null \
+              || echo 'no pairing lines'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # The build log of a whole XNU compile is tens of thousands of lines and a failing make buries
       # the one line that matters among warnings. Printing the diagnostics here puts the reason in the
       # job log itself, which is the only part of a run that can be read without authentication.
@@ -418,10 +461,17 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # Annotations are rendered into the run page as plain text, so the first few real failures are
           # repeated as ::error:: lines: that is what a reader without log access can actually see.
-          grep -h -m 3 -E '(^|[^a-zA-Z])error:|needs component entries|only supports|no policy directory|undefined symbol' $logs 2>/dev/null \
-            | head -3 | cut -c1-200 | while IFS= read -r line; do
-                echo "::error title=build failure::${line}"
-              done
+          #
+          # Each line names the log it came from, and the last matching logs win instead of the first:
+          # kernel-bootstrap.log links without the archive builders by design (XNU_BOOTSTRAP=1), so its
+          # linker error is tolerated and the pass that matters is a later one. An earlier round annotated
+          # exactly that tolerated error and hid the real failure.
+          for log in $logs; do
+            line=$(grep -m 1 -E '(^|[^a-zA-Z])error:|needs component entries|only supports|no policy directory|undefined symbol|symbol\(s\) not found' "$log" 2>/dev/null | cut -c1-160)
+            if [ -n "$line" ]; then echo "$(basename "$log"): $line"; fi
+          done | tail -3 | cut -c1-200 | while IFS= read -r line; do
+              echo "::error title=build failure::${line}"
+            done || true
           for log in $logs; do
             echo "=================== $log ($(wc -l < "$log") lines)"
             echo "------------------- error lines, with context"
@@ -451,6 +501,18 @@ jobs:
             # map, stubbed[bundle][address] resolves to the kext that called and the pairing it wanted.
             cp "$OUT/kernel/kernel.map.json" artifacts/ 2>/dev/null || echo "no kernel.map.json" >> artifacts/MISSING.txt
             shasum -a 256 "$OUT/kernel/kernel.macho" | tee artifacts/kernel.macho.sha256
+            # The native (pre-emission) kernel with symbols is what the fileset matcher pairs the original
+            # collection against. Shipping it turns "write anchors -> wait 35 minutes -> see whether the
+            # stub count dropped" into a local loop: kits/XnuPrelink/fileset_match.py runs on the host with
+            # this file and the kernelcache. kernel.json records its path.
+            native=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("native") or "")' "$OUT/kernel/kernel.json" 2>/dev/null || true)
+            if [ -n "$native" ] && [ -f "$native" ]; then
+              mkdir -p artifacts/native
+              cp "$native" artifacts/native/native.macho
+              shasum -a 256 "$native" | tee artifacts/native/native.macho.sha256
+            else
+              echo "native kernel not collected (kernel.json native=${native:-<none>})" >> artifacts/MISSING.txt
+            fi
           else
             echo "kernel.macho was not produced" | tee artifacts/MISSING.txt
           fi
@@ -461,6 +523,15 @@ jobs:
           fi
           if [ -n "${UKE_BS_DIR:-}" ] && [ -d "$UKE_BS_DIR/logs" ]; then
             cp -R "$UKE_BS_DIR/logs" artifacts/bootstrap-logs
+          fi
+          # The AES interface audit (scripts/audit-aes-interface.py) needs the prelink candidate and its
+          # extent plan, which only exist inside the build: without them a SoftwareAES binding can only be
+          # the recorded iPadOS 17 one, and prelink addresses do not carry across kernelcaches.
+          if [ -n "$OUT" ] && [ -d "$OUT/build/xnu-prelink" ]; then
+            mkdir -p artifacts/xnu-prelink
+            cp "$OUT/build/xnu-prelink/native-defaults-candidate.macho" artifacts/xnu-prelink/ 2>/dev/null || true
+            cp "$OUT/build/xnu-prelink/native-defaults-candidate.json" artifacts/xnu-prelink/ 2>/dev/null || true
+            ls -l artifacts/xnu-prelink | head -5
           fi
           ls -lR artifacts | head -60
 

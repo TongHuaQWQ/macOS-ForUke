@@ -1,0 +1,809 @@
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -17,6 +17,12 @@
+ #include <machine/machine_routines.h>
+ #include <arm/caches_internal.h>
+ #include <kern/debug.h>
++#include <kern/clock.h>
++#include <mach/mach_time.h>
++#include <arm64/proc_reg.h>
++
++/* osfmk/arm/rtclock.h is not on this directory's include path; only the entry point is needed. */
++extern void rtclock_intr(unsigned int is_user_context);
+ #include <libkern/section_keywords.h>
+ #include <os/overflow.h>
+ 
+@@ -1050,3 +1056,527 @@
+ {
+ 	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
+ }
++
++#if DEVELOPMENT || DEBUG
++/*
++ * uke-gic: no timer interrupt has ever reached this kernel.
++ *
++ * XNU arms the virtual timer (ml_set_decrementer writes CNTV_TVAL_EL0, fiq_context_init sets
++ * CNTV_CTL_EL0.ENABLE) but never enables the timer's PPI 27 in the interrupt controller: that step
++ * lives in pexpert/arm/pe_fiq.c, which is compiled only when HAS_GIC_V3 is defined, and HAS_GIC_V3 is
++ * defined only by the VMAPPLE platform header. So the counter counted down and the interrupt was never
++ * forwarded. rtclock_intr() never ran — the uke-stall-probe reports samples=0 — and every timed wait in
++ * the boot (IOSleep, thread_call, waitForMatchingService timeouts, the spin-lock deadline, thread
++ * preemption) could never complete. AppleImage4's last magazine line being followed by silence is a
++ * thread blocked on a timer that will never tick.
++ *
++ * This brings the PPI up on the boot CPU and on every secondary: it finds the CPU's redistributor
++ * through GICR_TYPER, wakes it, puts PPI 27 into a group this kernel can take, enables it, and points
++ * the CPU interface at that group. Group 0 (FIQ) is preferred because sleh_fiq already dispatches a
++ * pending timer to rtclock_intr; when the distributor is in two-security-state (DS=0) group 0 belongs
++ * to the secure side, so PPI 27 goes to group 1 (IRQ) instead and sleh_irq hands it to rtclock_intr
++ * through uke_gic_timer_irq().
++ *
++ * Everything here is read-only until the distributor proves to be a GICv3, and uke-gic=0 turns the
++ * whole block off, so a suspect GIC can never be the reason a boot stops.
++ */
++#define UKE_GIC_TIMER_PPI          27u     /* virtual timer: the one ml_set_decrementer arms */
++#define UKE_GICD_CTLR              0x0000u
++#define UKE_GICD_PIDR2             0xFFE8u
++#define UKE_GICR_TYPER             0x0008u
++#define UKE_GICR_TYPER_LAST        (1ull << 4)
++#define UKE_GICR_WAKER             0x0014u
++/* GICv3 GICR_WAKER: bit 0 = ProcessorSleep (1 = asleep), bit 1 = ChildrenAsleep (1 = the SGI_base
++ * frame is not accessible yet), bit 2 reserved. This file used to call 0x2 "sleep" and test 0x4 for
++ * "asleep", so the whole wake block below was dead: bit 2 never reads set, ProcessorSleep was never
++ * cleared and ChildrenAsleep was never awaited, which is why GICR_IGROUPR0 aborted even after ARE
++ * was set. The loader measures GICR_WAKER = 0x00000002 on this board, i.e. ProcessorSleep = 0 with
++ * ChildrenAsleep = 1, so this is exactly the state that needs waiting on. */
++#define UKE_GICR_WAKER_PSLEEP      0x1u
++#define UKE_GICR_WAKER_ASLEEP      0x2u
++#define UKE_GICR_IGROUPR0          0x10080u
++#define UKE_GICR_ISENABLER0        0x10100u
++#define UKE_GICR_ICENABLER0        0x10180u
++#define UKE_GIC_CTLR_ENABLE_GRP0   (1u << 0)   /* also EnableGrp1NS in the non-secure view */
++#define UKE_GIC_CTLR_ARE           (1u << 4)   /* ARE_NS in the non-secure view: required with GICRs */
++#define UKE_GIC_CTLR_DS            (1u << 6)
++#define UKE_MPIDR_AFF0             0x000000FFull
++#define UKE_MPIDR_AFF1             0x0000FF00ull
++#define UKE_GIC_SPURIOUS           1020u
++/*
++ * ICC_CTLR_EL1 bit 1 is EOImode (bit 0 is CBPR). Apple's VMAPPLE.h calls 0x1 EOImode, which only matches
++ * a GICv2-style layout; the architecture puts it in bit 1, so both are handled: the mode is cleared when
++ * the write takes effect and read back so the interrupt can be deactivated the way the hardware wants.
++ */
++#define UKE_ICC_CTLR_CBPR          (1u << 0)
++#define UKE_ICC_CTLR_EOIMODE       (1u << 1)
++/* An interrupt rate above this (20 us apart, 50 kHz) cannot be a timer tick; a storm is being taken. */
++#define UKE_GIC_STORM_GAP_NS       20000ull
++#define UKE_GIC_STORM_RUN          2000u
++
++/* -1 = off, unsupported or unreadable; 0 = not tried yet; 1 = mapped */
++static int          uke_gic_mapped;
++/*
++ * When to arm the timer's PPI. 1 arms it from arm_init(), which is Apple's own order (PE_init_cpu ->
++ * pe_init_fiq -> fiq_context_init) but proved too early on this platform: with the interrupt live from
++ * there on, the boot never reached the point where it paints the console. 2 arms it at the first gate
++ * probe, i.e. once kext startup has begun - after the console exists and before the wait that hangs
++ * without a timer. 0 disables the feature. uke-gic=<0|1|2>.
++ */
++/*
++ * Default 2, not 1. Mode 1 arms the PPI from arm_init() before fiq_context_init() turns the timer on and
++ * before rtclock_init() programmes the first deadline, so the first pop lands on timer state that does not
++ * exist yet. Mode 2 arms it at the gate probe, by which point rtclock has a deadline to reprogram.
++ */
++static int          uke_gic_mode = 2;
++static unsigned int uke_boot_stage;
++/* -1 = not chosen yet; 0 = group 0 (FIQ, sleh_fiq dispatches); 1 = group 1 (IRQ, sleh_irq does) */
++static int          uke_gic_group = -1;
++static vm_offset_t  uke_gic_distributor;
++static vm_offset_t  uke_gic_redistributors;
++static uint64_t     uke_gic_redistributor_size;
++static uint64_t     uke_gic_redistributor_stride;
++static uint32_t     uke_gic_dist_ctlr;
++static int          uke_gic_eoi_mode1;      /* EOImode was still 1 after trying to clear it */
++static vm_offset_t  uke_gic_this_redistributor;
++static uint64_t     uke_gic_irq_count;
++static uint64_t     uke_gic_last_stamp;
++static uint32_t     uke_gic_fast_run;
++static uint64_t     uke_gic_storm_gap;
++static int          uke_gic_storm_off;
++
++static uint32_t
++uke_gic_read32(vm_offset_t address)
++{
++	return *(volatile uint32_t *)address;
++}
++
++static uint64_t
++uke_gic_read64(vm_offset_t address)
++{
++	return *(volatile uint64_t *)address;
++}
++
++static void
++uke_gic_write32(vm_offset_t address, uint32_t value)
++{
++	*(volatile uint32_t *)address = value;
++}
++
++/*
++ * Map the two MMIO windows once. The device tree supplies them as
++ * /arm-io/intc reg = <GICD base, GICD size, GICR base, GICR size>, absolute physical addresses.
++ */
++static int
++uke_gic_map(void)
++{
++	DTEntry          entry;
++	void const *     property;
++	unsigned int     property_size;
++	uint64_t const * regions;
++	uint32_t         mode = 1;
++	uint32_t         pidr2;
++	vm_offset_t      soc_base;
++	DTEntry          soc_entry;
++
++	if (uke_gic_mapped != 0) {
++		return uke_gic_mapped > 0;
++	}
++	uke_gic_mapped = -1;
++	if (PE_parse_boot_argn("uke-gic", &mode, sizeof(mode))) {
++		uke_gic_mode = (int)(mode <= 2 ? mode : 1);
++	}
++	if (uke_gic_mode == 0) {
++		printf("uke-gic: disabled by boot-arg\n");
++		return FALSE;
++	}
++	if (SecureDTLookupEntry(NULL, "/arm-io/intc", &entry) != kSuccess) {
++		printf("uke-gic: no /arm-io/intc node in the device tree\n");
++		return FALSE;
++	}
++	if ((SecureDTGetProperty(entry, "reg", &property, &property_size) != kSuccess) ||
++	    (property_size < 4 * sizeof(uint64_t))) {
++		printf("uke-gic: intc reg is %u bytes, need 32\n", property_size);
++		return FALSE;
++	}
++	regions = (uint64_t const *)property;
++	/*
++	 * The ADT stores a child of /arm-io with addresses relative to the arm-io window, exactly like
++	 * pe_fiq.c, so the window base has to be added back: without it this maps physical 0x100000
++	 * instead of 0x17100000 and the first distributor read faults.
++	 */
++	soc_base = 0;
++	if (SecureDTLookupEntry(NULL, "/arm-io", &soc_entry) == kSuccess) {
++		void const * ranges;
++		unsigned int ranges_size = 0;
++
++		if ((SecureDTGetProperty(soc_entry, "ranges", &ranges, &ranges_size) == kSuccess) &&
++		    (ranges_size >= 2 * sizeof(uint64_t))) {
++			soc_base = (vm_offset_t)((uint64_t const *)ranges)[1];
++		}
++	}
++	if ((regions[0] == 0) || (regions[1] == 0) || (regions[1] > 0x1000000) ||
++	    (regions[2] == 0) || (regions[3] == 0) || (regions[3] > 0x1000000)) {
++		printf("uke-gic: implausible intc reg %#llx/%#llx %#llx/%#llx\n",
++		    (unsigned long long)regions[0], (unsigned long long)regions[1],
++		    (unsigned long long)regions[2], (unsigned long long)regions[3]);
++		return FALSE;
++	}
++	if (soc_base == 0) {
++		printf("uke-gic: no arm-io window base (ranges missing), refusing to map %#llx\n",
++		    (unsigned long long)regions[0]);
++		return FALSE;
++	}
++	uke_gic_distributor = ml_io_map(soc_base + regions[0], regions[1]);
++	uke_gic_redistributors = ml_io_map(soc_base + regions[2], regions[3]);
++	uke_gic_redistributor_size = regions[3];
++	uke_gic_redistributor_stride = 0x20000;
++	if ((SecureDTGetProperty(entry, "redistributor-stride", &property, &property_size) == kSuccess) &&
++	    (property_size > 0)) {
++		uke_gic_redistributor_stride = (property_size >= sizeof(uint64_t)) ?
++		    *(uint64_t const *)property : (uint64_t) *(uint32_t const *)property;
++	}
++	if ((uke_gic_distributor == 0) || (uke_gic_redistributors == 0) ||
++	    (uke_gic_redistributor_stride == 0)) {
++		printf("uke-gic: cannot map gicd=%#llx gicr=%#llx stride=%#llx\n",
++		    (unsigned long long)regions[0], (unsigned long long)regions[2],
++		    (unsigned long long)uke_gic_redistributor_stride);
++		return FALSE;
++	}
++	printf("uke-gic: soc=%#llx gicd pa=%#llx va=%#llx gicr pa=%#llx va=%#llx stride=%#llx\n",
++	    (unsigned long long)soc_base, (unsigned long long)(soc_base + regions[0]),
++	    (unsigned long long)uke_gic_distributor, (unsigned long long)(soc_base + regions[2]),
++	    (unsigned long long)uke_gic_redistributors,
++	    (unsigned long long)uke_gic_redistributor_stride);
++
++	/* Read-only sanity check before a single write: a GICv3 distributor reports architecture 3. */
++	pidr2 = uke_gic_read32(uke_gic_distributor + UKE_GICD_PIDR2);
++	uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
++	if (((pidr2 >> 4) & 0xf) < 3) {
++		printf("uke-gic: distributor is not GICv3 (PIDR2=%#x CTLR=%#x at %#llx)\n", pidr2,
++		    uke_gic_dist_ctlr, (unsigned long long)uke_gic_distributor);
++		return FALSE;
++	}
++	printf("uke-gic: GICv3 arch=%u model=%u gicd=%#llx gicr=%#llx size=%#llx stride=%#llx "
++	    "ctlr=%#x ds=%u\n", (pidr2 >> 4) & 0xf, (pidr2 >> 8) & 0x3f,
++	    (unsigned long long)uke_gic_distributor, (unsigned long long)uke_gic_redistributors,
++	    (unsigned long long)uke_gic_redistributor_size,
++	    (unsigned long long)uke_gic_redistributor_stride, uke_gic_dist_ctlr,
++	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_DS) ? 1u : 0u);
++	uke_gic_mapped = 1;
++	return TRUE;
++}
++
++/*
++ * Per-CPU half: wake this CPU's redistributor, group and enable PPI 27, and open the CPU interface.
++ * Safe to call more than once; secondary CPUs reach it from start_cpu().
++ */
++static void
++uke_gic_arm_cpu(void)
++{
++	vm_offset_t      redistributor = 0;
++	uint64_t         offset, typer, mpidr, deadline;
++	uint32_t         waker, igroupr, sre, ctlr_el1;
++	int              group0;
++
++	if (!uke_gic_map()) {
++		return;
++	}
++
++	mpidr = __builtin_arm_rsr64("MPIDR_EL1") & (UKE_MPIDR_AFF1 | UKE_MPIDR_AFF0);
++	for (offset = 0; (offset + 0x10000) <= uke_gic_redistributor_size;
++	    offset += uke_gic_redistributor_stride) {
++		vm_offset_t candidate = uke_gic_redistributors + offset;
++
++		typer = uke_gic_read64(candidate + UKE_GICR_TYPER);
++		if (((typer >> 32) & (UKE_MPIDR_AFF1 | UKE_MPIDR_AFF0)) == mpidr) {
++			redistributor = candidate;
++			break;
++		}
++		if (typer & UKE_GICR_TYPER_LAST) {
++			break;
++		}
++	}
++	if (redistributor == 0) {
++		printf("uke-gic: no redistributor for mpidr %#llx\n", (unsigned long long)mpidr);
++		return;
++	}
++
++	waker = uke_gic_read32(redistributor + UKE_GICR_WAKER);
++	if (waker & UKE_GICR_WAKER_PSLEEP) {
++		uke_gic_write32(redistributor + UKE_GICR_WAKER, waker & ~UKE_GICR_WAKER_PSLEEP);
++	}
++	/*
++	 * ChildrenAsleep is what gates the SGI_base frame, and it can be set while ProcessorSleep is
++	 * already clear -- which is this board's state at hand-off. The wait therefore runs whether or
++	 * not ProcessorSleep had to be cleared, and if it never clears the SGI frame is left alone: the
++	 * frame aborts when it is not accessible, and a timer that does not tick is a hang the stall
++	 * probe reports, while an abort here is a panic before IOPlatformIO exists.
++	 */
++	if (uke_gic_read32(redistributor + UKE_GICR_WAKER) & UKE_GICR_WAKER_ASLEEP) {
++		deadline = 0;
++		nanoseconds_to_deadline(1000000000ull, &deadline);
++		while ((waker = uke_gic_read32(redistributor + UKE_GICR_WAKER)) & UKE_GICR_WAKER_ASLEEP) {
++			if ((deadline != 0) && (mach_absolute_time() > deadline)) {
++				printf("uke-gic: redistributor %#llx stays asleep (waker %#x), not touching "
++				    "the SGI frame\n", (unsigned long long)redistributor, waker);
++				return;
++			}
++		}
++	}
++
++	/* System register access must be on, or no ICC_* write has any effect. */
++	sre = __builtin_arm_rsr64("ICC_SRE_EL1");
++	if ((sre & 1) == 0) {
++		__builtin_arm_wsr64("ICC_SRE_EL1", sre | 1);
++		__builtin_arm_isb(ISB_SY);
++		sre = __builtin_arm_rsr64("ICC_SRE_EL1");
++	}
++	if ((sre & 1) == 0) {
++		printf("uke-gic: ICC_SRE_EL1.SRE stays 0 (%#llx), leaving the GIC alone\n",
++		    (unsigned long long)sre);
++		return;
++	}
++
++	/*
++	 * uke-gic ARE-before-SGI: affinity routing has to be on before the first access to the
++	 * redistributor's SGI frame, or the bus refuses that access.
++	 *
++	 * This board reaches the kernel with GICD_CTLR.ARE_NS = 0: the loader measures 0x00000002 before
++	 * the kernel branch and restores it after its own probe. With affinity routing disabled the SGI_base
++	 * frame -- everything at GICR + 0x10000, which is where IGROUPR0, ISENABLER0 and the priorities
++	 * live -- is not implemented in the non-secure view; only the RD_base registers (TYPER, WAKER, the
++	 * pending/propagate tables) decode. So the first read of GICR_IGROUPR0 comes back as a bus error,
++	 * and that is exactly what the hardware did:
++	 *
++	 *   Unhandled implementation specific error: esr 0x96000010 far 0xfffffffbf9fafc08
++	 *   pc _uke_gic_arm_cpu+0x2c0 lr _uke_gic_arm_cpu+0xc0 ... ec 0x25 iss 0x10 cpu 0
++	 *
++	 * ESR 0x96000010 is a data abort (EC 0x25) with DFSC 0x10 -- a synchronous external abort, not on a
++	 * translation table walk -- and WnR = 0, i.e. a load. Disassembling uke_gic_arm_cpu puts the
++	 * faulting instruction at +0x2c0 as `ldr w9, [x8, #128]` with x8 = redistributor + 0x10000, the
++	 * GICR_IGROUPR0 read below, while the write that sets ARE sat 0x74 bytes later in the same
++	 * function. TYPER (RD_base + 0x08) and WAKER (RD_base + 0x14) are read before it and succeed, so
++	 * this is a frame problem, not a mapping problem.
++	 *
++	 * ARE may only be changed while the group is disabled, so the group enable is cleared here and set
++	 * again at the end of this function, and the read-back decides whether to go on. If ARE does not
++	 * take, leaving the GIC alone costs a timer that never ticks, which the stall probe reports as a
++	 * hang; touching the SGI frame costs a panic before IOPlatformIO exists.
++	 */
++	uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
++	if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE) == 0) {
++		uint32_t armed = (uke_gic_dist_ctlr & ~UKE_GIC_CTLR_ENABLE_GRP0) | UKE_GIC_CTLR_ARE;
++
++		uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, armed);
++		__builtin_arm_isb(ISB_SY);
++		uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
++		if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE) == 0) {
++			printf("uke-gic: GICD_CTLR.ARE stays 0 (%#x), not touching the SGI frame\n",
++			    uke_gic_dist_ctlr);
++			return;
++		}
++	}
++
++	/*
++	 * Always group 1 (IRQ), never group 0 (FIQ). The group 0 path is sleh_fiq, and the only EOI in there
++	 * is compiled for APPLEVIRTUALPLATFORM, so on this platform an interrupt taken through it is never
++	 * deactivated: the line stays active and re-triggers immediately, which is the 800 kHz storm that
++	 * starved the console. Group 1 comes to sleh_irq, where uke_gic_timer_irq() acknowledges, handles and
++	 * deactivates it (and brakes a storm if one still happens).
++	 */
++	group0 = 0;
++	igroupr = uke_gic_read32(redistributor + UKE_GICR_IGROUPR0);
++	igroupr |= (1u << UKE_GIC_TIMER_PPI);
++	uke_gic_write32(redistributor + UKE_GICR_IGROUPR0, igroupr);
++
++	__builtin_arm_wsr64("ICC_PMR_EL1", 0xFF);
++	ctlr_el1 = (uint32_t)__builtin_arm_rsr64("ICC_CTLR_EL1");
++	__builtin_arm_wsr64("ICC_CTLR_EL1", ctlr_el1 & ~(UKE_ICC_CTLR_EOIMODE | UKE_ICC_CTLR_CBPR));
++	__builtin_arm_isb(ISB_SY);
++	ctlr_el1 = (uint32_t)__builtin_arm_rsr64("ICC_CTLR_EL1");
++	/*
++	 * With EOImode 0 an EOI write both drops priority and deactivates; with EOImode 1 it only drops, and
++	 * the interrupt stays active forever - which for a timer whose condition is still asserted is an
++	 * endless storm of interrupts that never lets the CPU run anything else.
++	 */
++	uke_gic_eoi_mode1 = (ctlr_el1 & UKE_ICC_CTLR_EOIMODE) ? 1 : 0;
++	uke_gic_this_redistributor = redistributor;
++	uke_gic_storm_gap = 0;
++	nanoseconds_to_absolutetime(UKE_GIC_STORM_GAP_NS, &uke_gic_storm_gap);
++	/* Affinity routing is mandatory once redistributors exist, and the group must be forwarded. */
++	uke_gic_dist_ctlr |= (UKE_GIC_CTLR_ARE | UKE_GIC_CTLR_ENABLE_GRP0);
++	uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, uke_gic_dist_ctlr);
++	if (group0) {
++		__builtin_arm_wsr64("ICC_BPR0_EL1", 0);
++		__builtin_arm_wsr64("ICC_IGRPEN0_EL1", 1);
++	} else {
++		__builtin_arm_wsr64("ICC_IGRPEN1_EL1", 1);
++	}
++	uke_gic_write32(redistributor + UKE_GICR_ISENABLER0, 1u << UKE_GIC_TIMER_PPI);
++	__builtin_arm_isb(ISB_SY);
++
++	uke_gic_group = group0 ? 0 : 1;
++	printf("uke-gic: cpu mpidr=%#llx gicr=%#llx typer=%#llx group=%d eoimode=%d ctlr=%#x igroupr=%#x "
++	    "isenabler=%#x %s\n", (unsigned long long)mpidr, (unsigned long long)redistributor,
++	    (unsigned long long)typer, group0 ? 0 : 1, uke_gic_eoi_mode1,
++	    uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR),
++	    uke_gic_read32(redistributor + UKE_GICR_IGROUPR0),
++	    uke_gic_read32(redistributor + UKE_GICR_ISENABLER0), group0 ? "FIQ" : "IRQ");
++}
++
++/* uke-gic=1: arm with the timer itself, which is Apple's order for this call site. */
++void
++uke_gic_start_cpu(void)
++{
++	if (uke_gic_mode == 1) {
++		uke_gic_arm_cpu();
++	}
++}
++
++/*
++ * Boot progress marker: the stall detector only speaks once kext startup has begun, so an early-boot
++ * idle (before the console exists) can never be reported as "stuck in one place".
++ */
++void
++uke_boot_stage_set(unsigned int stage)
++{
++	if (stage > uke_boot_stage) {
++		uke_boot_stage = stage;
++	}
++}
++
++unsigned int
++uke_boot_stage_get(void)
++{
++	return uke_boot_stage;
++}
++
++/*
++ * Arm from a probe (uke-gic=2). Called on the CPU that is running kext startup, which is the one whose
++ * timer matters here; secondary CPUs get theirs when they next reach arm_init's call.
++ */
++void
++uke_gic_arm_now(void)
++{
++	if (uke_gic_mode != 2) {
++		return;
++	}
++	if (uke_gic_mapped == 1 && (uke_gic_group == 0 || uke_gic_group == 1)) {
++		return;              /* already armed by an earlier call on this boot */
++	}
++	uke_gic_arm_cpu();
++}
++
++/*
++ * sleh_irq hands the timer here when PPI 27 is group 1: there is no registered interrupt handler on
++ * this platform, so cdp->interrupt_handler is NULL and any IRQ that is not ours would fault. Returning
++ * TRUE means the interrupt was acknowledged and dealt with.
++ */
++boolean_t
++uke_gic_timer_irq(boolean_t pop_programmed)
++{
++	uint64_t iar, now;
++
++	if ((uke_gic_mapped != 1) || (uke_gic_group != 1)) {
++		return FALSE;
++	}
++	if (uke_gic_storm_off) {
++		/*
++		 * The PPI is masked; anything still pending is acknowledged and dropped, because returning
++		 * FALSE here would fall through to a registered handler this platform never installs.
++		 */
++		iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
++		if ((uint32_t)iar < UKE_GIC_SPURIOUS) {
++			__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++			if (uke_gic_eoi_mode1) {
++				__builtin_arm_wsr64("ICC_DIR_EL1", iar & 0xffffffu);
++			}
++		}
++		return TRUE;
++	}
++	iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
++	if ((uint32_t)iar >= UKE_GIC_SPURIOUS) {
++		/* Acknowledge a spurious read as consumed: falling through would run a NULL handler. */
++		return TRUE;
++	}
++
++	/*
++	 * Storm brake. A timer tick is at most a few kHz; interrupts arriving closer together than
++	 * UKE_GIC_STORM_GAP_NS for UKE_GIC_STORM_RUN in a row mean the line is being re-asserted faster
++	 * than anything can run, which is what starves the console and hides the boot. Mask the PPI and
++	 * say so rather than wedging the machine: the boot then behaves as it does with the timer off.
++	 */
++	now = mach_absolute_time();
++	if ((uke_gic_last_stamp != 0) && ((now - uke_gic_last_stamp) < uke_gic_storm_gap)) {
++		if (uke_gic_fast_run < 0xffffffffu) {
++			uke_gic_fast_run++;
++		}
++	} else {
++		uke_gic_fast_run = 0;
++	}
++	uke_gic_last_stamp = now;
++	uke_gic_irq_count++;
++
++	if (uke_gic_fast_run > UKE_GIC_STORM_RUN) {
++		uke_gic_storm_off = 1;
++		if (uke_gic_this_redistributor != 0) {
++			uke_gic_write32(uke_gic_this_redistributor + UKE_GICR_ICENABLER0,
++			    1u << UKE_GIC_TIMER_PPI);
++			__builtin_arm_isb(ISB_SY);
++		}
++		printf("uke-gic: interrupt storm (%llu interrupts, last gap %llu ticks); PPI %u masked\n",
++		    (unsigned long long)uke_gic_irq_count, (unsigned long long)uke_gic_storm_gap,
++		    UKE_GIC_TIMER_PPI);
++	} else {
++		/*
++		 * Before the kernel programs its first decrementer pop the timer's condition is already
++		 * asserted, so running the timer queue there would be work on state that does not exist yet.
++		 * Acknowledge and drop it; the caller passes whether rtcPop has been programmed.
++		 */
++		if (pop_programmed) {
++			rtclock_intr(TRUE);
++		}
++	}
++
++	__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++	if (uke_gic_eoi_mode1) {
++		/* EOImode 1: the EOI above only dropped priority; this is what deactivates the interrupt. */
++		__builtin_arm_wsr64("ICC_DIR_EL1", iar & 0xffffffu);
++	}
++	return TRUE;
++}
++
++/*
++ * If the timer still reaches sleh_fiq the distributor ignored the group write; say so once, because from
++ * then on nothing deactivates the interrupt and the machine will storm.
++ */
++void
++uke_gic_fiq_seen(void)
++{
++	static int announced;
++
++	if (!announced) {
++		announced = 1;
++		printf("uke-gic: the timer arrived as FIQ (group 0); this path never deactivates it\n");
++	}
++}
++
++uint64_t
++uke_gic_irq_total(void)
++{
++	return uke_gic_irq_count;
++}
++
++int
++uke_gic_stormed(void)
++{
++	return uke_gic_storm_off;
++}
++
++int
++uke_gic_path_number(void)
++{
++	return (uke_gic_mapped == 1) ? uke_gic_group : -1;
++}
++#endif /* DEVELOPMENT || DEBUG */
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -668,6 +668,17 @@
+ 	apt_msg_init();
+ 	apt_msg_init_cpu();
+ #endif
++#if DEVELOPMENT || DEBUG
++	/*
++	 * uke-gic: the virtual timer's PPI has to be enabled in this CPU's redistributor before the
++	 * interrupt below can ever arrive (see pexpert/arm/pe_init.c). Sits with fiq_context_init because
++	 * that is the call that turns the timer on.
++	 */
++	{
++		extern void uke_gic_start_cpu(void);
++		uke_gic_start_cpu();
++	}
++#endif /* DEVELOPMENT || DEBUG */
+ 	fiq_context_init(TRUE);
+ 
+ 
+@@ -789,6 +800,12 @@
+ #if __arm64__
+ 	apt_msg_init_cpu();
+ #endif
++#if DEVELOPMENT || DEBUG
++	{
++		extern void uke_gic_start_cpu(void);
++		uke_gic_start_cpu();   /* uke-gic: this CPU's own redistributor, group and PPI 27 */
++	}
++#endif /* DEVELOPMENT || DEBUG */
+ 
+ 	fiq_context_init(TRUE);
+ 	cpu_data_ptr->rtcPop = EndOfAllTime;
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -3010,6 +3010,31 @@
+ 
+ 	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+ 
++#if DEVELOPMENT || DEBUG
++	/*
++	 * uke-gic: when the virtual timer's PPI 27 could only be put in group 1 (the distributor is in
++	 * two-security-state, so group 0 belongs to the secure side), it arrives here as an IRQ. Nothing
++	 * on this platform installs a registered interrupt handler, so cdp->interrupt_handler is NULL and
++	 * falling through would fault: take the timer ourselves and return.
++	 */
++	{
++		extern boolean_t uke_gic_timer_irq(boolean_t pop_programmed);
++
++		/*
++		 * Always pop. The gate that used to be here (cdp->rtcPop != EndOfAllTime) acknowledged the
++		 * interrupt without reprogramming CNTV_TVAL, and because EOImode 0 only deactivates an
++		 * interrupt whose source has dropped, the still-expired timer re-asserted immediately: that is
++		 * the 800 kHz storm on record. rtclock_intr -> timer_intr -> setPop is what clears the
++		 * condition, so it has to run every time; arming late (mode 2) makes that safe.
++		 */
++		if (uke_gic_timer_irq(TRUE)) {
++			entropy_collect();
++			sleh_interrupt_handler_epilogue();
++			return;
++		}
++	}
++#endif /* DEVELOPMENT || DEBUG */
++
+ #if USE_APPLEARMSMP
+ 	PE_handle_ext_interrupt();
+ #else
+@@ -3117,6 +3136,14 @@
+ 		ml_interrupt_masked_debug_start(rtclock_intr, DBG_INTR_TYPE_TIMER);
+ 		rtclock_intr(TRUE);
+ 		ml_interrupt_masked_debug_end();
++#if DEVELOPMENT || DEBUG
++		{
++			extern void uke_gic_fiq_seen(void);
++
++			/* uke-gic forces PPI 27 to group 1; reaching here means it did not take. */
++			uke_gic_fiq_seen();
++		}
++#endif /* DEVELOPMENT || DEBUG */
+ 	}
+ 
+ #if APPLEVIRTUALPLATFORM
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -375,10 +375,19 @@
+ void
+ machine_idle(void)
+ {
++#if DEVELOPMENT || DEBUG
++	extern void uke_idle_enter(void);
++	extern void uke_idle_exit(void);
++#endif /* DEVELOPMENT || DEBUG */
++
+ 	/* Interrupts are expected to be masked on entry or re-entry via
+ 	 * Idle_load_context()
+ 	 */
+ 	assert((__builtin_arm_rsr("DAIF") & DAIF_STANDARD_DISABLE) == DAIF_STANDARD_DISABLE);
++#if DEVELOPMENT || DEBUG
++	/* uke-idle-guard: tell the timer sampler that this CPU is parking, not spinning. */
++	uke_idle_enter();
++#endif /* DEVELOPMENT || DEBUG */
+ 	/* Check for, and act on, a WFE recommendation.
+ 	 * Bypasses context spill/fill for a minor perf. increment.
+ 	 * May unmask and restore IRQ+FIQ mask.
+@@ -390,6 +399,9 @@
+ 		 */
+ 		Idle_context();
+ 	}
++#if DEVELOPMENT || DEBUG
++	uke_idle_exit();
++#endif /* DEVELOPMENT || DEBUG */
+ 	__builtin_arm_wsr("DAIFClr", DAIFSC_STANDARD_DISABLE);
+ }
+ 
+diff --git a/osfmk/arm/rtclock.c b/osfmk/arm/rtclock.c
+--- a/osfmk/arm/rtclock.c
++++ b/osfmk/arm/rtclock.c
+@@ -356,6 +356,34 @@
+ };
+ 
+ static struct uke_diag_lane uke_diag_lanes[UKE_DIAG_MAX_CPU];
++
++/*
++ * uke-idle-guard: an idle CPU parks in machine_idle(), and with the timer live every one of its
++ * interrupts lands on the instruction just after the DAIF unmask there. To the sampler that looks like
++ * a perfect "same place" window, so an idle CPU would be reported as a hang. machine_idle() marks the
++ * CPU here; the sampler drops idle samples and clears the window.
++ */
++static volatile unsigned char uke_idle_cpu[UKE_DIAG_MAX_CPU];
++
++void
++uke_idle_enter(void)
++{
++	unsigned int cpu = (unsigned int)cpu_number();
++
++	if (cpu < UKE_DIAG_MAX_CPU) {
++		uke_idle_cpu[cpu] = 1;
++	}
++}
++
++void
++uke_idle_exit(void)
++{
++	unsigned int cpu = (unsigned int)cpu_number();
++
++	if (cpu < UKE_DIAG_MAX_CPU) {
++		uke_idle_cpu[cpu] = 0;
++	}
++}
+ static int      uke_diag_state;    /* 0 = not initialised, 1 = enabled, -1 = disabled */
+ static uint64_t uke_diag_span;
+ static uint64_t uke_diag_window;
+@@ -363,6 +391,7 @@
+ static uint64_t uke_diag_hold_abs;
+ static boolean_t uke_diag_all_cpus;
+ static uint32_t uke_diag_scan;
++static uint64_t uke_diag_first_stamp;
+ 
+ static void
+ uke_diag_init(void)
+@@ -469,7 +498,7 @@
+ uke_diag_sample(uint64_t pc, uint64_t lr, uint64_t abstime, boolean_t idle_pop)
+ {
+ 	struct uke_diag_lane *lane, *other;
+-	uint64_t low = 0, high = 0, mode, hits, delta_ns;
++	uint64_t low = 0, high = 0, mode, hits, delta_ns, elapsed_ms = 0;
+ 	unsigned int cpu, ncpu, i;
+ 
+ 	if (uke_diag_state == 0) {
+@@ -490,12 +519,16 @@
+ 	 * window is cleared: the idle timer pop is the interrupt that wakes it, and treating it as
+ 	 * fresh state keeps the idle loop from ever looking like a hang.
+ 	 */
+-	if (idle_pop) {
++	if (idle_pop || (uke_idle_cpu[cpu] != 0)) {
+ 		lane->head = 0;
++		lane->stuck_start = 0;
+ 		lane->last_stamp = abstime;
+ 		return;
+ 	}
+ 
++	if (uke_diag_first_stamp == 0) {
++		uke_diag_first_stamp = abstime;
++	}
+ 	lane->pcs[lane->head % UKE_DIAG_WINDOW] = pc;
+ 	lane->head++;
+ 	lane->last_stamp = abstime;
+@@ -506,6 +539,19 @@
+ 	}
+ 
+ 	/* Detector 1: a watched CPU keeps executing the same instructions. */
++	{
++		extern unsigned int uke_boot_stage_get(void);
++
++		/*
++		 * Before kext startup an idle boot CPU is the normal state, not a hang: with the timer live
++		 * from arm_init() every one of its interrupts lands on the same instruction of the idle
++		 * return path and the window looks "stuck". The stage marker is set by the gate probe.
++		 */
++		if (uke_boot_stage_get() == 0) {
++			lane->stuck_start = 0;
++			return;
++		}
++	}
+ 	if (((cpu == 0) || uke_diag_all_cpus) && uke_diag_stuck(lane, &low, &high)) {
+ 		/*
+ 		 * A delay loop or a long copy looks exactly like this for its duration, so a narrow
+@@ -521,10 +567,18 @@
+ 		}
+ 		mode = uke_diag_mode(lane, &hits);
+ 		lane->reported = TRUE;
++		{
++			uint64_t elapsed_ns = 0;
++
++			absolutetime_to_nanoseconds(abstime - uke_diag_first_stamp, &elapsed_ns);
++			elapsed_ns /= 1000000ull;
++			elapsed_ms = elapsed_ns;
++		}
+ 		panic("uke-stall: cpu%u stuck in one place: pc=%#llx lr=%#llx window=%llu samples=%llu "
+-		    "range=%#llx-%#llx mode-pc=%#llx hits=%llu", cpu, (unsigned long long)pc,
++		    "elapsed_ms=%llu range=%#llx-%#llx mode-pc=%#llx hits=%llu", cpu, (unsigned long long)pc,
+ 		    (unsigned long long)lr, (unsigned long long)uke_diag_window,
+-		    (unsigned long long)lane->head, (unsigned long long)low,
++		    (unsigned long long)lane->head, (unsigned long long)elapsed_ms,
++		    (unsigned long long)low,
+ 		    (unsigned long long)high, (unsigned long long)mode, (unsigned long long)hits);
+ 		return;
+ 	}
+diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
+--- a/osfmk/kern/locks.c
++++ b/osfmk/kern/locks.c
+@@ -3466,10 +3466,27 @@
+ 		{
+ 			extern uint64_t uke_diag_total_samples(void);
+ 			extern uint64_t uke_diag_last_pc(void);
++			extern void uke_gic_arm_now(void);
++			extern void uke_boot_stage_set(unsigned int);
+ 
+-			printf("uke-stall-probe: samples=%llu last_pc=%#llx\n",
+-			    (unsigned long long)uke_diag_total_samples(),
+-			    (unsigned long long)uke_diag_last_pc());
++			/*
++			 * uke-gic=2 arms the timer's interrupt here rather than in arm_init(): kext startup is
++			 * the earliest point that is both past console creation and before the wait that hangs
++			 * when no timer tick can arrive. The stage marker keeps the stall detector quiet before
++			 * this point, where an idle CPU is normal and not evidence of anything.
++			 */
++			uke_boot_stage_set(1);
++			uke_gic_arm_now();
++
++			{
++				extern uint64_t uke_gic_irq_total(void);
++				extern int uke_gic_stormed(void);
++
++				printf("uke-stall-probe: samples=%llu last_pc=%#llx gic_irqs=%llu storm=%d\n",
++				    (unsigned long long)uke_diag_total_samples(),
++				    (unsigned long long)uke_diag_last_pc(),
++				    (unsigned long long)uke_gic_irq_total(), uke_gic_stormed());
++			}
+ 		}
+ 	}
+ 	printf("lck-gate: %s lock=%p gate=%p data=%llx\n", what, (void *)lock, (void *)gate,

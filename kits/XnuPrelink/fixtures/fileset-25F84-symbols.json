@@ -1,0 +1,1387 @@
+{
+ "inputs": {
+  "kernelcache_sha256": "697e01d6f9173f88ced3b00c7d711f5fdf37a1222e2baa50a8950f67a4ed11d5",
+  "entry": "com.apple.kernel"
+ },
+ "functions": [
+  {
+   "original": "0xfffffe000b7f1a3c",
+   "original_size": 76,
+   "original_sha256": "92b839addafbbab69ecebd42cce30d85cac8bc729cdb9a6948fab3c431c51604",
+   "native_symbol": "_lck_mtx_try_lock",
+   "evidence": "76 bytes with its only call at +0x3c into lck_mtx_try_lock_slow, which is the native lck_mtx_try_lock to the byte (same size, same call offset, same callee). Position agrees: 0xfffffe000b7f19f8 lck_mtx_lock_spin_always precedes it and 0xfffffe000b7f1a88 lck_mtx_try_lock_slow follows, as in the native text. Source: osfmk/kern/lck_mtx.c."
+  },
+  {
+   "original": "0xfffffe000c0f0db4",
+   "original_size": 56,
+   "original_sha256": "603eee46004ccb5c32ed574042d53ea229f626b93ea80b9ce39dc503faea3168",
+   "native_symbol": "_pmap_claim_reserved_ppl_page",
+   "evidence": "Panic stub whose own literals name it: pmap.c, pmap_claim_reserved_ppl_page and \"function not supported in this environment\". The native pmap_claim_reserved_ppl_page is the same non-PPL stub (12 bytes: returns NULL). Source: osfmk/arm/pmap_ppl_interface.c."
+  },
+  {
+   "original": "0xfffffe000c0f0dec",
+   "original_size": 56,
+   "original_sha256": "dd0d6661384fc35976ce330ee0479a782274c52f40d77b9a95a07b2b7f20d0a9",
+   "native_symbol": "_pmap_free_reserved_ppl_page",
+   "evidence": "Twin of the record above: its literals are pmap.c, pmap_free_reserved_ppl_page and \"function not supported in this environment\". The native pmap_free_reserved_ppl_page is the same non-PPL stub (8 bytes: plain return). Source: osfmk/arm/pmap_ppl_interface.c."
+  },
+  {
+   "original": "0xfffffe000bf71fc8",
+   "original_size": 144,
+   "original_sha256": "9f52a506c42c570111b023525bdcc43c54846e85e1bf32ac37aa512e65f582ec",
+   "native_symbol": "_IOMallocData",
+   "evidence": "Allocates with kalloc_ext at +0x2c, records IOStatistics::getKextNodeFromBacktrace at +0x5c and releases a lock with IORWLockUnlock at +0x7c. It begins exactly where the original _IOFreePageable ends (216 bytes from 0xfffffe000bf71ef0), which is where the native _IOMallocData begins once the native _IOFreePageable (232 bytes) ends; the native wrapper is only a 24-byte thunk to IOMalloc_internal, so no shape method can reach it. Source: libkern/c++/IOLib.cpp."
+  },
+  {
+   "original": "0xfffffe000bf72208",
+   "original_size": 136,
+   "original_sha256": "0b2561307335247fbae1d3dcde8a031a9024089dab668f6694bf6419a9618d28",
+   "native_symbol": "_IOFreeData",
+   "evidence": "Fifth of the six 144-byte wrappers that follow _IOFreePageable (0xfffffe000bf71fc8 + 4 * 0x90) and the only one of them that frees: kfree_ext at +0x28 with the same IOStatistics and IORWLockUnlock tail as the alloc at the head of the block. That makes it the free counterpart of _IOMallocData, matching the native pair. Source: libkern/c++/IOLib.cpp."
+  },
+  {
+   "original": "0xfffffe000bd440f4",
+   "original_size": 152,
+   "original_sha256": "d0c3f7a55e82b36d79c587f78480029155b8c119c9cb5c1567effd47905f4e14",
+   "native_symbol": "_cs_identity_get",
+   "evidence": "Link order: _cs_entitlements_dictionary_copy and _cs_blob_get bracket this function in the text and exactly one native function, _cs_identity_get, sits between the same two neighbours. Source order: bsd/kern/kern_cs.c:1842 lies between _cs_entitlements_dictionary_copy:1813 and _cs_blob_get:1871."
+  },
+  {
+   "original": "0xfffffe000b9ffbfc",
+   "original_size": 172,
+   "original_sha256": "109d1ad96f0f115cf5a9596c369c75a2d1a44fc7ecdf4741034181576e664989",
+   "native_symbol": "_cache_purge",
+   "evidence": "Link order: _resize_namecache and _cache_purge_negatives bracket this function in the text and exactly one native function, _cache_purge, sits between the same two neighbours. Source order: bsd/vfs/vfs_cache.c:3240 lies between _resize_namecache:3075 and _cache_purge_negatives:3270."
+  },
+  {
+   "original": "0xfffffe000bd423d4",
+   "original_size": 148,
+   "original_sha256": "268c4bb5658a0f88a1d3d4b900271b40e671f025e09a86448f8652408a2b320f",
+   "native_symbol": "_csproc_get_blob",
+   "evidence": "Link order: _csblob_get_hashtype and _csvnode_get_blob bracket this function in the text and exactly one native function, _csproc_get_blob, sits between the same two neighbours. Source order: bsd/kern/kern_cs.c:579 lies between _csblob_get_hashtype:567 and _csvnode_get_blob:603."
+  },
+  {
+   "original": "0xfffffe000ba59dd0",
+   "original_size": 136,
+   "original_sha256": "4a619cd5bf9c76b7f604c26a9d158a390cdf79fb2771c38a8e644205b6850062",
+   "native_symbol": "_VNOP_GETXATTR",
+   "evidence": "Link order: _VNOP_CLONEFILE and _VNOP_SETXATTR bracket this function in the text and exactly one native function, _VNOP_GETXATTR, sits between the same two neighbours. Source order: bsd/vfs/kpi_vfs.c:5959 lies between _VNOP_CLONEFILE:5923 and _VNOP_SETXATTR:5979."
+  },
+  {
+   "original": "0xfffffe000bd427e4",
+   "original_size": 160,
+   "original_sha256": "ae824a5c4e62582e649bd644a713c72f67bfe8b821332383c21821fbff2536c2",
+   "native_symbol": "_csproc_get_teamid",
+   "evidence": "Link order: _csblob_get_storage_addr and _csproc_get_identity bracket this function in the text and exactly one native function, _csproc_get_teamid, sits between the same two neighbours. Source order: bsd/kern/kern_cs.c:796 lies between _csblob_get_storage_addr:782 and _csproc_get_identity:809."
+  },
+  {
+   "original": "0xfffffe000bdba4e8",
+   "original_size": 240,
+   "original_sha256": "216de4cea08cdda39582bad87ab3544e8bcfaea20ec46b58fd40f0316ba69e2c",
+   "native_symbol": "_code_signing_configuration",
+   "evidence": "Link order: _code_signing_deallocate and _disable_code_signing_feature bracket this function in the text and exactly one native function, _code_signing_configuration, sits between the same two neighbours. Source order: bsd/kern/kern_codesigning.c:118 lies between _code_signing_deallocate:85 and _disable_code_signing_feature:386."
+  },
+  {
+   "original": "0xfffffe000ba52970",
+   "original_size": 180,
+   "original_sha256": "493c54d2e5223ecbb66514b5d4591f1e8f7d5784506a95060349ad34e541a622",
+   "native_symbol": "_vfs_setfsprivate",
+   "evidence": "Link order: _vfs_fsprivate and _vfs_nativexattrs bracket this function in the text and exactly one native function, _vfs_setfsprivate, sits between the same two neighbours. Source order: bsd/vfs/kpi_vfs.c:797 lies between _vfs_fsprivate:790 and _vfs_nativexattrs:806."
+  },
+  {
+   "original": "0xfffffe000be32f00",
+   "original_size": 176,
+   "original_sha256": "d89f07624a29fff985b9f5d7d4f470d2cb6df654825445f524d49bad88324a25",
+   "native_symbol": "_os_reason_set_flags",
+   "evidence": "Link order: _os_reason_free and _os_reason_set_description_data bracket this function in the text and exactly one native function, _os_reason_set_flags, sits between the same two neighbours. Source order: bsd/kern/sys_reason.c:247 lies between _os_reason_free:222 and _os_reason_set_description_data:262."
+  },
+  {
+   "original": "0xfffffe000b9ffe94",
+   "original_size": 100,
+   "original_sha256": "eae23cfa8d529697d68067a7d5433ddf40900e905e94339a25435f067d35ecd4",
+   "native_symbol": "_cluster_max_io_size",
+   "evidence": "Link order: _cluster_init and _cluster_throttle_io_limit bracket this function in the text and exactly one native function, _cluster_max_io_size, sits between the same two neighbours. Source order: bsd/vfs/vfs_cluster.c:331 lies between _cluster_init:322 and _cluster_throttle_io_limit:1001."
+  },
+  {
+   "original": "0xfffffe000ba5623c",
+   "original_size": 44,
+   "original_sha256": "e5a8829a7ae608b69648dbbcf85162597512a008ee246ba6dfbcacc00784f8c9",
+   "native_symbol": "_vnode_getbackingvnode",
+   "evidence": "Link order: _vnode_ismonitored and _vfs_get_notify_attributes bracket this function in the text and exactly one native function, _vnode_getbackingvnode, sits between the same two neighbours. Source order: bsd/vfs/kpi_vfs.c:3287 lies between _vnode_ismonitored:3281 and _vfs_get_notify_attributes:3305."
+  },
+  {
+   "original": "0xfffffe000bd7df40",
+   "original_size": 196,
+   "original_sha256": "5cd7b67eec0348fe0ae151c412179ce97706028397d2f935d4175e0549b67c6e",
+   "native_symbol": "_persona_get_type",
+   "evidence": "Link order: _persona_proc_drop and _persona_get_uid bracket this function in the text and exactly one native function, _persona_get_type, sits between the same two neighbours. Source order: bsd/kern/kern_persona.c:827 lies between _persona_proc_drop:772 and _persona_get_uid:847."
+  },
+  {
+   "original": "0xfffffe000b7b0c48",
+   "original_size": 100,
+   "original_sha256": "4e516aa267483611d1cbe4c15b33e8815719b7add72cfad259253218167b30e4",
+   "native_symbol": "_kdp_register_callout",
+   "evidence": "Link order: _DebuggerWithContext and _register_additional_panic_data_buffer bracket this function in the text and exactly one native function, _kdp_register_callout, sits between the same two neighbours. Source order: osfmk/kern/debug.c:935 lies between _DebuggerWithContext:873 and _register_additional_panic_data_buffer:977."
+  },
+  {
+   "original": "0xfffffe000bd43da8",
+   "original_size": 120,
+   "original_sha256": "08026031621ff8bce882ca7ff6ac6069203ebf013e5590f48ed976b5ad34d62c",
+   "native_symbol": "_csproc_get_platform_identifier",
+   "evidence": "Link order: _csvnode_get_platform_identifier and _cs_entitlement_flags bracket this function in the text and exactly one native function, _csproc_get_platform_identifier, sits between the same two neighbours. Source order: bsd/kern/kern_cs.c:1670 lies between _csvnode_get_platform_identifier:1644 and _cs_entitlement_flags:1680."
+  },
+  {
+   "original": "0xfffffe000b7e6d9c",
+   "original_size": 172,
+   "original_sha256": "ea5d8ef06ab41625b87bca34d4567de13fde6afa4376849a3de9dac2f8c46969",
+   "native_symbol": "_convert_port_to_task_suspension_token_external",
+   "evidence": "Link order: _convert_port_to_task_policy_get_mig and _convert_port_to_task_suspension_token_mig bracket this function in the text and exactly one native function, _convert_port_to_task_suspension_token_external, sits between the same two neighbours. Source order: osfmk/kern/ipc_tt.c:2828 lies between _convert_port_to_task_policy_get_mig:2794 and _convert_port_to_task_suspension_token_mig:2835."
+  },
+  {
+   "original": "0xfffffe000ba67718",
+   "original_size": 92,
+   "original_sha256": "b8e41bdb2de8d044b1403d32366be60225fcbcbba5272ea55f75f41e65828f41",
+   "native_symbol": "_spec_pathconf",
+   "evidence": "Link order: _spec_blktooff and _spec_strategy bracket this function in the text and exactly one native function, _spec_pathconf, sits between the same two neighbours. Source order: bsd/miscfs/specfs/spec_vnops.c:2885 lies between _spec_blktooff:2923 and _spec_strategy:2497."
+  },
+  {
+   "original": "0xfffffe000ba6849c",
+   "original_size": 176,
+   "original_sha256": "4329bd65561b2bc0387c8ee76ed23e19343d01c6a1fddf04f1c65ac7e028b925",
+   "native_symbol": "_spec_select",
+   "evidence": "Link order: _spec_fsync and _spec_ioctl bracket this function in the text and exactly one native function, _spec_select, sits between the same two neighbours. Source order: bsd/miscfs/specfs/spec_vnops.c:860 lies between _spec_fsync:950 and _spec_ioctl:827."
+  },
+  {
+   "original": "0xfffffe000bfbea68",
+   "original_size": 1024,
+   "original_sha256": "3310fdf66b8c83e31ac105b17c927f7f0e91eb52b712852a45f9a8f8c38a78a8",
+   "native_symbol": "__ZN9IOService19registerPowerDriverEPS_P14IOPMPowerStatem",
+   "evidence": "4 native addresses compete between __ZN9IOService16removePowerChildEP17IOPowerConnection and __ZN9IOService24registerInterestedDriverEPS_, so position does not decide; behaviour does: the original and __ZN9IOService19registerPowerDriverEPS_P14IOPMPowerStatem share 6.0 symbolic features (__ZN9IOService15submitPMRequestEP11IOPMRequest, __ZN9IOService16acquirePMRequestEPS_jP11IOPMRequest, __ZNK11IOServicePM7pmTraceEjjmm) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000c034fac",
+   "original_size": 700,
+   "original_sha256": "c60a5f8449e0a4ac28b8ed51ed15c9dd0c64fb350c94b16a9383c908cb6c662c",
+   "native_symbol": "__ZN10IOReporter10addChannelEyPKc",
+   "evidence": "6 native addresses compete between __ZN10IOReporterC2Ev and __ZN10IOReporter18lockReporterConfigEv, so position does not decide; behaviour does: the original and __ZN10IOReporter10addChannelEyPKc share 3.0 symbolic features (__ZN8OSSymbol11withCStringEPKc, _hw_lock_unlock, _ml_set_interrupts_enabled_with_debug) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000c09c084",
+   "original_size": 664,
+   "original_sha256": "ca80cb60c345a449793ba4af21e1084560cf9a443c174ad5adf3f5807aa1f5e5",
+   "native_symbol": "_SecureDTLookupEntry",
+   "evidence": "6 native addresses compete between _SecureDTFindNodeWithPropertyEqualToValueHelper and _SecureDTInitEntryIterator, so position does not decide; behaviour does: the original and _SecureDTLookupEntry share 6.0 symbolic features (___stack_chk_fail, _panic, _strcmp) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000ba223ec",
+   "original_size": 192,
+   "original_sha256": "247b02bff86aa8ae0fa6ffbb81f6757758d7a61f7b1bce6d3202cbd888432320",
+   "native_symbol": "_vnode_isinuse",
+   "evidence": "Link order: _vnode_writecount and _vnode_usecount bracket this function; 2 native addresses compete in that range, and source order picks _vnode_isinuse alone. Source order: bsd/vfs/vfs_subr.c:6470 lies between _vnode_writecount:6463 and _vnode_usecount:6476."
+  },
+  {
+   "original": "0xfffffe000c09c31c",
+   "original_size": 412,
+   "original_sha256": "81abe50637db9839f380d020b071bed40bcb4495043441e9eb953bcfae253662",
+   "native_symbol": "_SecureDTGetProperty",
+   "evidence": "6 native addresses compete between _SecureDTFindNodeWithPropertyEqualToValueHelper and _SecureDTInitEntryIterator, so position does not decide; behaviour does: the original and _SecureDTGetPropertyInternal share 4.0 symbolic features (_panic, _strcmp) and no other candidate comes close. CORRECTION (_SecureDTGetProperty): kernel.release.t8142 names this 412-byte position _SecureDTGetProperty and that is the unique KDK name for its shape. _SecureDTGetPropertyInternal is not defined in the release kernel."
+  },
+  {
+   "original": "0xfffffe000bd831f4",
+   "original_size": 76,
+   "original_sha256": "241423afe42ed47d283a738c57c4a79e29f3771592bf195ba9f6d32c9cef87f4",
+   "native_symbol": "_proc_getexecutablevnode_noblock",
+   "evidence": "2 native addresses compete between _proc_is_zombie and _proc_gettty, so position does not decide; behaviour does: the original and _proc_getexecutablevnode_noblock share 2.0 symbolic features (_vnode_getwithref_noblock) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bd831a8",
+   "original_size": 76,
+   "original_sha256": "30663af19299fa4a5eab8ddd8cd3fc62438daf2527e855afc91e1af36197c8e3",
+   "native_symbol": "_proc_getexecutablevnode",
+   "evidence": "2 native addresses compete between _proc_is_zombie and _proc_gettty, so position does not decide; behaviour does: the original and _proc_getexecutablevnode share 2.0 symbolic features (_vnode_getwithref) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bda4834",
+   "original_size": 128,
+   "original_sha256": "6a60420abb167cd0490c14ac86d48fd70d4112284df11dde1489d7b4921c0078",
+   "native_symbol": "_sysctl_handle_opaque",
+   "evidence": "Link order: _sysctl_handle_string and _sysctl_root bracket this function; 2 native addresses compete in that range, and source order picks _kernel_sysctl alone. Source order: bsd/kern/kern_newsysctl.c:142 lies between _sysctl_handle_string:1426 and _sysctl_root:140. CORRECTION (_sysctl_handle_opaque): kernel.release.t8142 names this position _sysctl_handle_opaque and the entry shape is unique with exactly that one name in the KDK development table. _kernel_sysctl is not defined anywhere in the release kernel."
+  },
+  {
+   "original": "0xfffffe000b95eac4",
+   "original_size": 8,
+   "original_sha256": "224d4df0836ae187285a713f6eab38d506f106d5205135a58ab1548d5684fce9",
+   "native_symbol": "_cpu_broadcast_xcall",
+   "evidence": "Link order: _cpu_doshutdown and _cpu_broadcast_xcall_internal bracket this function; 4 native addresses compete in that range, and source order picks _cpu_idle_tickle alone. Source order: osfmk/arm/cpu_common.c:190 lies between _cpu_doshutdown:179 and _cpu_broadcast_xcall_internal:247. CORRECTION (_cpu_broadcast_xcall): referee only. kernel.release.t8142 names this 8-byte thunk _cpu_broadcast_xcall; the shape is shared by many 8-byte stubs, so the digest oracle cannot vote, but the position sits inside a 23 023/23 025 digest-equal alignment."
+  },
+  {
+   "original": "0xfffffe000ba414f8",
+   "original_size": 8,
+   "original_sha256": "dc43e488226c2a1f8303175c7974f2301231e4a82846c6fbbfad11771d727035",
+   "native_symbol": "_vfs_context_dataless_materialization_is_prevented",
+   "evidence": "2 native addresses compete between _freespace_mb and _vfs_context_orig_dataless_materialization_is_prevented, so position does not decide; behaviour does: the original and _vfs_context_dataless_materialization_is_prevented share 2.0 symbolic features (_vfs_context_dataless_materialization_is_prevented_internal) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bfff858",
+   "original_size": 20,
+   "original_sha256": "86e5c44ee77ab1bd3a465fd459f030b181ec747111336cbba5ca7166ab7376f8",
+   "native_symbol": "__ZN5IOCPU11setPropertyEPK8OSSymbolP8OSObject",
+   "evidence": "3 native addresses compete between __ZN5IOCPU13setPropertiesEP8OSObject and __ZNK5IOCPU12getMetaClassEv, so position does not decide; behaviour does: the original and __ZN5IOCPU11setPropertyEPK8OSSymbolP8OSObject share 2.0 symbolic features (__ZN15IORegistryEntry11setPropertyEPK8OSSymbolP8OSObject) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bfd09d8",
+   "original_size": 176,
+   "original_sha256": "6b78397ece22ded0e00e6b6ab67b6d12a3091e0992cf8ac4db2fcad1769a24aa",
+   "native_symbol": "__ZN10IOWorkLoop19signalWorkAvailableEv",
+   "evidence": "9 native addresses compete between __ZN10IOWorkLoop10wakeupGateEPvb and __ZN10IOWorkLoop17removeEventSourceEP13IOEventSource, so position does not decide; behaviour does: the original and __ZN10IOWorkLoop19signalWorkAvailableEv share 3.0 symbolic features (_hw_lock_unlock, _ml_set_interrupts_enabled_with_debug, _thread_wakeup_thread) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000ba51c78",
+   "original_size": 192,
+   "original_sha256": "5eee5c8896d624aad1cec1a9326c78e680c01797258c68cb156c3efde6be7c8f",
+   "native_symbol": "_vfs_setflags",
+   "evidence": "Sequence alignment: 2 unpaired originals, 2 native candidates and 2 definitions in the same source range between _vfs_flags and _vfs_iswriteupgrade. Ordering all three gives _vfs_setflags at position 1 (bsd/vfs/kpi_vfs.c:472)."
+  },
+  {
+   "original": "0xfffffe000bfe8c4c",
+   "original_size": 568,
+   "original_sha256": "15e8679a38007ad4a55c8b063ee9f957ce5d6592fd8d8c63815935b51b965ef1",
+   "native_symbol": "__ZN18IOMemoryDescriptor16performOperationEjyy",
+   "evidence": "3 native addresses compete between __ZN18IOMemoryDescriptor8dmaUnmapEP8IOMapperP12IODMACommandyyy and __ZN18IOMemoryDescriptor12setPurgeableEjPj, so position does not decide; behaviour does: the original and __ZN18IOMemoryDescriptor16performOperationEjyy share 2.0 symbolic features (_IORecursiveLockLock) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bd420f0",
+   "original_size": 12,
+   "original_sha256": "cc69ebf76870babe7c411c6192484957e0d33c8ac31e8007653d279554829f16",
+   "native_symbol": "_csblob_get_size",
+   "evidence": "Sequence alignment: 4 unpaired originals, 4 native candidates and 4 definitions in the same source range between _cs_system_require_lv and _csblob_invalidate_flags. Ordering all three gives _csblob_get_size at position 2 (bsd/kern/kern_cs.c:461)."
+  },
+  {
+   "original": "0xfffffe000bd420fc",
+   "original_size": 12,
+   "original_sha256": "875ab0ba2d050f3b79837a6eb1fd33fbba22cfffcf10a560cbe17ea0ce5590fa",
+   "native_symbol": "_csblob_get_addr",
+   "evidence": "Sequence alignment: 4 unpaired originals, 4 native candidates and 4 definitions in the same source range between _cs_system_require_lv and _csblob_invalidate_flags. Ordering all three gives _csblob_get_addr at position 3 (bsd/kern/kern_cs.c:473)."
+  },
+  {
+   "original": "0xfffffe000bd420e4",
+   "original_size": 12,
+   "original_sha256": "dc8e9afd348a80d12cda8cb1dc37d30bf8b0bf7740d5400715a80970442261a7",
+   "native_symbol": "_csblob_get_base_offset",
+   "evidence": "Sequence alignment: 4 unpaired originals, 4 native candidates and 4 definitions in the same source range between _cs_system_require_lv and _csblob_invalidate_flags. Ordering all three gives _csblob_get_base_offset at position 1 (bsd/kern/kern_cs.c:449)."
+  },
+  {
+   "original": "0xfffffe000b9fcff0",
+   "original_size": 780,
+   "original_sha256": "f754654cca74ab030c4f240c17cf31509b8d2d4bd659ef32bc00ddc0033805e9",
+   "native_symbol": "_vnode_setasfirmlink",
+   "evidence": "4 native addresses compete between _vnode_putname_printable and _vnode_uncache_credentials, so position does not decide; behaviour does: the original and _name_cache_lock share 2.0 symbolic features (_IORWLockWrite) and no other candidate comes close. CORRECTION (_vnode_setasfirmlink): the same-build referee and the digest oracle agree. kernel.release.t8142 names this position _vnode_setasfirmlink, and the shape is unique in the entry with exactly that one name in the KDK development table (a different compilation). 780 bytes; no 4-way contender survives this."
+  },
+  {
+   "original": "0xfffffe000ba51d38",
+   "original_size": 192,
+   "original_sha256": "3a3afd308ed90d9b16111834b1b8af688699556b5869a2b023ae50f7a0864123",
+   "native_symbol": "_vfs_clearflags",
+   "evidence": "Sequence alignment: 2 unpaired originals, 2 native candidates and 2 definitions in the same source range between _vfs_flags and _vfs_iswriteupgrade. Ordering all three gives _vfs_clearflags at position 2 (bsd/vfs/kpi_vfs.c:483)."
+  },
+  {
+   "original": "0xfffffe000bd42c88",
+   "original_size": 168,
+   "original_sha256": "7e51d017cd7911659fef1f4c312f96755f8addc45aa71a372b16fb091d0aee13",
+   "native_symbol": "_csproc_mark_invalid_allowed",
+   "evidence": "3 native addresses compete between _csproc_get_platform_path and _csproc_check_invalid_allowed, so position does not decide; behaviour does: the original and _csproc_mark_invalid_allowed share 2.0 symbolic features (_proc_csflags_set) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bfdec58",
+   "original_size": 756,
+   "original_sha256": "4124b2cabbe8947a46e00cb27adf0efa38cf87d0af9fc33a06970bc472b21f5d",
+   "native_symbol": "__ZN12IODMACommand8completeEbb",
+   "evidence": "2 native addresses compete between __ZN12IODMACommand7walkAllEj and __ZN12IODMACommand7prepareEyybb, so position does not decide; behaviour does: the original and __ZN12IODMACommand8completeEbb share 2.0 symbolic features (__ZN12IODMACommand7walkAllEj) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bd41fc0",
+   "original_size": 16,
+   "original_sha256": "5b11269fd7d0a3a7bbe309cacb5f969eb79b445ca8dd703e47236d6d063e612b",
+   "native_symbol": "_cs_vm_supports_4k_translations",
+   "evidence": "Sequence alignment: 2 unpaired originals, 2 native candidates and 2 definitions in the same source range between _cs_process_global_enforcement and _cs_valid. Ordering all three gives _cs_vm_supports_4k_translations at position 2 (bsd/kern/kern_cs.c:375)."
+  },
+  {
+   "original": "0xfffffe000bd42108",
+   "original_size": 32,
+   "original_sha256": "498a79efa3e5e7887628fd0b1b656641bf4385e735eae2cf7631b7f20931481c",
+   "native_symbol": "_csblob_get_platform_binary",
+   "evidence": "Sequence alignment: 4 unpaired originals, 4 native candidates and 4 definitions in the same source range between _cs_system_require_lv and _csblob_invalidate_flags. Ordering all three gives _csblob_get_platform_binary at position 4 (bsd/kern/kern_cs.c:486)."
+  },
+  {
+   "original": "0xfffffe000bd42b78",
+   "original_size": 272,
+   "original_sha256": "fac398353820697b1ba68135816b33a892dc8500439e0ac10182dc6653752ca4",
+   "native_symbol": "_csproc_disable_enforcement",
+   "evidence": "3 native addresses compete between _csproc_get_platform_path and _csproc_check_invalid_allowed, so position does not decide; behaviour does: the original and _csproc_disable_enforcement share 2.0 symbolic features (_proc_csflags_clear) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bd43710",
+   "original_size": 292,
+   "original_sha256": "d3cff0ca08a5f941007e9c9cd4da3290d48bc549e65fe4a822227acce59d0a71",
+   "native_symbol": "_csfg_get_teamid",
+   "evidence": "Sequence alignment: 8 unpaired originals, 8 native candidates and 8 definitions in the same source range between _csfg_get_cdhash and _csfg_get_csblob. Ordering all three gives _csfg_get_teamid at position 7 (bsd/kern/kern_cs.c:1355)."
+  },
+  {
+   "original": "0xfffffe000bd2db44",
+   "original_size": 424,
+   "original_sha256": "197a13a1894ee3966bafe0144efc7a23c70edb8699fa03f4c000fe7d9b3fc674",
+   "native_symbol": "_ktriage_record",
+   "evidence": "2 native addresses compete between _delete_buffers and _ktriage_extract, so position does not decide; behaviour does: the original and _ktriage_record share 2.0 symbolic features (__enable_preemption_underflow) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bfd288c",
+   "original_size": 168,
+   "original_sha256": "7da623c66dca034c2f25965e99079ba44173385eb4d624e215e6c3e7fb60ceb1",
+   "native_symbol": "__ZN10IOWorkLoop18setMaximumLockTimeEyj",
+   "evidence": "2 native addresses compete between __ZL23IOWorkLoopActionToBlockP8OSObjectPvS1_S1_S1_ and __ZNK13IOEventSource8onThreadEv, so position does not decide; behaviour does: the original and __ZN10IOWorkLoop18setMaximumLockTimeEyj share 2.0 symbolic features (_IORecursiveLockLock) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bfd4e44",
+   "original_size": 144,
+   "original_sha256": "05ccffee14161654dee5a9dd082f3908b561b973b8789595b37f0d5066f080ed",
+   "native_symbol": "__ZN13IOCommandGate12commandSleepEPvj",
+   "evidence": "5 native addresses compete between __ZN13IOCommandGate13commandWakeupEPvb and __ZN13IOCommandGate4initEP8OSObjectPFiS1_PvS2_S2_S2_E, so position does not decide; behaviour does: the original and __ZN13IOCommandGate12commandSleepEPvj share 2.5 symbolic features (_panic) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bfd01dc",
+   "original_size": 332,
+   "original_sha256": "cc8ba98fcef3eecd244eb72ab23fc63be7a21e9ccf334b7e6ea89b52cedfaf00",
+   "native_symbol": "__ZN10IOWorkLoop9sleepGateEPvyj",
+   "evidence": "2 native addresses compete between _IOPolledFileFlush and __ZN10IOWorkLoop8lockTimeEv, so position does not decide; behaviour does: the original and __ZN10IOWorkLoop9sleepGateEPvyj share 2.0 symbolic features (__ZN10IOWorkLoop8lockTimeEv) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000bfd085c",
+   "original_size": 168,
+   "original_sha256": "153fd154d4a5d71b0f2057eaf513c587dd72a7a0c828b1583038d447b52c55a6",
+   "native_symbol": "__ZN10IOWorkLoop9closeGateEv",
+   "evidence": "4 native addresses compete between __ZN10IOWorkLoop10wakeupGateEPvb and __ZN10IOWorkLoop19signalWorkAvailableEv, so position does not decide; behaviour does: the original and __ZN10IOWorkLoop9closeGateEv share 2.0 symbolic features (_IORecursiveLockLock) and no other candidate comes close."
+  },
+  {
+   "original": "0xfffffe000b7fc444",
+   "original_size": 56,
+   "original_sha256": "f3ca401fe2951047ff6cea4b9171a33ce047891a6982dc8bf9a11af0341f1628",
+   "native_symbol": "_lck_mtx_gate_alloc_init",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+  },
+  {
+   "original": "0xfffffe000b9625f4",
+   "original_size": 8,
+   "original_sha256": "a7f36b663ceadf54df7a07cb026058b0198573c97e5134c3ca0b7692d2cc2e3c",
+   "native_symbol": "_IOSimpleLockLock",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+  },
+  {
+   "original": "0xfffffe000bd82a88",
+   "original_size": 32,
+   "original_sha256": "9ffd739bcd5f5facc7b27eaf77f1bb36e2392389fb250a4265692c71b07a6bd7",
+   "native_symbol": "_proc_task",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+  },
+  {
+   "original": "0xfffffe000b7fcac0",
+   "original_size": 12,
+   "original_sha256": "ab16f60986b1ad1e7f7672123e9680ac37777d3e1716b3a84fb0d4424e72a3b8",
+   "native_symbol": "_lck_mtx_gate_open",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+  },
+  {
+   "original": "0xfffffe000b7fcadc",
+   "original_size": 12,
+   "original_sha256": "2e0ef9f8c6a1011b3d13ec83d0e691a0a3723f570db65ac8999e92b1dc359595",
+   "native_symbol": "_lck_mtx_gate_steal",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly. CORRECTION (_lck_mtx_gate_steal): transposition, not a guess. kernel.release.t8142 defines _lck_mtx_gate_handoff at 0xfffffe0007390acc and _lck_mtx_gate_steal at 0xfffffe0007390adc, so the pinned originals 0xfffffe000b7fcacc and 0xfffffe000b7fcadc carry each other names."
+  },
+  {
+   "original": "0xfffffe000b7fc7c4",
+   "original_size": 400,
+   "original_sha256": "8adf2dd0413e1210f9848ebb75ea1826daf02bcbcc82ea43d40c8ba06c0bb4fd",
+   "native_symbol": "_lck_mtx_gate_try_close",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+  },
+  {
+   "original": "0xfffffe000b7fc954",
+   "original_size": 364,
+   "original_sha256": "3a0da20827dd0449d89b0a6d73caa38a2d873475fe924dbc364758bbeb438155",
+   "native_symbol": "_lck_mtx_gate_close",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+  },
+  {
+   "original": "0xfffffe000b7f09a8",
+   "original_size": 52,
+   "original_sha256": "a7394a21f437ac232ba26ef5096cbd561e2cd45b01ab1747a6de2c62befa0363",
+   "native_symbol": "_lck_mtx_free",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+  },
+  {
+   "original": "0xfffffe000bf72058",
+   "original_size": 144,
+   "original_sha256": "efa61872a08566a6a4af4a09fab77b9db776f2b14e841bb9f6bfb9a8c995c59a",
+   "native_symbol": "_IOMallocZeroData",
+   "evidence": "Identified in work/analysis/b11-image4-callmodel.md (tail-call target, mask-byte identity or __auth_got slot order); AppleImage4 calls it directly."
+  },
+  {
+   "original": "0xfffffe000b9fcb70",
+   "original_size": 376,
+   "original_sha256": "d903c3c6f8e2fa7ed8e39e9ef3f61421a3193082238de00fa3ee2f39e04070b9",
+   "native_symbol": "_vnode_getparent",
+   "evidence": "Twelve call sites from apfs and sandbox were left on the panic stub, and the anchor added earlier for this address named it _vnode_hold from shape evidence. The v25F84 kernelcache LC_SYMTAB assigns _vnode_getparent to exactly this start, and the b58 emit report shows the real _vnode_hold still stubbed at 0xfffffe000ba18610, so this address is the parent getter. Extent and bytes are the ones the matcher derives from LC_FUNCTION_STARTS."
+  },
+  {
+   "original": "0xfffffe000c034c3c",
+   "original_size": 628,
+   "original_sha256": "dd27765de0aac310eee466159d87fe59099cc7118b60b5fc8d14c2006d3fd390",
+   "native_symbol": "_ml_set_interrupts_enabled_with_debug",
+   "evidence": "The function's own strings are machine_routines_common.c and the 'debug exceptions enabled in kernel mode' format, whose %s argument is this function's __func__, so the name is in its own data; the native kernel has that symbol. Evidence path: work/analysis/ref/classify-b47.json (function-name strings matched against the native symbol table)."
+  },
+  {
+   "original": "0xfffffe000bf72fa4",
+   "original_size": 72,
+   "original_sha256": "b4019e6dd25d79e675455bf1c05fcf78c1b438d690bc261b0e1862f988d85c19",
+   "native_symbol": "_IORecursiveLockUnlock",
+   "evidence": "132 fileset call site(s) from driver.IODARTFamily, filesystems.apfs, iokit.IOGPUFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf72fa4 _IORecursiveLockUnlock and the extent is its own function-start boundary (72 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd44284",
+   "original_size": 44,
+   "original_sha256": "d396031d6626d1bc5afe5b74733dc8796392a42898a96c861dc2b072bc7ef275",
+   "native_symbol": "_csr_check",
+   "evidence": "87 fileset call site(s) from driver.AppleMobileFileIntegrity, filesystems.apfs, iokit.IOGPUFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd44284 _csr_check and the extent is its own function-start boundary (44 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b8a9824",
+   "original_size": 140,
+   "original_sha256": "8586a65b88ac0879e156c155ba5844b463378233422d1b4b1d612ddfdd4c1d7d",
+   "native_symbol": "_vm_kernel_addrhide",
+   "evidence": "50 fileset call site(s) from iokit.IOGPUFamily, iokit.IOSurface were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b8a9824 _vm_kernel_addrhide and the extent is its own function-start boundary (140 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd3dadc",
+   "original_size": 12,
+   "original_sha256": "616e3b44557d7376926e8ebd973895cf8ac7fe13cc148d0c3862c5e546e300b7",
+   "native_symbol": "_kauth_cred_getuid",
+   "evidence": "38 fileset call site(s) from filesystems.apfs, security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd3dadc _kauth_cred_getuid and the extent is its own function-start boundary (12 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b83ee9c",
+   "original_size": 16,
+   "original_sha256": "9f9f6b1bb260b03f8ac712a80b31abc7a36fd46ff99b3a0d9c90253981b2b67a",
+   "native_symbol": "_kernel_thread_start",
+   "evidence": "22 fileset call site(s) from driver.AppleARMWatchdogTimer, filesystems.apfs, iokit.IOMobileGraphicsFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b83ee9c _kernel_thread_start and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b96930c",
+   "original_size": 12,
+   "original_sha256": "aff4a75f0d212d486d017c8d97110d534bb110f461d01315abddea98305ba5e1",
+   "native_symbol": "_OSSynchronizeIO",
+   "evidence": "16 fileset call site(s) from iokit.IOAVFamily, iokit.IOGPUFamily, iokit.IOPCIFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b96930c _OSSynchronizeIO and the extent is its own function-start boundary (12 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd42630",
+   "original_size": 12,
+   "original_sha256": "ad3e8a99d11d381d70c1bf4f2bd52bc8c53ef10ed2406915b1deec6f429ff664",
+   "native_symbol": "_csblob_get_code_directory",
+   "evidence": "15 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd42630 _csblob_get_code_directory and the extent is its own function-start boundary (12 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c01fc88",
+   "original_size": 136,
+   "original_sha256": "5788ac2ff6f061765faec5e7a11afa93dac8a64398a5cedf53a4b023b36e96b0",
+   "native_symbol": "__ZN12IOUserClient27copyObjectForPortNameInTaskEP4taskjR11OSSharedPtrI8OSObjectE",
+   "evidence": "12 fileset call site(s) from iokit.IOSurface were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c01fc88 __ZN12IOUserClient27copyObjectForPortNameInTaskEP4taskjR11OSSharedPtrI8OSObjectE and the extent is its own function-start boundary (136 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b95f82c",
+   "original_size": 16,
+   "original_sha256": "7a19bae6d03d743d2533c0a4a80daae82d83cc1f203fead056edf43aaab50ae4",
+   "native_symbol": "_cpu_number",
+   "evidence": "11 fileset call site(s) from driver.AppleARMPlatform, driver.AppleARMWatchdogTimer, iokit.IOGraphicsFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b95f82c _cpu_number and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b8e78a4",
+   "original_size": 44,
+   "original_sha256": "bc74c5dddea0fba3483910e52839bb71601ab89dbf3f4b14b63eb85d28acc4c8",
+   "native_symbol": "_upl_page_present",
+   "evidence": "11 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b8e78a4 _upl_page_present and the extent is its own function-start boundary (44 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b8b45f8",
+   "original_size": 36,
+   "original_sha256": "1b37fa994d174e92a779ebabcaf43415410b3cc8482d574133a67e799220a973",
+   "native_symbol": "_vm_map_page_mask",
+   "evidence": "9 fileset call site(s) from driver.AppleMobileFileIntegrity, security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b8b45f8 _vm_map_page_mask and the extent is its own function-start boundary (36 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c01fc28",
+   "original_size": 96,
+   "original_sha256": "8bf6c9b3827d66cb7de72a363c58c3b34206724d4354944ef9b392265b30ef02",
+   "native_symbol": "__ZN12IOUserClient27copyObjectForPortNameInTaskEP4taskjPP8OSObject",
+   "evidence": "9 fileset call site(s) from iokit.IOGPUFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c01fc28 __ZN12IOUserClient27copyObjectForPortNameInTaskEP4taskjPP8OSObject and the extent is its own function-start boundary (96 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c0e1304",
+   "original_size": 164,
+   "original_sha256": "cc42e8703525f5ae876ac3cd3972840d692b77938211d360cbb14d525bdbaa9c",
+   "native_symbol": "_panic_with_options",
+   "evidence": "7 fileset call site(s) from driver.AppleARMWatchdogTimer were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c0e1304 _panic_with_options and the extent is its own function-start boundary (164 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba5a368",
+   "original_size": 120,
+   "original_sha256": "cc11f5ca7740feae0d8297b0126da83651d7866c86d50100504ee7d72377eb56",
+   "native_symbol": "_VNOP_STRATEGY",
+   "evidence": "7 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba5a368 _VNOP_STRATEGY and the extent is its own function-start boundary (120 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c034b38",
+   "original_size": 260,
+   "original_sha256": "c57340b047916a3f6183291a85c8055ceb6ed5755c8d10d085ad993decd53b34",
+   "native_symbol": "__ZN10IOReporter15configureReportEP19IOReportChannelListjPvS2_",
+   "evidence": "6 fileset call site(s) from driver.AppleARMPlatform, iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c034b38 __ZN10IOReporter15configureReportEP19IOReportChannelListjPvS2_ and the extent is its own function-start boundary (260 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c034eb0",
+   "original_size": 252,
+   "original_sha256": "2e130a92cc7c9d613749288c3f79d210591e8274b189ba2930814b6c45e5508b",
+   "native_symbol": "__ZN10IOReporter12updateReportEP19IOReportChannelListjPvS2_",
+   "evidence": "6 fileset call site(s) from driver.AppleARMPlatform, iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c034eb0 __ZN10IOReporter12updateReportEP19IOReportChannelListjPvS2_ and the extent is its own function-start boundary (252 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd42714",
+   "original_size": 120,
+   "original_sha256": "cefa0e431dd43266a03458e17632bfe8b972d6139b61b96f012f3960ce99fa13",
+   "native_symbol": "_csblob_os_entitlements_copy",
+   "evidence": "6 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd42714 _csblob_os_entitlements_copy and the extent is its own function-start boundary (120 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b820f8c",
+   "original_size": 80,
+   "original_sha256": "7126cf683765c2f03b83c05e50b4f6c30596d17f6dba292c366205a3226835c6",
+   "native_symbol": "_smr_leave",
+   "evidence": "6 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b820f8c _smr_leave and the extent is its own function-start boundary (80 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba52a98",
+   "original_size": 88,
+   "original_sha256": "5991efae9d15503a754bdb357fa6a019e91bb699acbb74d2cb29f0334be23016",
+   "native_symbol": "_vfs_vnodecovered_noblock",
+   "evidence": "6 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba52a98 _vfs_vnodecovered_noblock and the extent is its own function-start boundary (88 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdbb014",
+   "original_size": 76,
+   "original_sha256": "36b27aca28c642e8cd046324bf42f7b9797b61b945a271918fa443b61dbc18c6",
+   "native_symbol": "_set_local_signing_public_key",
+   "evidence": "5 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdbb014 _set_local_signing_public_key and the extent is its own function-start boundary (76 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd864c0",
+   "original_size": 16,
+   "original_sha256": "c5f06b76ed5fa934b55e319e2ffd8a6c13bea004f9a0a42470b21f90ba57a325",
+   "native_symbol": "_proc_is_forcing_hfs_case_sensitivity",
+   "evidence": "5 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd864c0 _proc_is_forcing_hfs_case_sensitivity and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bf72290",
+   "original_size": 136,
+   "original_sha256": "707142cd289833bf8712d545325f18897192c883d846a85d23b7e936ab8d4ea2",
+   "native_symbol": "_IOFreeDataShareable",
+   "evidence": "5 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf72290 _IOFreeDataShareable and the extent is its own function-start boundary (136 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd33c4",
+   "original_size": 136,
+   "original_sha256": "8a7ae707affa82d4f1d511d478d23489edeec8a119ba13d722843f56fc95e552",
+   "native_symbol": "__ZN13IOEventSource8openGateEv",
+   "evidence": "5 fileset call site(s) from iokit.IOAVFamily, iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd33c4 __ZN13IOEventSource8openGateEv and the extent is its own function-start boundary (136 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd344c",
+   "original_size": 140,
+   "original_sha256": "9db53a928c040fb486489ae8580d4f07af31ca063b015d3e15187bc7c55287af",
+   "native_symbol": "__ZN13IOEventSource9closeGateEv",
+   "evidence": "5 fileset call site(s) from iokit.IOAVFamily, iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd344c __ZN13IOEventSource9closeGateEv and the extent is its own function-start boundary (140 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfdd354",
+   "original_size": 324,
+   "original_sha256": "e365d325dcef7818734d8da11ffdf3b1e7529dd94adae6ffd9da3d0cc90d1d21",
+   "native_symbol": "__ZN24IOBufferMemoryDescriptor9withBytesEPKvmjb",
+   "evidence": "5 fileset call site(s) from iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfdd354 __ZN24IOBufferMemoryDescriptor9withBytesEPKvmjb and the extent is its own function-start boundary (324 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd89234",
+   "original_size": 12,
+   "original_sha256": "6093fdd3d959ebd2e704ba0b530470ceee27b3b2f81d673ccc8cdddeed17b8da",
+   "native_symbol": "_proc_pgrpid",
+   "evidence": "5 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd89234 _proc_pgrpid and the extent is its own function-start boundary (12 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c06cbcc",
+   "original_size": 16,
+   "original_sha256": "36c614153927e889ba546ff5d63d9e12d41556108c9ba5f965a537c849f64fef",
+   "native_symbol": "__ZN17IONVRAMControllerD2Ev",
+   "evidence": "4 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c06cbcc __ZN17IONVRAMControllerD2Ev and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd426a8",
+   "original_size": 108,
+   "original_sha256": "3a9ecd868e0e6e3b460dee039ca252e3335e79fb0ff69649382b7331c704e9cd",
+   "native_symbol": "_csblob_os_entitlements_set",
+   "evidence": "4 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd426a8 _csblob_os_entitlements_set and the extent is its own function-start boundary (108 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdba828",
+   "original_size": 44,
+   "original_sha256": "f41c97cd2671ba62bdfe93188abfbc3b108cdde6fa3f13c22a20acf672b8b8c3",
+   "native_symbol": "_restricted_execution_mode_state",
+   "evidence": "4 fileset call site(s) from driver.AppleMobileFileIntegrity, security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdba828 _restricted_execution_mode_state and the extent is its own function-start boundary (44 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdbb060",
+   "original_size": 84,
+   "original_sha256": "02ae5ebade69a81ac74bcf38109a61c58f713ad66f6c7a446a3e07dc76933f9e",
+   "native_symbol": "_get_local_signing_public_key",
+   "evidence": "4 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdbb060 _get_local_signing_public_key and the extent is its own function-start boundary (84 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b7fb164",
+   "original_size": 364,
+   "original_sha256": "778bb20ae969ecb76ee9db40928fbf9dabd72d55915264787ce2323864059774",
+   "native_symbol": "_lck_rw_gate_close",
+   "evidence": "4 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b7fb164 _lck_rw_gate_close and the extent is its own function-start boundary (364 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b7fb2d0",
+   "original_size": 12,
+   "original_sha256": "69780f93a2545b12bedced7cdd59e6362bc76457186848f337b32cfafc711571",
+   "native_symbol": "_lck_rw_gate_open",
+   "evidence": "4 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b7fb2d0 _lck_rw_gate_open and the extent is its own function-start boundary (12 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b8687c8",
+   "original_size": 60,
+   "original_sha256": "92ddfc5ac4ab009f1d16a64656566f45b68d1cc70fbf7e39b930705a80104662",
+   "native_symbol": "_mach_to_bsd_errno",
+   "evidence": "4 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b8687c8 _mach_to_bsd_errno and the extent is its own function-start boundary (60 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b8e7908",
+   "original_size": 60,
+   "original_sha256": "0c1008028891282d605d4c849d5df26b495a581d2026d819f28ccdf546388839",
+   "native_symbol": "_upl_valid_page",
+   "evidence": "4 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b8e7908 _upl_valid_page and the extent is its own function-start boundary (60 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba224b8",
+   "original_size": 188,
+   "original_sha256": "9cfb5446adcd86eeaf14ebeb4fb65b3a3ff508b8d125287b5a1e24d7bde754e8",
+   "native_symbol": "_vnode_iocount",
+   "evidence": "4 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba224b8 _vnode_iocount and the extent is its own function-start boundary (188 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd0418",
+   "original_size": 384,
+   "original_sha256": "19f220733d995553e6605d97f2be720fea36dece9fe30b3df70cb912c9a43486",
+   "native_symbol": "__ZN10IOWorkLoop15runEventSourcesEv",
+   "evidence": "4 fileset call site(s) from iokit.IOGraphicsFamily, iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd0418 __ZN10IOWorkLoop15runEventSourcesEv and the extent is its own function-start boundary (384 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd0fac",
+   "original_size": 516,
+   "original_sha256": "eb5b51edebaded3ec7fd7330c5405fa190baf1ffcb8b0a2ff1dfc8a5d32ed4eb",
+   "native_symbol": "__ZN10IOWorkLoop10threadMainEv",
+   "evidence": "4 fileset call site(s) from iokit.IOGraphicsFamily, iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd0fac __ZN10IOWorkLoop10threadMainEv and the extent is its own function-start boundary (516 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c02ce60",
+   "original_size": 400,
+   "original_sha256": "a8c3ddd7e1da520a16c48d010b86b27aa092e6ff28a340228f0a7926587a54e9",
+   "native_symbol": "_IOCircularDataQueueEnqueue",
+   "evidence": "4 fileset call site(s) from iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c02ce60 _IOCircularDataQueueEnqueue and the extent is its own function-start boundary (400 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfa14cc",
+   "original_size": 204,
+   "original_sha256": "c6716a06ad4869abbb6d33075d5a216a6cb4075351fca23ae5025f5c8256f491",
+   "native_symbol": "__ZN9IOService15publishResourceEPK8OSSymbolP8OSObject",
+   "evidence": "3 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfa14cc __ZN9IOService15publishResourceEPK8OSSymbolP8OSObject and the extent is its own function-start boundary (204 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfdd900",
+   "original_size": 40,
+   "original_sha256": "9128c527e2274be1c86889c9e538f6a2b1041517fd46c2d71a00945e22450866",
+   "native_symbol": "__ZN12IODMACommand12OutputHost32EPS_NS_9Segment64EPvj",
+   "evidence": "3 fileset call site(s) from driver.AppleARMPlatform, driver.AppleIISController, iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfdd900 __ZN12IODMACommand12OutputHost32EPS_NS_9Segment64EPvj and the extent is its own function-start boundary (40 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b95f7d8",
+   "original_size": 84,
+   "original_sha256": "f841c75abd6c942c741f6cbf59b67f218aca7267efca8c454506523d637a1213",
+   "native_symbol": "_cpu_to_processor",
+   "evidence": "3 fileset call site(s) from driver.AppleARMWatchdogTimer were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b95f7d8 _cpu_to_processor and the extent is its own function-start boundary (84 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd425f8",
+   "original_size": 12,
+   "original_sha256": "bc7652851be43ab68bd0500b039dbfa5f72e2dbdda84e76998e68fb4ce3a225e",
+   "native_symbol": "_csblob_get_auxiliary_info",
+   "evidence": "3 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd425f8 _csblob_get_auxiliary_info and the extent is its own function-start boundary (12 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd44278",
+   "original_size": 12,
+   "original_sha256": "461f0cd8c82fda303d244bd2e7d866dfa0a3a0e88e4e29eeaa32547988cb1a92",
+   "native_symbol": "_launch_constraint_data_get_launch_type",
+   "evidence": "3 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd44278 _launch_constraint_data_get_launch_type and the extent is its own function-start boundary (12 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b7fac8c",
+   "original_size": 392,
+   "original_sha256": "482be36bcf846f3bdb593dde995e4354952a0a456fd779f8fd85ea2f32f1face",
+   "native_symbol": "_lck_rw_gate_destroy",
+   "evidence": "3 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b7fac8c _lck_rw_gate_destroy and the extent is its own function-start boundary (392 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b8e78d0",
+   "original_size": 56,
+   "original_sha256": "f1af82d101a3cacbfbc14ce825902314c70e6f3d1ad52658a000d193bb6e36d3",
+   "native_symbol": "_upl_dirty_page",
+   "evidence": "3 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b8e78d0 _upl_dirty_page and the extent is its own function-start boundary (56 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b9fd3d8",
+   "original_size": 396,
+   "original_sha256": "273893c6b2e2c5959e452fe89ba32965e0d0373387ccaa90f2d1a96f2bf9b7e7",
+   "native_symbol": "_vnode_getfirmlink",
+   "evidence": "3 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b9fd3d8 _vnode_getfirmlink and the extent is its own function-start boundary (396 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b9fd564",
+   "original_size": 176,
+   "original_sha256": "32f5e7dda9f5c0f1820e7bb40972bca7ce67f5d60563f93c1b9316d929c0d601",
+   "native_symbol": "_vnode_setmultipath",
+   "evidence": "3 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b9fd564 _vnode_setmultipath and the extent is its own function-start boundary (176 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba57744",
+   "original_size": 132,
+   "original_sha256": "d25699c2a14531173ac2118723d2ebf25ff9a64d0ce0a32faefe62b5d691633c",
+   "native_symbol": "_VNOP_FSYNC",
+   "evidence": "3 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba57744 _VNOP_FSYNC and the extent is its own function-start boundary (132 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba5ac6c",
+   "original_size": 76,
+   "original_sha256": "1ef45c5fb14e9a795d75f76210e7b8643f3989ebc13fddda439ab56e77145ef8",
+   "native_symbol": "_need_fsevent",
+   "evidence": "3 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba5ac6c _need_fsevent and the extent is its own function-start boundary (76 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c092214",
+   "original_size": 244,
+   "original_sha256": "ade62485c36d099ce98e412f26a9696f9ae64f5127d54cfc0a5643f935336567",
+   "native_symbol": "__ZN14IOPMrootDomain13copyPMSettingEP8OSSymbol",
+   "evidence": "3 fileset call site(s) from iokit.IOGraphicsFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c092214 __ZN14IOPMrootDomain13copyPMSettingEP8OSSymbol and the extent is its own function-start boundary (244 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd7ca90",
+   "original_size": 104,
+   "original_sha256": "334f7149f8079830fd472899535b83ba12abe1593119132b89ab2efceaab0f9e",
+   "native_symbol": "_persona_put",
+   "evidence": "3 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd7ca90 _persona_put and the extent is its own function-start boundary (104 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b95e574",
+   "original_size": 496,
+   "original_sha256": "f2f12079c071699ce2145af30e8617b075b8073126b403ed84ccc637441d3ef7",
+   "native_symbol": "_ml_arm_sleep",
+   "evidence": "2 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b95e574 _ml_arm_sleep and the extent is its own function-start boundary (496 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b95f83c",
+   "original_size": 16,
+   "original_sha256": "795052969b9c1f2ccf478836548f2e53befefd183eeb358dc836a8752eba3068",
+   "native_symbol": "_ml_get_wake_timebase",
+   "evidence": "2 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b95f83c _ml_get_wake_timebase and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b9691b0",
+   "original_size": 60,
+   "original_sha256": "b2abba24172aa23b5c8b4a6573d9aa3f23a7a0a65a3328d891d0ff84d882bac8",
+   "native_symbol": "_ml_cpu_signal",
+   "evidence": "2 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b9691b0 _ml_cpu_signal and the extent is its own function-start boundary (60 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c0013a0",
+   "original_size": 208,
+   "original_sha256": "39294f8b7954259795383c8915e605256b9ba765294a6b163e1b630b58399fab",
+   "native_symbol": "_IOCPURunPlatformActiveActions",
+   "evidence": "2 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c0013a0 _IOCPURunPlatformActiveActions and the extent is its own function-start boundary (208 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b804108",
+   "original_size": 524,
+   "original_sha256": "c451e3d546b56c428dfd77c36194166b98938a51aff92bb95cd5a2118fe3ba07",
+   "native_symbol": "_processor_info",
+   "evidence": "2 fileset call site(s) from driver.AppleARMWatchdogTimer were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b804108 _processor_info and the extent is its own function-start boundary (524 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfde404",
+   "original_size": 272,
+   "original_sha256": "12b7b594e177ad21db66303fbf61ebdf096c6e060510f3d5192a186f0f56f928",
+   "native_symbol": "__ZN12IODMACommand11synchronizeEj",
+   "evidence": "2 fileset call site(s) from driver.AppleIISController, iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfde404 __ZN12IODMACommand11synchronizeEj and the extent is its own function-start boundary (272 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b9917cc",
+   "original_size": 112,
+   "original_sha256": "ee311c2c4c16c11af9548368a7f6159b9f45264313a81a2292330004712cc428",
+   "native_symbol": "_ml_satisfies_x86_64_requirements",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b9917cc _ml_satisfies_x86_64_requirements and the extent is its own function-start boundary (112 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd42604",
+   "original_size": 44,
+   "original_sha256": "476288eb3fc32661d6e86054ad7463e9ed4a7284455f7a82a9997c1e6d05d7d2",
+   "native_symbol": "_csblob_get_trust_level",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd42604 _csblob_get_trust_level and the extent is its own function-start boundary (44 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd4278c",
+   "original_size": 40,
+   "original_sha256": "59a7f8afe5bf9b6bd6caf10e3b9a0c32f300287c9475dfa1ebac9d50055bcd59",
+   "native_symbol": "_csblob_os_entitlements_get",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd4278c _csblob_os_entitlements_get and the extent is its own function-start boundary (40 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd43208",
+   "original_size": 120,
+   "original_sha256": "1147f4c416f371616ddcefe161eb6b305fca9e02e2aa51017e54be2b11aaf09a",
+   "native_symbol": "_csfg_get_supplement_cdhash",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd43208 _csfg_get_supplement_cdhash and the extent is its own function-start boundary (120 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd43280",
+   "original_size": 120,
+   "original_sha256": "782838a2c06759580ae0cd9c1a0bacefef0dbb0ac09bdc48b08893672f74f385",
+   "native_symbol": "_csfg_get_supplement_linkage_cdhash",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd43280 _csfg_get_supplement_linkage_cdhash and the extent is its own function-start boundary (120 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd43834",
+   "original_size": 276,
+   "original_sha256": "b22053b5f68e45571b0e26ff20615b5d85b2d2acda369bfd321eceb86a212c7a",
+   "native_symbol": "_csfg_get_supplement_teamid",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd43834 _csfg_get_supplement_teamid and the extent is its own function-start boundary (276 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd4399c",
+   "original_size": 72,
+   "original_sha256": "6e82819d5966af42a2447282305abbf097725aa1b8456d37f5cae38b75e71d8b",
+   "native_symbol": "_csfg_get_supplement_csblob",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd4399c _csfg_get_supplement_csblob and the extent is its own function-start boundary (72 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd8a834",
+   "original_size": 168,
+   "original_sha256": "707bc9b940ff6a9223a2f8af621febaedc9aded815305796d8489220d3700d15",
+   "native_symbol": "_proc_chrooted",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd8a834 _proc_chrooted and the extent is its own function-start boundary (168 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdb9238",
+   "original_size": 128,
+   "original_sha256": "7e481619d14f77a4422db0799ed457da37a5ea4ef049b8678c4ca79f074c1b7a",
+   "native_symbol": "_check_trust_cache_runtime_for_uuid",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdb9238 _check_trust_cache_runtime_for_uuid and the extent is its own function-start boundary (128 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdba6a4",
+   "original_size": 80,
+   "original_sha256": "d3a3fbb2709c0d9428e7615002e491d6ead8f988b37564f17120b077687590b0",
+   "native_symbol": "_enable_developer_mode",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdba6a4 _enable_developer_mode and the extent is its own function-start boundary (80 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdba7e8",
+   "original_size": 64,
+   "original_sha256": "401316fd45813b372dc93709958139e75eeefee0249e96f1a7990118d9869b99",
+   "native_symbol": "_restricted_execution_mode_enable",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdba7e8 _restricted_execution_mode_enable and the extent is its own function-start boundary (64 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdba854",
+   "original_size": 72,
+   "original_sha256": "db148b1706fcca4e83e38f2419df3a8c40d7ffd29d4b506e0558c0271b6670a2",
+   "native_symbol": "_update_csm_device_state",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdba854 _update_csm_device_state and the extent is its own function-start boundary (72 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdba89c",
+   "original_size": 100,
+   "original_sha256": "eeeef6a46b7316d682acd0654807735777962b0d4cb394d9df5df16a199a9f10",
+   "native_symbol": "_complete_security_boot_mode",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdba89c _complete_security_boot_mode and the extent is its own function-start boundary (100 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdba900",
+   "original_size": 8,
+   "original_sha256": "224d4df0836ae187285a713f6eab38d506f106d5205135a58ab1548d5684fce9",
+   "native_symbol": "_garbage_collect_provisioning_profiles",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdba900 _garbage_collect_provisioning_profiles and the extent is its own function-start boundary (8 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdbb004",
+   "original_size": 8,
+   "original_sha256": "ef2539ac1f46e45a1abbac32b87b8219249515dfd5be7047340ab253b03ae809",
+   "native_symbol": "_set_compilation_service_cdhash",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdbb004 _set_compilation_service_cdhash and the extent is its own function-start boundary (8 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdbb00c",
+   "original_size": 8,
+   "original_sha256": "53e1b504a89cfb07c054659195b8d72c0fa777ea48df9a61c9ad57cebaa92299",
+   "native_symbol": "_match_compilation_service_cdhash",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdbb00c _match_compilation_service_cdhash and the extent is its own function-start boundary (8 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdbb0b4",
+   "original_size": 76,
+   "original_sha256": "94f1ffb12d98e2fc35ae4744d620b4dc023a1676d2ee8f7fa6ca1c565d76e8e2",
+   "native_symbol": "_unrestrict_local_signing_cdhash",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdbb0b4 _unrestrict_local_signing_cdhash and the extent is its own function-start boundary (76 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdbb100",
+   "original_size": 256,
+   "original_sha256": "200318383164e75115a69cbe17569dc8f1a0f2b30d096c1a23e2b61287661e66",
+   "native_symbol": "_csm_resolve_os_entitlements_from_proc",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdbb100 _csm_resolve_os_entitlements_from_proc and the extent is its own function-start boundary (256 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bddc514",
+   "original_size": 152,
+   "original_sha256": "7302a0657fb45fcce0d3f2a314f7f82aac0ae72c96ea038b1e1709dd4fba3c4e",
+   "native_symbol": "_csblob_register_profile",
+   "evidence": "2 fileset call site(s) from driver.AppleMobileFileIntegrity were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bddc514 _csblob_register_profile and the extent is its own function-start boundary (152 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b81b08c",
+   "original_size": 764,
+   "original_sha256": "6ad94ea5869831d501a27594695aa5681c3ea2017e2cf1f337f0e355411786ad",
+   "native_symbol": "_sched_disable_acc_rail",
+   "evidence": "2 fileset call site(s) from driver.ApplePMGR were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b81b08c _sched_disable_acc_rail and the extent is its own function-start boundary (764 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b8342b0",
+   "original_size": 440,
+   "original_sha256": "7bfeb331c0702e70b97bb2e83818e60edfd9885eeaf23a058aaf3cbb613e003f",
+   "native_symbol": "_task_update_logical_writes",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b8342b0 _task_update_logical_writes and the extent is its own function-start boundary (440 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b97703c",
+   "original_size": 16,
+   "original_sha256": "3cb9a5f71e39ac30ccfdc87a5b516902fcc5cfb4338414f1ea019d7c4e4e473a",
+   "native_symbol": "__get_commpage_priv_address",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b97703c __get_commpage_priv_address and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b9fa528",
+   "original_size": 452,
+   "original_sha256": "d790b58b2655ba311667a60dd3e4acb0b5d41b4346fcaceab5c4dc575b9c56c3",
+   "native_symbol": "_fs_buffer_cache_gc_register",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b9fa528 _fs_buffer_cache_gc_register and the extent is its own function-start boundary (452 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b9fa6ec",
+   "original_size": 240,
+   "original_sha256": "b8e10e2af6c4509cb5e998bb6dc9f5260fab6b7c818c0695ab5678fe5a0c2099",
+   "native_symbol": "_fs_buffer_cache_gc_unregister",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b9fa6ec _fs_buffer_cache_gc_unregister and the extent is its own function-start boundary (240 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba1de78",
+   "original_size": 324,
+   "original_sha256": "1a03f1befd3213ee613b5b0116128497395d160abb7fbeb391c38a20b1406e50",
+   "native_symbol": "_vfs_getvfs_with_vfsops",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba1de78 _vfs_getvfs_with_vfsops and the extent is its own function-start boundary (324 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba1e09c",
+   "original_size": 328,
+   "original_sha256": "41ec4bb200106136c9789faf453095395ac5b51946da43cead0eb69cfefce9a4",
+   "native_symbol": "_vfs_getnewfsid",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba1e09c _vfs_getnewfsid and the extent is its own function-start boundary (328 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba53c48",
+   "original_size": 220,
+   "original_sha256": "c33ffce24975606bc0383ec7a7584acea35773a8fca1fc3f254d23f5ca3d7c5a",
+   "native_symbol": "_vfs_setsnapshotmntflags",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba53c48 _vfs_setsnapshotmntflags and the extent is its own function-start boundary (220 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba6d14c",
+   "original_size": 20,
+   "original_sha256": "78473c780c8d6a0f490b9e604316a0714e0fd3681b7cd6357e2f0bc416c32ca5",
+   "native_symbol": "_throttle_lowpri_window",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba6d14c _throttle_lowpri_window and the extent is its own function-start boundary (20 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd2e2bc",
+   "original_size": 240,
+   "original_sha256": "17e5b4d31990bf9cad79a44de31c3f224778851d9e92bd6769f3a11c6278f239",
+   "native_symbol": "_ktriage_unregister_subsystem_strings",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd2e2bc _ktriage_unregister_subsystem_strings and the extent is its own function-start boundary (240 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd3b804",
+   "original_size": 1628,
+   "original_sha256": "4f5cee7a7b4992d825ea5af8a14f035d485ce870bee5d10eb36d86e54453289d",
+   "native_symbol": "_kauth_cred_ismember_gid",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd3b804 _kauth_cred_ismember_gid and the extent is its own function-start boundary (1628 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd3db24",
+   "original_size": 12,
+   "original_sha256": "7c921fc862f95f93030a1bb1528f153f8ef915bb3f1bdd710390d820d403e1c5",
+   "native_symbol": "_kauth_cred_getgid",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd3db24 _kauth_cred_getgid and the extent is its own function-start boundary (12 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd81b84",
+   "original_size": 212,
+   "original_sha256": "be58048403ced60c598fb541eae097cec4b52e7457e7313b61aee17ec57d5e2a",
+   "native_symbol": "_proc_is_simulated",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd81b84 _proc_is_simulated and the extent is its own function-start boundary (212 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd864e0",
+   "original_size": 124,
+   "original_sha256": "411398a10b43d81ef9811788c5fff6314f1eef3854d1ba15a133621f9fffc370",
+   "native_symbol": "_proc_skip_mtime_update",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd864e0 _proc_skip_mtime_update and the extent is its own function-start boundary (124 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd8655c",
+   "original_size": 16,
+   "original_sha256": "501b60be47e03af34d9a457e5e3c5ec483bb4749dc30788acc5f936efdef7ea4",
+   "native_symbol": "_proc_allow_low_space_writes",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd8655c _proc_allow_low_space_writes and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b968c60",
+   "original_size": 72,
+   "original_sha256": "dfd39063b13533082f4fa7e6b40d4095db839940b99af4f96ac5f72f8873439f",
+   "native_symbol": "_ml_stack_remaining",
+   "evidence": "2 fileset call site(s) from iokit.IOCryptoAcceleratorFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b968c60 _ml_stack_remaining and the extent is its own function-start boundary (72 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bff5f90",
+   "original_size": 100,
+   "original_sha256": "1fcdf39b50d06d82c4099e3d723b9314804ad24a90e041a3487229a648616854",
+   "native_symbol": "__ZN21IOSubMemoryDescriptor8redirectEP4taskb",
+   "evidence": "2 fileset call site(s) from iokit.IOGPUFamily, iokit.IOStorageFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bff5f90 __ZN21IOSubMemoryDescriptor8redirectEP4taskb and the extent is its own function-start boundary (100 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bf71dc4",
+   "original_size": 8,
+   "original_sha256": "224d4df0836ae187285a713f6eab38d506f106d5205135a58ab1548d5684fce9",
+   "native_symbol": "_IOMallocPageable",
+   "evidence": "2 fileset call site(s) from iokit.IOGraphicsFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf71dc4 _IOMallocPageable and the extent is its own function-start boundary (8 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c02d224",
+   "original_size": 68,
+   "original_sha256": "733c3d1deeb6a84f14f002c6bc55029f14eadbd3c09935b3cf0bde76e4a06179",
+   "native_symbol": "_IOCircularDataQueueCopyLatest",
+   "evidence": "2 fileset call site(s) from iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c02d224 _IOCircularDataQueueCopyLatest and the extent is its own function-start boundary (68 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b7ff0f4",
+   "original_size": 28,
+   "original_sha256": "42cf30ea9d5a85989b4286a3c903b0075346d0cde8bb12cc0ca3cd97646a217d",
+   "native_symbol": "_ml_io_read8",
+   "evidence": "2 fileset call site(s) from iokit.IOPCIFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b7ff0f4 _ml_io_read8 and the extent is its own function-start boundary (28 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b7ff110",
+   "original_size": 28,
+   "original_sha256": "7828bec108ff813c091407495a7e46b4ae3170e013a07dc191bee7fb83532461",
+   "native_symbol": "_ml_io_read16",
+   "evidence": "2 fileset call site(s) from iokit.IOPCIFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b7ff110 _ml_io_read16 and the extent is its own function-start boundary (28 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b7ff12c",
+   "original_size": 28,
+   "original_sha256": "08187cdc3e0071197dc59833f24e96c3159ffef986321ffe1efa070542317599",
+   "native_symbol": "_ml_io_read32",
+   "evidence": "2 fileset call site(s) from iokit.IOPCIFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b7ff12c _ml_io_read32 and the extent is its own function-start boundary (28 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c0f2be0",
+   "original_size": 16,
+   "original_sha256": "270e3f8691f72932d5b54c15ba75782fa0a900b4afe6ad4133552961da730434",
+   "native_symbol": "_kernel_image4_storage_data",
+   "evidence": "2 fileset call site(s) from security.AppleImage4 were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c0f2be0 _kernel_image4_storage_data and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bb090e0",
+   "original_size": 140,
+   "original_sha256": "e3c3fb20d19d59040e54739a5b7a7f48ecdbf40110332e1d64c63350cbf93b6b",
+   "native_symbol": "_ifnet_get_address_list_family",
+   "evidence": "2 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bb090e0 _ifnet_get_address_list_family and the extent is its own function-start boundary (140 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdba760",
+   "original_size": 68,
+   "original_sha256": "e49960e23b62050bb536f94d6840645c1ed0e12e98ce5215e862599eb9b601e1",
+   "native_symbol": "_research_mode_state",
+   "evidence": "2 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdba760 _research_mode_state and the extent is its own function-start boundary (68 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bdba7a4",
+   "original_size": 68,
+   "original_sha256": "21d9fdc411ca1244c845a96fe4e8b237d3be43a1e985f73a549ce421ed29ad9a",
+   "native_symbol": "_extended_research_mode_state",
+   "evidence": "2 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bdba7a4 _extended_research_mode_state and the extent is its own function-start boundary (68 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000be245ac",
+   "original_size": 280,
+   "original_sha256": "1975e97d927d405f5f8e48babf0af3e3082afa2e023b058b03b56134e3dfdd9d",
+   "native_symbol": "_sock_getsockname",
+   "evidence": "2 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000be245ac _sock_getsockname and the extent is its own function-start boundary (280 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c0d1174",
+   "original_size": 8,
+   "original_sha256": "d3da021a9087025320250528bc1e7430140aba1181c902cc3df22e1ffeb23e7d",
+   "native_symbol": "_mac_schedule_telemetry",
+   "evidence": "2 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c0d1174 _mac_schedule_telemetry and the extent is its own function-start boundary (8 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfff780",
+   "original_size": 196,
+   "original_sha256": "66b751b9c0a476e162430cf962ad3e27e7e012d8c21b553c7ce87b5828aaffad",
+   "native_symbol": "__ZNK5IOCPU19serializePropertiesEP11OSSerialize",
+   "evidence": "1 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfff780 __ZNK5IOCPU19serializePropertiesEP11OSSerialize and the extent is its own function-start boundary (196 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfff844",
+   "original_size": 20,
+   "original_sha256": "03287ab551c8128755aea67e215f91c69bea1fa88a65a52c5e9891a375c6d8c2",
+   "native_symbol": "__ZNK5IOCPU11getPropertyEPK8OSSymbol",
+   "evidence": "1 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfff844 __ZNK5IOCPU11getPropertyEPK8OSSymbol and the extent is its own function-start boundary (20 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000c013008",
+   "original_size": 288,
+   "original_sha256": "0adf277fcaef4f48982e26abd6def7730fed176eb2be95a11c56b1f35288fd01",
+   "native_symbol": "__ZN21IOInterruptController15enableInterruptEP9IOServicei",
+   "evidence": "1 fileset call site(s) from driver.AppleARMPlatform were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000c013008 __ZN21IOInterruptController15enableInterruptEP9IOServicei and the extent is its own function-start boundary (288 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bf00fe8",
+   "original_size": 168,
+   "original_sha256": "e5893f29bd72ad054a0067d56682f04a5cf3dfa8bdb017b1533e6694d1115621",
+   "native_symbol": "__ZNK7OSArray9isEqualToEPK15OSMetaClassBase",
+   "evidence": "1 fileset call site(s) from iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf00fe8 __ZNK7OSArray9isEqualToEPK15OSMetaClassBase and the extent is its own function-start boundary (168 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bf397a0",
+   "original_size": 88,
+   "original_sha256": "3226729b366c9c0fa01ddfd0f86f32e87c3ab036f0c5b8de8a7eb28b0d8880a3",
+   "native_symbol": "__ZN5OSSet15flushCollectionEv",
+   "evidence": "1 fileset call site(s) from iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf397a0 __ZN5OSSet15flushCollectionEv and the extent is its own function-start boundary (88 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bf399b4",
+   "original_size": 168,
+   "original_sha256": "6797f74dcfd0fa243afb93872dfa94fa2e21b51722b1adfe7aa10a9aa9493398",
+   "native_symbol": "__ZNK5OSSet9isEqualToEPK15OSMetaClassBase",
+   "evidence": "1 fileset call site(s) from iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf399b4 __ZNK5OSSet9isEqualToEPK15OSMetaClassBase and the extent is its own function-start boundary (168 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bf39a6c",
+   "original_size": 368,
+   "original_sha256": "b4fe2411501afb2598ab267e7a7f6d50f13698e8ccb7408a1d32b33b4b648b4e",
+   "native_symbol": "__ZNK5OSSet9serializeEP11OSSerialize",
+   "evidence": "1 fileset call site(s) from iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf39a6c __ZNK5OSSet9serializeEP11OSSerialize and the extent is its own function-start boundary (368 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd5414",
+   "original_size": 160,
+   "original_sha256": "eae1d3b0da09eb8cd95d735766cb09249d95dd02899c8c61437061ea532b8ba9",
+   "native_symbol": "__ZN13IOCommandGate6enableEv",
+   "evidence": "1 fileset call site(s) from iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd5414 __ZN13IOCommandGate6enableEv and the extent is its own function-start boundary (160 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd56a0",
+   "original_size": 92,
+   "original_sha256": "049d191caf499eef758ad4156d859153c9568b06b6ea8c5a2bff56c3b21b5972",
+   "native_symbol": "__ZN13IOCommandGate4freeEv",
+   "evidence": "1 fileset call site(s) from iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd56a0 __ZN13IOCommandGate4freeEv and the extent is its own function-start boundary (92 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd9d90",
+   "original_size": 128,
+   "original_sha256": "615ef712b286846898cc1662a6da4134948b4f3bc9e7a84f05eea858adf0b4d0",
+   "native_symbol": "__ZN18IOTimerEventSource10setTimeoutEjyy",
+   "evidence": "1 fileset call site(s) from iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd9d90 __ZN18IOTimerEventSource10setTimeoutEjyy and the extent is its own function-start boundary (128 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfda8e4",
+   "original_size": 168,
+   "original_sha256": "2065e9374d475461445da7d22de70f6f0e93de1e92b1d6821353cd68001842fa",
+   "native_symbol": "__ZN18IOTimerEventSource11setWorkLoopEP10IOWorkLoop",
+   "evidence": "1 fileset call site(s) from iokit.IOAVFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfda8e4 __ZN18IOTimerEventSource11setWorkLoopEP10IOWorkLoop and the extent is its own function-start boundary (168 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bff6248",
+   "original_size": 84,
+   "original_sha256": "04fc0c0d5c9d9b4ae461b6c182a08773a2ac9c4f11053bd28df078ff15325f69",
+   "native_symbol": "__ZN21IOSubMemoryDescriptor4freeEv",
+   "evidence": "1 fileset call site(s) from iokit.IOGPUFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bff6248 __ZN21IOSubMemoryDescriptor4freeEv and the extent is its own function-start boundary (84 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd066c",
+   "original_size": 324,
+   "original_sha256": "e6f42a0b3690a6b7b81a8414c2cd000eab2acc0187554ca9a07797785aec14ee",
+   "native_symbol": "__ZN10IOWorkLoop9sleepGateEPvj",
+   "evidence": "1 fileset call site(s) from iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd066c __ZN10IOWorkLoop9sleepGateEPvj and the extent is its own function-start boundary (324 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd07b0",
+   "original_size": 172,
+   "original_sha256": "76560293daca59fd3553a96a33e5d4fdc4d4da7288dca1a206460cdb8b816b83",
+   "native_symbol": "__ZN10IOWorkLoop12tryCloseGateEv",
+   "evidence": "1 fileset call site(s) from iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd07b0 __ZN10IOWorkLoop12tryCloseGateEv and the extent is its own function-start boundary (172 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfd0904",
+   "original_size": 212,
+   "original_sha256": "ed9200c0a43b9d566ad42a0269c325103bf2ea449b4a73e46ee6640b8cc5f954",
+   "native_symbol": "__ZN10IOWorkLoop8openGateEv",
+   "evidence": "1 fileset call site(s) from iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfd0904 __ZN10IOWorkLoop8openGateEv and the extent is its own function-start boundary (212 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfe0b8c",
+   "original_size": 40,
+   "original_sha256": "7b4649bc8eb8ed3ae87fb5efc6a734390f930bb9ee32b58efc1482d1265ef750",
+   "native_symbol": "__ZN12IODMACommand12OutputHost64EPS_NS_9Segment64EPvj",
+   "evidence": "1 fileset call site(s) from iokit.IOStorageFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfe0b8c __ZN12IODMACommand12OutputHost64EPS_NS_9Segment64EPvj and the extent is its own function-start boundary (40 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b9689e8",
+   "original_size": 8,
+   "original_sha256": "9c01496cb2ebace194de9f020b6865e662157f70002c2aa443473f1c319108f7",
+   "native_symbol": "_ml_set_interrupts_enabled",
+   "evidence": "140 fileset call site(s) from driver.AppleARMPlatform, driver.AppleARMWatchdogTimer, driver.ApplePMGR were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b9689e8 _ml_set_interrupts_enabled and the extent is its own function-start boundary (8 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b968c24",
+   "original_size": 8,
+   "original_sha256": "ddd03ec70821a12a13607d2af34f27b49239efe1ef96a2c91d8c848bf28c261e",
+   "native_symbol": "_sched_perfcontrol_ml_set_interrupts_without_measurement",
+   "evidence": "59 fileset call site(s) from driver.ApplePMGR were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b968c24 _sched_perfcontrol_ml_set_interrupts_without_measurement and the extent is its own function-start boundary (8 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b83b5b4",
+   "original_size": 68,
+   "original_sha256": "8ced5bef29444faedf7c824c1187b803193fa8a6350a0cf1844293a5e0ea8fc4",
+   "native_symbol": "_task_deallocate",
+   "evidence": "22 fileset call site(s) from iokit.CoreAnalyticsFamily, iokit.IOGPUFamily, iokit.IOHIDFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b83b5b4 _task_deallocate and the extent is its own function-start boundary (68 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bff2438",
+   "original_size": 484,
+   "original_sha256": "6755e5a466b8b1d75be1d6b707ca681e11012af78e6325c7ae469e1b34a15201",
+   "native_symbol": "__ZN18IOMemoryDescriptor15getDMAMapLengthEPy",
+   "evidence": "11 fileset call site(s) from iokit.IOGPUFamily, iokit.IOSurface were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bff2438 __ZN18IOMemoryDescriptor15getDMAMapLengthEPy and the extent is its own function-start boundary (484 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd864a0",
+   "original_size": 20,
+   "original_sha256": "024052ae166f21f10ebab8d1a5ec6d29092cc846546b665cb30a079e6d0f76bc",
+   "native_symbol": "_proc_is_translated",
+   "evidence": "9 fileset call site(s) from driver.AppleMobileFileIntegrity, security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd864a0 _proc_is_translated and the extent is its own function-start boundary (20 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000ba18610",
+   "original_size": 116,
+   "original_sha256": "06e8765278ffd155b0e25aa2019f2a0d34e84a94a166d83dd86788ef681deeb6",
+   "native_symbol": "_vnode_hold",
+   "evidence": "9 fileset call site(s) from filesystems.apfs, security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000ba18610 _vnode_hold and the extent is its own function-start boundary (116 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b968c2c",
+   "original_size": 52,
+   "original_sha256": "392c95f5d1bfc12d57b6fbd680d3630e803ff30d70dcc69e9ea12f0be46fb53b",
+   "native_symbol": "_ml_at_interrupt_context",
+   "evidence": "6 fileset call site(s) from iokit.IOPCIFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b968c2c _ml_at_interrupt_context and the extent is its own function-start boundary (52 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bf72178",
+   "original_size": 144,
+   "original_sha256": "5037c78fe7eb1610bd242d279ea873497b3ab57580e70ced433df373c137f154",
+   "native_symbol": "_IOMallocZeroDataShareable",
+   "evidence": "4 fileset call site(s) from driver.AppleEffaceableStorage, filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf72178 _IOMallocZeroDataShareable and the extent is its own function-start boundary (144 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b834238",
+   "original_size": 120,
+   "original_sha256": "9e56b8f3bb92cc1c28b80b34cc4c5df5e714799766b397a41af8c98099dec23a",
+   "native_symbol": "_task_update_physical_writes",
+   "evidence": "4 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b834238 _task_update_physical_writes and the extent is its own function-start boundary (120 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bf720e8",
+   "original_size": 144,
+   "original_sha256": "04d940d2c68e82dcfcb01057c3c806be08ca72a0dbefa4f4bea9c5d52cef4ed6",
+   "native_symbol": "_IOMallocDataShareable",
+   "evidence": "3 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bf720e8 _IOMallocDataShareable and the extent is its own function-start boundary (144 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd8656c",
+   "original_size": 16,
+   "original_sha256": "bcd690a1b8af5e0f40075e28cbac633990277b8332e649769ce3284ce610c222",
+   "native_symbol": "_proc_use_alternative_symlink_ea",
+   "evidence": "2 fileset call site(s) from filesystems.apfs were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd8656c _proc_use_alternative_symlink_ea and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b82f7ec",
+   "original_size": 80,
+   "original_sha256": "a06786f876abcf3210f422593297702d890d8f6778649d2187a54069cb4314dc",
+   "native_symbol": "_task_suspend2",
+   "evidence": "2 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b82f7ec _task_suspend2 and the extent is its own function-start boundary (80 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000b82f8a4",
+   "original_size": 104,
+   "original_sha256": "2ca88bbaeceec38ac517f3f6438713f7d0e326d3832cd861dc28657c491b86a1",
+   "native_symbol": "_task_resume2",
+   "evidence": "2 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000b82f8a4 _task_resume2 and the extent is its own function-start boundary (104 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bd8657c",
+   "original_size": 16,
+   "original_sha256": "7ac5ea44c04970f5efaba6b86bd7e34d06d5285c43ea6950f0d1afd5f9013631",
+   "native_symbol": "_proc_is_rsr",
+   "evidence": "2 fileset call site(s) from security.sandbox were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bd8657c _proc_is_rsr and the extent is its own function-start boundary (16 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  },
+  {
+   "original": "0xfffffe000bfe8efc",
+   "original_size": 200,
+   "original_sha256": "661929138fdb0301ee083fba09a13e1c7c846aac0a55f3926a9cb07f0e23db7c",
+   "native_symbol": "__ZN18IOMemoryDescriptor12setPurgeableEjPj",
+   "evidence": "1 fileset call site(s) from iokit.IOStorageFamily were left on the panic stub; the v25F84 kernelcache LC_SYMTAB names 0xfffffe000bfe8efc __ZN18IOMemoryDescriptor12setPurgeableEjPj and the extent is its own function-start boundary (200 bytes). The rebuilt kernel exports the same symbol, so the pairing failed on shape, not on existence."
+  }
+ ]
+}

@@ -1,0 +1,2108 @@
+/* SPDX-License-Identifier: MIT
+ * Native XNU backend for the freestanding DWC3 core. No EFI state,
+ * Android, pstore, partition, filesystem, allocation or scheduler dependency.
+ */
+#include "QcomXnuUsbDebug.h"
+#include "QcomUsbBuffer.h"
+#include "QcomUsbControl.h"
+#include "QcomUsbScreenshot.h"
+#include "../usb/Dwc3.h"
+#include "../soc/QcomUsbQualify.h"
+#include "../soc/QcomUsbDmaDomain.h"
+#include "QcomUsbQr.h"
+#include <machine/machine_routines.h>
+#include <kern/cpu_number.h>
+#include <pexpert/pexpert.h>
+/* IOLog, for the msgbuf copy of this driver's evidence: package/UkeLastLog.c snapshots the tail of
+ * msgbuf into the last 32 MiB of userdata every two seconds, so an IOLog line is readable with dd in
+ * recovery while the panel and the pram both need someone standing in front of the tablet.
+ *
+ * Declared here instead of including <IOKit/IOLib.h>, which cannot coexist with the pexpert header
+ * above: IOLib.h pulls in IOKit/system.h -> bsd/libkern/libkern.h, which declares
+ *
+ *     int printf(const char *, ...)          (libkern.h:185)
+ *
+ * while pexpert/pexpert/protos.h:45 has already declared
+ *
+ *     void printf(const char *fmt, ...)      (via pexpert/pexpert.h)
+ *
+ * -- a conflicting-types error, and the reason archive-17 failed on run 42655528358 ("preflight
+ * kernel/QcomXnuUsbDebug.c: ... error: conflicting types for 'printf'"). Kernel files reconcile the
+ * two through bsd/sys/systm.h, which this unit has no business including. */
+extern void IOLog(const char *format, ...);
+
+#define NATIVE_CONTEXT_BYTES DWC3_CONTEXT_BYTES
+#define GCC_BYTES QUD_GCC_BYTES
+#define USB_BYTES QUD_DWC3_BYTES
+#define PAGE_BYTES 4096u
+#define USB_GCTL 0xc110u
+#define USB_DCTL 0xc704u
+#define USB_DSTS 0xc70cu
+#define USB_GHWPARAMS0 0xc140u
+#define USB_GUSB2PHYCFG 0xc200u
+#define USB_PHY_KEEP_AWAKE_MASK ((1u << 6) | (1u << 8))
+#define USB_RUN_STOP (1u << 31)
+#define USB_HALTED (1u << 22)
+#define USB_HS_PHY_CTRL QUD_QSCRATCH_HS_PHY_CTRL_OFFSET
+#define USB_SW_VBUS_MASK QUD_QSCRATCH_VBUS_MASK
+#define COUNTER_MAX_FREQUENCY UINT64_C(1000000000)
+#define CONTROL_PE_RESTART_CPU 1u
+
+/* The platform callback ABI is unchanged from Darwin22 IOPlatformExpert.h.
+ * Only the control opt-in may atomically install into this NULL global. */
+extern int (*PE_halt_restart)(unsigned int);
+
+static uint8_t usb_dma[DWC3_DMA_BYTES] __attribute__((aligned(DWC3_DMA_ALIGNMENT)));
+static uint8_t usb_tables[QUSB_DOMAIN_PT_BYTES] __attribute__((aligned(PAGE_BYTES)));
+static uint8_t usb_context[NATIVE_CONTEXT_BYTES] __attribute__((aligned(DWC3_CONTEXT_ALIGNMENT)));
+static volatile unsigned int usb_busy;
+static volatile unsigned int usb_diag_enabled, usb_diag_checkpoint, usb_diag_resetting, usb_diag_target;
+static volatile unsigned int usb_diag_mode, usb_diag_polling;
+static uint8_t usb_log_bytes[SOC_USB_LOG_BUFFER_BYTES];
+static struct soc_usb_buffer usb_log_buffer = {
+    .data = usb_log_bytes, .capacity = sizeof(usb_log_bytes)
+};
+static uint64_t usb_log_replayed, usb_log_loss_reported;
+static struct {
+    struct qcom_usb_debug_status status;
+    vm_offset_t gcc_va, usb_va, smmu_va;
+    struct dwc3 *core;
+    QUSB_DOMAIN_LEASE lease;
+    QUSB_DOMAIN_PLATFORM domain_platform;
+    uint64_t deadline;
+    unsigned int deadline_active, deadline_expired, core_initialized;
+} native;
+static struct {
+    struct sxnu_control_parser parser;
+    struct sxnu_control_state state;
+    uint64_t seed;
+} usb_control_context;
+static volatile unsigned int control_started, control_enabled;
+static volatile unsigned int control_hook_owned, control_reboot_requested;
+static volatile unsigned int control_reboot_taken, control_reboot_armed;
+static volatile uint32_t control_rejected, control_reply_count, control_failures;
+static volatile uint32_t control_reboot_seq, control_reboot_generation;
+static volatile uint64_t control_reboot_session;
+
+static void platform_smc_reset(void) __attribute__((noreturn));
+static int qcom_usb_control_halt_restart(unsigned int type);
+
+static void bytes_zero(void *pointer, size_t bytes)
+{
+    volatile uint8_t *p = pointer;
+    while (bytes--) *p++ = 0;
+}
+static void bytes_copy(void *to, const void *from, size_t bytes)
+{
+    volatile uint8_t *d = to;
+    const volatile uint8_t *s = from;
+    while (bytes--) *d++ = *s++;
+}
+static uint64_t counter(void)
+{
+    uint64_t value;
+    /* Match XNU nonspeculative_timebase and the hardware-qualified UEFI
+     * TimerLib: intervals use CNTVCT with CNTFRQ, not the physical counter. */
+    __asm__ volatile("isb\nmrs %0, cntvct_el0" : "=r"(value) :: "memory");
+    return value;
+}
+static void diag_reset(unsigned int seconds);
+static void platform_smc_reset(void)
+{
+    /* Existing hardware-qualified final reset sequence. The diagnostic path
+     * and the opted-in control callback share this exact clobber contract. */
+#if QUD_PSCI_SMC_RESET
+    __asm__ volatile("movz w0, #9\nmovk w0, #0x8400, lsl #16\n"
+                     "mov x1, xzr\nmov x2, xzr\nmov x3, xzr\ndsb sy\nsmc #0"
+                     ::: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+                         "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                         "x16", "x17", "memory");
+#endif
+    for (;;) __asm__ volatile("wfe" ::: "memory");
+}
+static int qcom_usb_control_halt_restart(unsigned int type)
+{
+    if (type == CONTROL_PE_RESTART_CPU &&
+        __atomic_load_n(&control_reboot_requested, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&control_reboot_armed, __ATOMIC_ACQUIRE))
+        platform_smc_reset();
+    return -1;
+}
+/* Out-of-band status, because on this board the console is the thing being built.
+ *
+ * Nothing here can reach the host yet and the panel has no driver, so the one channel that survives a
+ * reboot is the reserved window the firmware reads back on its next start: make-uke-adt.py hands it
+ * over as /chosen/pram at 0xFF800000 for 0x380000 bytes, and UkeUsbLogDxe prints fixed slots of it as
+ * `pram slot 0x....`. Records are plain ASCII, overwritten in place, so the last state reached before
+ * the kernel died is what the next boot shows. Offsets 0x1400/0x1500 are this component's; the older
+ * probe driver owns 0x1000/0x1100/0x1200 (STATE 79). */
+#define QCOM_USB_PRAM_PA     0xFF800000ull
+/* The window's first 0x380000-less-header bytes are XNU's own msgbuf ring (debug_log_init puts
+ * debug_buf_base at gPanicBase + sizeof(struct embedded_panic_header)), so a record near the start
+ * would be overwritten by kernel log text - and would corrupt the log it is meant to explain. The ring
+ * grows forward from the start and never wraps, so the last page is the one place a record survives. */
+#define QCOM_USB_PRAM_STATE  0x37F000u
+#define QCOM_USB_PRAM_SETUP  0x37F100u
+static vm_offset_t qcom_usb_pram_va;
+/* Diagnostic panics, because the panel is the only console that has ever shown anything on this board
+ * (panic_screen=true in board.toml, which is how the SError was read). Boot-arg qcom-usb-panic selects
+ * what to report and when:
+ *   1  the refusal code, from fail()
+ *   2  every control request as it arrives - the record that says what the host actually asked for
+ *   3  the state after 64 polls, for "initialized but nothing happens"
+ * The pram window was meant to carry this, but its content does not survive reliably (STATE 80), so the
+ * panic screen is the dependable channel. */
+#define QCOM_USB_PANIC_REFUSAL  1
+#define QCOM_USB_PANIC_REQUEST  2
+#define QCOM_USB_PANIC_POLLS    3
+/* The board sets the default from its compile record, because the boot-arg route did not take effect
+ * on the first attempt: with qcom-usb-panic=2 on the command line the host still saw a successful
+ * first GET_DESCRIPTOR followed by a dead SET_ADDRESS, i.e. no panic fired (STATE 81). */
+#ifndef QCOM_USB_PANIC_DEFAULT
+#define QCOM_USB_PANIC_DEFAULT 0
+#endif
+static unsigned int usb_panic_mode = QCOM_USB_PANIC_DEFAULT;
+/* panic() is a macro in this kernel (osfmk/kern/panic_call.h), already visible to this translation
+ * unit, so it must not be declared here: an extern declaration is expanded by the macro into syntax
+ * errors ("expected identifier or '('"), which is exactly how the round that added this failed. */
+static void pram_state(void);
+static void pram_setup(uint32_t a, uint32_t b);
+static void fb_remember_request(const char *line);
+static void pram_write(unsigned int offset, const char *text, size_t length);
+
+static void diag_checkpoint(unsigned int checkpoint)
+{
+    /* The phase number is the first thing the next boot needs, so it is recorded whether or not the
+     * diag boot-arg is on; diag_reset's side effects stay gated below. */
+    native.status.diag_checkpoint = checkpoint;
+    pram_state();
+    if (!usb_diag_enabled) return;
+    usb_diag_checkpoint = checkpoint;
+    __asm__ volatile("dsb ishst" ::: "memory");
+    if (usb_diag_target == checkpoint) diag_reset(0);
+}
+static void diag_reset(unsigned int seconds)
+{
+    uint64_t frequency, start, ticks;
+    if (!usb_diag_enabled) return;
+    /* Standalone early-panic path: no CPU-data, USB guard, EFI or deadline
+     * dependency. A second panic while timing goes directly to reset. */
+    __asm__ volatile("msr daifset, #15" ::: "memory");
+    if (__atomic_exchange_n(&usb_diag_resetting, 1u, __ATOMIC_RELAXED)) seconds = 0;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    /* Probe204 uses the separately device-verified 19.2MHz reference so
+     * an incorrect advertised CNTFRQ cannot corrupt its own classification. */
+    if (usb_diag_mode == 204u) frequency = UINT64_C(19200000);
+    if (frequency >= 1000u && frequency <= COUNTER_MAX_FREQUENCY && seconds <= 256u) {
+        start = counter(); ticks = frequency * seconds;
+        while (counter() - start < ticks) __asm__ volatile("yield" ::: "memory");
+    }
+    platform_smc_reset();
+}
+static void barrier(void *cookie)
+{
+    (void)cookie;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+static int deadline_expired(void)
+{
+    if (native.deadline_active && counter() >= native.deadline) {
+        native.deadline_expired = 1;
+        return 1;
+    }
+    return 0;
+}
+static int acquire(uint64_t *saved_daif)
+{
+    if (cpu_number() != boot_cpu_id) return 0;
+    __asm__ volatile("mrs %0, daif\nmsr daifset, #3" : "=r"(*saved_daif) :: "memory");
+    if (__atomic_exchange_n(&usb_busy, 1u, __ATOMIC_ACQUIRE)) {
+        __asm__ volatile("msr daif, %0" :: "r"(*saved_daif) : "memory");
+        return 0;
+    }
+    return 1;
+}
+static void release(uint64_t saved_daif)
+{
+    __atomic_store_n(&usb_busy, 0u, __ATOMIC_RELEASE);
+    __asm__ volatile("msr daif, %0" :: "r"(saved_daif) : "memory");
+}
+static size_t backlog_write(const void *bytes, size_t count)
+{
+    uint64_t flags;
+    size_t accepted;
+    /* No CPU-data access: console hooks may run before PE_init_kprintf.
+     * Local IRQ/FIQ masking prevents self-interruption inside the ring guard;
+     * other CPUs and recursive producers never spin waiting for this CPU. */
+    __asm__ volatile("mrs %0, daif\nmsr daifset, #3" : "=r"(flags) :: "memory");
+    accepted = soc_usb_buffer_write(&usb_log_buffer, bytes, count);
+    __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
+    return accepted;
+}
+static size_t backlog_sink(void *cookie, const void *bytes, size_t count)
+{
+    (void)cookie;
+    return dwc3_queue(native.core, bytes, count);
+}
+static void backlog_drain_owned(void)
+{
+    size_t free_bytes = DWC3_TX_BYTES - dwc3_queued(native.core);
+    /* usb_busy already owns DWC3 and masks local IRQ/FIQ. Only queue CPU
+     * memory while the backlog guard is held; MMIO is serviced afterwards. */
+    if (free_bytes)
+        usb_log_replayed += soc_usb_buffer_drain(&usb_log_buffer, backlog_sink, 0, free_bytes);
+}
+static void buffer_status_owned(void)
+{
+    native.status.buffer_capacity = sizeof(usb_log_bytes);
+    native.status.buffer_pending = soc_usb_buffer_pending(&usb_log_buffer);
+    native.status.buffer_high_water = __atomic_load_n(&usb_log_buffer.high_water, __ATOMIC_RELAXED);
+    native.status.buffer_accepted = __atomic_load_n(&usb_log_buffer.accepted, __ATOMIC_RELAXED);
+    native.status.buffer_overflow = __atomic_load_n(&usb_log_buffer.overflow, __ATOMIC_RELAXED);
+    native.status.buffer_contended = __atomic_load_n(&usb_log_buffer.contended, __ATOMIC_RELAXED);
+    native.status.buffer_replayed = usb_log_replayed;
+    native.status.transport_pending = native.core_initialized ? dwc3_queued(native.core) : 0;
+    native.status.dropped = soc_usb_buffer_dropped(&usb_log_buffer) +
+                           (native.core_initialized ? dwc3_dropped(native.core) : 0);
+    native.status.rx_pending = native.core_initialized ? (uint32_t)dwc3_rx_pending(native.core) : 0;
+    native.status.rx_overflow = native.core_initialized ? dwc3_rx_overflow(native.core) : 0;
+    native.status.rx_generation = native.core_initialized ? dwc3_rx_generation(native.core) : 0;
+    native.status.control_enabled = __atomic_load_n(&control_enabled, __ATOMIC_ACQUIRE);
+    native.status.control_hook_owned = __atomic_load_n(&control_hook_owned, __ATOMIC_ACQUIRE);
+    native.status.control_rejected = __atomic_load_n(&control_rejected, __ATOMIC_RELAXED);
+    native.status.control_replies = __atomic_load_n(&control_reply_count, __ATOMIC_RELAXED);
+    native.status.control_reboot_state = !__atomic_load_n(&control_reboot_requested, __ATOMIC_ACQUIRE) ? 0u :
+        (__atomic_load_n(&control_reboot_taken, __ATOMIC_ACQUIRE) ? 2u : 1u);
+}
+static char *append_text(char *to, const char *text)
+{
+    while (*text) *to++ = *text++;
+    return to;
+}
+static char *append_decimal(char *to, uint64_t value)
+{
+    char digits[20];
+    unsigned int n = 0;
+    do { digits[n++] = (char)('0' + value % 10u); value /= 10u; } while (value);
+    while (n) *to++ = digits[--n];
+    return to;
+}
+/* Registers are read as words; decimal would make them unreadable against the manual. */
+/* Eight hex digits, fixed width, for the same reason as append_hex16 and because a 4-bit command status
+ * hides in the middle of the word: TB's bits 12..15 are CmdStatus, so TB=00001006 is a refused
+ * StartTransfer (status 1) and TB=00000006 is the same command with status 0. */
+static char *append_hex32(char *to, uint32_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    int shift;
+    for (shift = 28; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
+    return to;
+}
+static char *append_hex(char *to, uint64_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    int shift;
+    for (shift = 60; shift > 0 && !((value >> shift) & 0xfu); shift -= 4) { }
+    for (; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
+    return to;
+}
+/* boot_progress_persist is this board's display-patch symbol, and a stock kernel has no such
+ * symbol at all. A weak *definition* is what makes the reference optional here: a weak *import* is
+ * not enough once LTO lowers the call on arm64e, because the reference is then materialised as an
+ * authenticated-pointer stub that ld reports as a plain undefined symbol - run 42389591998 failed
+ * with "_boot_progress_persist, referenced from l_boot_progress_persist$auth_ptr$ia$54535". A kernel
+ * that does provide the symbol overrides this empty body; otherwise the two rows are simply lost,
+ * which is what happened to them before they could link at all. */
+__attribute__((weak)) void
+boot_progress_persist(const char *text, uint32_t colour)
+{
+    (void)text;
+    (void)colour;
+}
+/* Draw the diagnostic state straight onto the panel.
+ *
+ * The firmware reaches the panel, the kernel's own console does not (every attempt since b61 has been
+ * invisible), the pram window does not retain (STATE 80) and USB is the thing being debugged. What is
+ * left is the framebuffer itself: PE_state.video is exported by the kernel, v_baseAddr is a physical
+ * address (the display kexts compare it with a mapping's physical address), so this maps it and
+ * writes pixels. The same idea as the firmware's OneSend QR export, without needing a QR encoder -
+ * short ASCII lines are enough for phase and request bytes, and two lines are readable in a photo.
+ *
+ * Drawing happens on transitions only (init, refusal, a control request, the periodic state refresh),
+ * costs tens of microseconds, and never panics, so enumeration keeps running. */
+#define QCOM_USB_FB_ROWS   640u          /* the band this maps, starting at a third of the height */
+#define QCOM_USB_QR_SCALE  10u           /* 10 px per module: a version-5 symbol is 370 px */
+static volatile uint32_t *qcom_usb_fb;
+static uint32_t qcom_usb_fb_stride, qcom_usb_fb_width, qcom_usb_fb_rows;
+
+/* 3x5 glyphs, bit 2 = leftmost column: 0-9, A-Z, space, '/', ':', '-', '.' */
+static const uint8_t fb_font[][5] = {
+    {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 7, 1, 7}, {5, 5, 7, 1, 1},
+    {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 1, 1}, {7, 5, 7, 5, 7}, {7, 5, 7, 1, 7},
+    {7, 5, 7, 5, 5}, {6, 5, 6, 5, 6}, {7, 4, 4, 4, 7}, {6, 5, 5, 5, 6}, {7, 4, 7, 4, 7},
+    {7, 4, 7, 4, 4}, {7, 4, 5, 5, 7}, {5, 5, 7, 5, 5}, {7, 2, 2, 2, 7}, {1, 1, 1, 5, 7},
+    {5, 5, 6, 5, 5}, {4, 4, 4, 4, 7}, {5, 7, 7, 5, 5}, {5, 7, 7, 7, 5}, {7, 5, 5, 5, 7},
+    {7, 5, 7, 4, 4}, {7, 5, 5, 7, 1}, {7, 5, 6, 5, 5}, {7, 4, 7, 1, 7}, {7, 2, 2, 2, 2},
+    {5, 5, 5, 5, 7}, {5, 5, 5, 5, 2}, {5, 5, 7, 7, 5}, {5, 5, 2, 5, 5}, {5, 5, 2, 2, 2},
+    {7, 1, 2, 4, 7},
+    {0, 0, 0, 0, 0}, {1, 1, 2, 4, 4}, {0, 2, 0, 2, 0}, {0, 0, 7, 0, 0}, {0, 0, 0, 0, 2},
+};
+static int fb_index(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'Z') return 10 + (c - 'A');
+    if (c >= 'a' && c <= 'z') return 10 + (c - 'a');
+    if (c == ' ') return 36;
+    if (c == '/') return 37;
+    if (c == ':') return 38;
+    if (c == '-') return 39;
+    if (c == '.') return 40;
+    return -1;
+}
+static int fb_ready(void)
+{
+    uint64_t start, aligned;
+    uint32_t band, rows, skew;
+    vm_offset_t mapped;
+    if (qcom_usb_fb != 0) return 1;
+    if (PE_state.video.v_baseAddr == 0 || PE_state.video.v_depth != 32 ||
+        PE_state.video.v_rowBytes < 4 * 16 || PE_state.video.v_width < 16 ||
+        PE_state.video.v_height == 0) return 0;
+    rows = QCOM_USB_FB_ROWS;
+    if (rows > PE_state.video.v_height) rows = (uint32_t)PE_state.video.v_height;
+    /* A third of the way down, not at the very top: the payload draws its progress bar there and a card
+     * over it is both ugly and easy to miss (reported on the b96 round). Only this band is mapped. */
+    band = (uint32_t)(PE_state.video.v_height / 3u);
+    if (band + rows > PE_state.video.v_height) band = (uint32_t)PE_state.video.v_height - rows;
+    start = (uint64_t)PE_state.video.v_baseAddr + (uint64_t)band * PE_state.video.v_rowBytes;
+    aligned = start & ~(uint64_t)0xFFFull;
+    skew = (uint32_t)(start - aligned);
+    mapped = ml_io_map((vm_offset_t)aligned,
+                       (vm_size_t)((uint64_t)PE_state.video.v_rowBytes * rows + skew + 0x1000u));
+    if (mapped == 0) return 0;
+    qcom_usb_fb = (volatile uint32_t *)(mapped + skew);
+    qcom_usb_fb_stride = (uint32_t)(PE_state.video.v_rowBytes / 4u);
+    qcom_usb_fb_width = (uint32_t)PE_state.video.v_width;
+    qcom_usb_fb_rows = rows;
+    return 1;
+}
+static void fb_text(uint32_t x, uint32_t y, uint32_t scale, const char *text, uint32_t rgb)
+{
+    uint32_t atx = x, row, col, dy, dx;
+    if (!fb_ready()) return;
+    for (; *text; ++text) {
+        int glyph = fb_index(*text);
+        if (glyph < 0) {
+            atx += 4u * scale;
+            continue;
+        }
+        if (atx + 4u * scale >= qcom_usb_fb_width) return;
+        for (row = 0; row < 5u; ++row) {
+            uint8_t bits = fb_font[glyph][row];
+            for (col = 0; col < 3u; ++col) {
+                volatile uint32_t *line;
+                uint32_t py = y + row * scale;
+                if (!(bits & (4u >> col)) || py >= QCOM_USB_FB_ROWS) continue;
+                for (dy = 0; dy < scale && py + dy < QCOM_USB_FB_ROWS; ++dy) {
+                    line = qcom_usb_fb + (size_t)(py + dy) * qcom_usb_fb_stride + atx + col * scale;
+                    for (dx = 0; dx < scale; ++dx) line[dx] = rgb;
+                }
+            }
+        }
+        atx += 4u * scale;
+    }
+}
+/* Two lines in the top band, white over a black backing: the firmware's own output lives further down,
+ * and the video console the payload draws is not this kernel's. */
+
+static void fb_blank(uint32_t y0, uint32_t y1, uint32_t rgb)
+{
+    uint32_t py, i;
+    for (py = y0; py < y1 && py < qcom_usb_fb_rows; ++py) {
+        volatile uint32_t *line = qcom_usb_fb + (size_t)py * qcom_usb_fb_stride;
+        for (i = 0; i < qcom_usb_fb_width; ++i) line[i] = rgb;
+    }
+}
+static void fb_draw_qr(const struct qr_code *qr, uint32_t x, uint32_t y, uint32_t scale)
+{
+    uint32_t row, col, dy, dx;
+    for (row = 0; row < qr->size; ++row) {
+        for (col = 0; col < qr->size; ++col) {
+            uint32_t py, px;
+            if (!qr->modules[row * qr->size + col]) continue;
+            py = y + row * scale;
+            px = x + col * scale;
+            for (dy = 0; dy < scale && py + dy < qcom_usb_fb_rows; ++dy) {
+                volatile uint32_t *line = qcom_usb_fb + (size_t)(py + dy) * qcom_usb_fb_stride + px;
+                for (dx = 0; dx < scale && px + dx < qcom_usb_fb_width; ++dx) line[dx] = 0x00000000u;
+            }
+        }
+    }
+}
+/* Several frames, shown one at a time, because a single symbol cannot carry the whole picture and one
+ * line is rarely the whole answer. A phone scanning the panel collects them one by one - the same idea
+ * as the firmware's OneSend paging, applied to the kernel side where the logs actually are. */
+#define QCOM_USB_FB_FRAMES 8
+#define QCOM_USB_FB_WIDTH  60u          /* up to a version-4 symbol at scale 8, text below */
+/* One payload document, shown a block at a time. */
+#define QCOM_USB_FB_PAYLOAD  480u                 /* 8 OneSend blocks of 60 bytes */
+#define QCOM_USB_FB_TICKS_KEEP  1000u             /* 1 s: repaint so the console cannot cover the card */
+#define QCOM_USB_FB_HOLD_TICKS  8u                /* 8 repaints per block, so 8 s each */
+static uint8_t fb_payload[QCOM_USB_FB_PAYLOAD];
+static size_t fb_payload_len;
+static unsigned fb_payload_dirty = 1u;
+static char fb_state_line[QCOM_USB_FB_WIDTH + 1u];
+/* Control requests, newest first: these say how far the host got, which is exactly what the panel is
+ * for while enumeration is being fixed. */
+#define QCOM_USB_FB_REQUESTS 4u
+static char fb_request_lines[QCOM_USB_FB_REQUESTS][QCOM_USB_FB_WIDTH + 1u];
+static unsigned fb_request_count;
+/* The last few core reports (event or command), so a stuck ep0 flow says where it stopped rather than
+ * only that it stopped. Compact: "T5 80000100 40" is trace SETUP with its two arguments. */
+#define QCOM_USB_FB_TRACES 4u
+static char fb_trace_lines[QCOM_USB_FB_TRACES][36];
+static unsigned fb_trace_count;
+/* The newest control request in block-0 form.
+ *
+ * The payload is 480 bytes and the card shows it 60 bytes at a time, so one photograph catches block 0
+ * and nothing else unless the state happens to sit still for 16 s. Measured on the b107 round: the
+ * state line "PH=19 E=0 CR=0 S=2 ER=0 LS=0 TA=00000000 TB=00000000" is 52 characters, so block 0 ended
+ * exactly one character into the first trace ("T9 90c2"), cutting the values that mattered in half.
+ *
+ * Block 0 therefore carries the state line -- with the all-zero TA/TB pair omitted, which is the common
+ * case -- followed by this one line: the setup packet, which is what tells GET_DESCRIPTOR apart from
+ * SET_ADDRESS on sight, plus how many the host has sent. The full request history and the traces keep
+ * their place further down, where a longer capture still reaches them. */
+static char fb_setup_line[32];
+static unsigned fb_setup_count;
+static unsigned fb_block_show, fb_tick, fb_hold;
+
+static int mem_equal(const uint8_t *a, const uint8_t *b, size_t length)
+{
+    size_t i;
+    for (i = 0; i < length; ++i) if (a[i] != b[i]) return 0;
+    return 1;
+}
+static int fb_same(const char *a, const char *b)
+{
+    while (*a && *b) { if (*a != *b) return 0; ++a; ++b; }
+    return *a == *b;
+}
+static void fb_copy(char *to, const char *from)
+{
+    unsigned i = 0;
+    while (i < QCOM_USB_FB_WIDTH && from[i] != 0) { to[i] = from[i]; ++i; }
+    to[i] = 0;
+}
+/* OneSend framing, so the phone app can assemble a payload instead of the reader copying lines. From
+ * AdvancedLogDxe: frame = "OS", version, session, sequence, block count, block length, payload length,
+ * payload CRC32, one block, then a CRC32 of everything before it. The reference uses 720-byte blocks,
+ * which needs a version-22 symbol; the block length is a header field, so 60-byte blocks keep the
+ * symbol at version 5 with the same structure. */
+#define ONESEND_BLOCK      60u
+#define ONESEND_HEADER     28u
+#define ONESEND_CRC        4u
+#define ONESEND_FRAME_SIZE (ONESEND_HEADER + ONESEND_BLOCK + ONESEND_CRC)
+#define ONESEND_SESSION    0x554B4531u          /* "UKE1" */
+
+static uint32_t crc32_bytes(const uint8_t *data, size_t length)
+{
+    uint32_t crc = 0xffffffffu;
+    size_t i;
+    unsigned bit;
+    for (i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (bit = 0; bit < 8u; ++bit) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+static void put_le32(uint8_t *to, uint32_t value)
+{
+    to[0] = (uint8_t)value; to[1] = (uint8_t)(value >> 8);
+    to[2] = (uint8_t)(value >> 16); to[3] = (uint8_t)(value >> 24);
+}
+static void put_le16(uint8_t *to, uint16_t value)
+{
+    to[0] = (uint8_t)value; to[1] = (uint8_t)(value >> 8);
+}
+static size_t onesend_frame(uint8_t *frame, const uint8_t *payload, size_t length,
+                            unsigned index, unsigned blocks)
+{
+    size_t offset = (size_t)index * ONESEND_BLOCK;
+    size_t chunk = length > offset ? length - offset : 0;
+    unsigned i;
+    if (chunk > ONESEND_BLOCK) chunk = ONESEND_BLOCK;
+    for (i = 0; i < ONESEND_FRAME_SIZE; ++i) frame[i] = 0;
+    frame[0] = 'O'; frame[1] = 'S'; frame[2] = 2; frame[3] = 0;
+    put_le32(frame + 4, ONESEND_SESSION);
+    put_le32(frame + 8, index + index / 4u);     /* the reference's pacing of the sequence */
+    put_le32(frame + 12, blocks);
+    put_le16(frame + 16, ONESEND_BLOCK);
+    put_le16(frame + 18, 0);
+    put_le32(frame + 20, (uint32_t)length);
+    put_le32(frame + 24, crc32_bytes(payload, length));
+    for (i = 0; i < chunk; ++i) frame[ONESEND_HEADER + i] = payload[offset + i];
+    put_le32(frame + ONESEND_HEADER + ONESEND_BLOCK,
+             crc32_bytes(frame, ONESEND_HEADER + ONESEND_BLOCK));
+    return ONESEND_FRAME_SIZE;
+}
+/* Copy the console backlog, oldest first. This ring is the tee of everything the kernel printed after
+ * the console came up, so it is the log the reader actually wants; nothing drains it while USB is not
+ * enumerating, which is exactly when the panel is the only way out. */
+static size_t log_snapshot(uint8_t *out, size_t capacity)
+{
+    size_t capacity_ring = usb_log_buffer.capacity;
+    size_t used = __atomic_load_n(&usb_log_buffer.used, __ATOMIC_RELAXED);
+    size_t tail = usb_log_buffer.tail;
+    size_t i, n = 0;
+    if (capacity_ring == 0 || used == 0) return 0;
+    if (used > capacity) {                       /* keep the newest bytes, that is where the fault is */
+        tail = (tail + (used - capacity)) % capacity_ring;
+        used = capacity;
+    }
+    for (i = 0; i < used && n < capacity; ++i)
+        out[n++] = usb_log_buffer.data[(tail + i) % capacity_ring];
+    return n;
+}
+/* The payload is one consistent document: the newest diagnostic line, then the log tail. Rebuilt only
+ * when the line changes, so the block sequence stays stable long enough to be scanned. */
+static void fb_build_payload(void)
+{
+    size_t used;
+    unsigned i;
+    uint8_t *payload = fb_payload;
+    size_t capacity = sizeof(fb_payload);
+    used = 0;
+    {
+        const char *line = fb_state_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    /* Second in the block on purpose: see fb_setup_line. */
+    if (fb_setup_line[0] != 0) {
+        const char *line = fb_setup_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    for (i = 0; i < fb_trace_count && used + 1u < capacity; ++i) {
+        const char *line = fb_trace_lines[i];
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    for (i = 0; i < fb_request_count && used + 1u < capacity; ++i) {
+        const char *line = fb_request_lines[i];
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    used += log_snapshot(payload + used, capacity - used - 1u);
+    if (used == fb_payload_len && mem_equal(payload, fb_payload, used)) {
+        fb_payload_dirty = 0;
+        return;
+    }
+    fb_payload_len = used;
+    fb_payload_dirty = 0;
+}
+static void fb_paint(void)
+{
+    static uint8_t frame[ONESEND_FRAME_SIZE];
+    struct qr_code qr;
+    uint32_t side, x0, card_h, text_y, line_y;
+    size_t frame_len;
+    unsigned blocks;
+    char label[28];
+    char *p;
+    if (!fb_ready()) return;
+    if (fb_payload_len == 0) return;
+    blocks = (unsigned)((fb_payload_len + ONESEND_BLOCK - 1u) / ONESEND_BLOCK);
+    if (blocks == 0) blocks = 1;
+    if (fb_block_show >= blocks) fb_block_show = 0;
+    frame_len = onesend_frame(frame, fb_payload, fb_payload_len, fb_block_show, blocks);
+    side = 0;
+    if (qr_encode_bytes(frame, frame_len, &qr)) side = (uint32_t)qr.size * QCOM_USB_QR_SCALE;
+    card_h = (side != 0 ? side : 160u) + 120u;
+    if (card_h > qcom_usb_fb_rows) card_h = qcom_usb_fb_rows;
+    x0 = qcom_usb_fb_width > side + 24u ? (qcom_usb_fb_width - side) / 2u : 4u;
+    fb_blank(0u, card_h, 0xffffffffu);
+    if (side != 0) fb_draw_qr(&qr, x0, 8u, QCOM_USB_QR_SCALE);
+    text_y = 8u + side + 14u;
+    label[0] = 'O'; label[1] = 'S'; label[2] = ' '; label[3] = 'B';
+    p = append_decimal(&label[4], fb_block_show + 1u);
+    p = append_text(p, "/");
+    p = append_decimal(p, blocks);
+    p = append_text(p, " len ");
+    p = append_decimal(p, (uint64_t)fb_payload_len);
+    *p = 0;
+    fb_text(x0, text_y, 5u, label, 0x00000000u);
+    /* The text carried by this block, so a photo that cannot be scanned still reads. */
+    line_y = text_y + 32u;
+    {
+        size_t at = (size_t)fb_block_show * ONESEND_BLOCK;
+        char line[QCOM_USB_FB_WIDTH + 1u];
+        unsigned n = 0;
+        size_t end_at = at + ONESEND_BLOCK;
+        if (end_at > fb_payload_len) end_at = fb_payload_len;
+        while (at < end_at && n < QCOM_USB_FB_WIDTH) {
+            uint8_t byte = fb_payload[at++];
+            line[n++] = (byte >= 0x20 && byte < 0x7f) ? (char)byte : (byte == '\n' ? '|' : '.');
+        }
+        line[n] = 0;
+        if (n != 0) fb_text(x0, line_y, 4u, line, 0x00000000u);
+    }
+}
+/* Record the newest state or request line; it heads the next payload. Painting happens right here and
+ * not only in fb_cycle: the worker stops polling once the phase leaves ACTIVE, and a panel that only
+ * the poll loop ever drew then stays blank - which is what happened on the first OneSend build. */
+static void fb_remember_request(const char *line)
+{
+    unsigned i;
+    if (line == 0 || line[0] == 0) return;
+    if (fb_request_count > 0 && fb_same(fb_request_lines[0], line)) return;
+    for (i = QCOM_USB_FB_REQUESTS - 1; i > 0; --i) fb_copy(fb_request_lines[i], fb_request_lines[i - 1]);
+    fb_copy(fb_request_lines[0], line);
+    if (fb_request_count < QCOM_USB_FB_REQUESTS) ++fb_request_count;
+    fb_payload_dirty = 1;
+    fb_build_payload();
+    fb_block_show = 0;
+    fb_paint();
+}
+static void fb_report(const char *first, const char *second)
+{
+    (void)second;
+    if (first == 0 || first[0] == 0) return;
+    if (fb_same(fb_state_line, first) && !fb_payload_dirty) return;
+    fb_copy(fb_state_line, first);
+    fb_payload_dirty = 1;
+    fb_build_payload();
+    fb_paint();
+}
+/* Slow on purpose: 8 s per block, because a 370 px symbol needs focus and a scan, and the earlier 2 s
+ * cycled faster than the camera could catch it (reported on the b98 round). Every second the card is
+ * repainted in place: the kernel console keeps drawing text and would otherwise sit on top of it. */
+static void fb_cycle(void)
+{
+    if (!fb_ready()) return;
+    if (++fb_tick < QCOM_USB_FB_TICKS_KEEP) return;
+    fb_tick = 0;
+    if (fb_payload_dirty) {
+        fb_build_payload();
+        fb_block_show = 0;
+        fb_hold = 0;
+        fb_paint();
+        return;
+    }
+    if (++fb_hold >= QCOM_USB_FB_HOLD_TICKS) {
+        unsigned blocks = (unsigned)((fb_payload_len + ONESEND_BLOCK - 1u) / ONESEND_BLOCK);
+        fb_hold = 0;
+        if (blocks > 1u) {
+            fb_block_show = (fb_block_show + 1u) % blocks;
+            fb_paint();
+            return;
+        }
+    }
+    fb_paint();                                   /* keep the card on top of the console */
+}
+
+/* The pram records themselves. Written once per transition, not per byte: a single non-cached store
+ * run plus a barrier, so this is safe in any context including before the scheduler exists. */
+static void pram_write(unsigned int offset, const char *text, size_t length)
+{
+    volatile char *slot;
+    size_t i;
+    if (qcom_usb_pram_va == 0) {
+        /* Map only the tail page: the rest belongs to the msgbuf ring and mapping 3.5 MiB of DRAM as
+         * device memory for two 64-byte records would be wasteful. */
+        qcom_usb_pram_va = ml_io_map((vm_offset_t)(QCOM_USB_PRAM_PA + 0x37F000ull), 0x1000);
+        if (qcom_usb_pram_va != 0) qcom_usb_pram_va -= QCOM_USB_PRAM_STATE;
+    }
+    if (qcom_usb_pram_va == 0) return;
+    if (length > 63u) length = 63u;
+    slot = (volatile char *)(qcom_usb_pram_va + offset);
+    for (i = 0; i < length; ++i) slot[i] = text[i];
+    /* Pad with spaces, not NULs: a stale tail from an earlier boot must not read as part of this
+     * record, and the firmware's printable-run scan stops at the first non-printable byte. */
+    for (; i < 63u; ++i) slot[i] = ' ';
+    slot[i] = '\0';
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+/* Phase, refusal code, and how much of the USB event machinery has actually run. traces counts
+ * core_trace() calls, which only happen if the controller posts events; last_trace is the most recent
+ * dwc3_trace value, so "events never arrived" and "events arrived but were not served" look different. */
+static unsigned int pram_polls;
+static char *append_signed(char *to, int value)
+{
+    if (value < 0) {
+        *to++ = '-';
+        return append_decimal(to, (uint64_t)(-(int64_t)value));
+    }
+    return append_decimal(to, (uint64_t)value);
+}
+static void pram_state(void)
+{
+    /* Two lines out of one function. The pram record takes everything; the panel takes the fields the
+     * next round cannot do without, because the card clips each line at QCOM_USB_FB_WIDTH (60) columns.
+     * Order is therefore by value, not by register order (STATE 89):
+     *   PH  phase checkpoint            - how far the boot got
+     *   E   component error            - the failure code, 0 means none
+     *   CR  core result                - the negative status behind a failure
+     *   S   control stage              - which ep0 stage the core is waiting on
+     *   ER  absorbed errors            - recoverable errors polling survived
+     *   TA/TB                          - only a refused endpoint command sets them
+     * G, EV, TR, LT and the poll counter stay in the pram record: EV duplicates the T9 event history and
+     * the rest change too often to be worth a scan. */
+    char text[128], panel[128];
+    char *p = append_text(text, "QCOMUSB PH=");
+    char *q = append_text(panel, "PH=");
+    p = append_decimal(p, native.status.diag_checkpoint);
+    q = append_decimal(q, native.status.diag_checkpoint);
+    p = append_text(p, " E=");
+    q = append_text(q, " E=");
+    p = append_decimal(p, native.status.error);
+    q = append_decimal(q, native.status.error);
+    p = append_text(p, " CR=");
+    q = append_text(q, " CR=");
+    p = append_signed(p, (int)native.status.core_result);
+    q = append_signed(q, (int)native.status.core_result);
+    /* Which control stage the core is waiting on, and how many recoverable errors polling absorbed.
+     * Without these a console that serves one descriptor and then goes deaf looks identical to a dead
+     * controller (STATE 89). */
+    native.status.core_errors = dwc3_errors(native.core);
+    native.status.core_control_state = dwc3_control_state(native.core);
+    p = append_text(p, " S=");
+    q = append_text(q, " S=");
+    p = append_decimal(p, native.status.core_control_state);
+    q = append_decimal(q, native.status.core_control_state);
+    p = append_text(p, " ER=");
+    q = append_text(q, " ER=");
+    p = append_decimal(p, native.status.core_errors);
+    q = append_decimal(q, native.status.core_errors);
+    /* The core only traces a COMMAND when the endpoint command *failed*, and trace_a carries
+     * (ep << 16) | cmd while trace_b carries the DEPCMD result with its status field - so these two
+     * name the exact command and its refusal (STATE 86). */
+    /* DSTS.USBLNKST when the last control stage was armed: 0 = U0, 2 = L1/L2, 3 = U3. A start transfer
+     * in a suspended link may never complete, so this distinguishes "the stage was armed in a dead link"
+     * from "the core never finished the previous stage" (STATE 90). */
+    native.status.core_link_state = dwc3_link_state(native.core);
+    p = append_text(p, " LS=");
+    q = append_text(q, " LS=");
+    p = append_decimal(p, native.status.core_link_state);
+    q = append_decimal(q, native.status.core_link_state);
+    /* Fixed eight-digit fields: a photographed frame has to be unambiguous, and variable-width hex made
+     * TA=0 TB=6 versus TA=6 TB=0 impossible to tell apart on the b105 round (STATE 92). */
+    /* A refused endpoint command is the one thing TA/TB report, so an all-zero pair is omitted rather
+     * than printed: 23 characters of every frame spent saying nothing, in the one line that has to fit
+     * block 0 (measured on b107; see fb_setup_line). */
+    if (native.status.command_a != 0 || native.status.command_b != 0) {
+        p = append_text(p, " TA=");
+        q = append_text(q, " TA=");
+        p = append_hex32(p, native.status.command_a);
+        q = append_hex32(q, native.status.command_a);
+        p = append_text(p, " TB=");
+        q = append_text(q, " TB=");
+        p = append_hex32(p, native.status.command_b);
+        q = append_hex32(q, native.status.command_b);
+    }
+    p = append_text(p, " G=");
+    p = append_decimal(p, native.status.core_event_bytes);
+    p = append_text(p, " EV=");
+    p = append_hex(p, native.status.core_last_event);
+    p = append_text(p, " TR=");
+    p = append_decimal(p, native.status.traces);
+    p = append_text(p, " LT=");
+    p = append_decimal(p, native.status.last_trace);
+    p = append_text(p, " P=");
+    p = append_decimal(p, pram_polls);
+    pram_write(QCOM_USB_PRAM_STATE, text, (size_t)(p - text));
+    /* The same record into msgbuf, which is what makes it readable without a camera: `text` already
+     * carries the QCOMUSB tag the firmware's printable-run scan looks for, so it goes out unchanged. */
+    IOLog("%s\n", text);
+    /* The panel line is stable by construction: every field in it changes only on a real transition, so
+     * an unchanged report repaints nothing (reported on the b101 round). */
+    fb_report(panel, 0);
+}
+/* Four hex digits, fixed width: a field that shortens when its value is small makes two records
+ * impossible to compare at a glance. */
+static char *append_hex16(char *to, uint32_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    int shift;
+    for (shift = 12; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
+    return to;
+}
+/* The last control request the controller delivered: request type, request, value, index, length.
+ * dwc3 packs exactly these into the SETUP trace (a = rt<<24 | rq<<16 | wValue, b = wIndex<<16 |
+ * wLength), so nothing in usb/Dwc3.c has to change. This record is what separates "the host never
+ * asked" from "we were asked and answered wrongly" without a working console. */
+static void pram_setup(uint32_t a, uint32_t b)
+{
+    static unsigned int setups;
+    char text[64];
+    char *p = append_text(text, "QCOMUSB REQ rt");
+    char *q;
+    p = append_hex16(p, a >> 24);
+    p = append_text(p, " rq");
+    p = append_hex16(p, (a >> 16) & 0xffu);
+    p = append_text(p, " v");
+    p = append_hex16(p, a & 0xffffu);
+    p = append_text(p, " i");
+    p = append_hex16(p, b >> 16);
+    p = append_text(p, " l");
+    p = append_hex16(p, b & 0xffffu);
+    /* The request counter goes to pram only: on the panel it would change the payload on every retry of
+     * the same request, and a symbol that changes cannot be scanned (STATE 89b). */
+    q = p;
+    p = append_text(p, " n");
+    p = append_decimal(p, ++setups);
+    pram_write(QCOM_USB_PRAM_SETUP, text, (size_t)(p - text));
+    *q = 0;
+    fb_remember_request(text);
+    {
+        char *r = append_text(fb_setup_line, "R");
+        r = append_hex16(r, a >> 24);
+        r = append_hex16(r, (a >> 16) & 0xffu);
+        r = append_text(r, " v");
+        r = append_hex16(r, a & 0xffffu);
+        r = append_text(r, " l");
+        r = append_hex16(r, b & 0xffffu);
+        r = append_text(r, " #");
+        r = append_decimal(r, ++fb_setup_count);
+        *r = 0;
+    }
+}
+/* Small in-band accounting records use no printf/console recursion. */
+static size_t loss_record(char *text, int final)
+{
+    char *p = append_text(text, final ? "\nQCOM USB DRAIN pending=0" : "\nQCOM USB LOSS");
+    p = append_text(p, " overflow=");
+    p = append_decimal(p, __atomic_load_n(&usb_log_buffer.overflow, __ATOMIC_RELAXED));
+    p = append_text(p, " contention=");
+    p = append_decimal(p, __atomic_load_n(&usb_log_buffer.contended, __ATOMIC_RELAXED));
+    p = append_text(p, " transport=");
+    p = append_decimal(p, dwc3_dropped(native.core));
+    *p++ = '\n';
+    return (size_t)(p - text);
+}
+static void loss_notice_owned(void)
+{
+    char text[160];
+    size_t bytes;
+    uint64_t dropped = soc_usb_buffer_dropped(&usb_log_buffer) + dwc3_dropped(native.core);
+    if (dropped == usb_log_loss_reported || soc_usb_buffer_pending(&usb_log_buffer)) return;
+    bytes = loss_record(text, 0);
+    if (DWC3_TX_BYTES - dwc3_queued(native.core) >= bytes &&
+        dwc3_queue(native.core, text, bytes) == bytes) usb_log_loss_reported = dropped;
+}
+static void fail(unsigned int error, int core_result)
+{
+    native.status.error = error;
+    native.status.core_result = core_result;
+    native.status.phase = QCOM_USB_DEBUG_REFUSED;
+    native.status.dma_lease_active = native.lease.active;
+    pram_state();
+    if (usb_panic_mode == QCOM_USB_PANIC_REFUSAL)
+        panic("QCOMUSB refused err=%u core=%d phase=%u tr=%u last=%u",
+              error, core_result, native.status.diag_checkpoint, native.status.traces,
+              native.status.last_trace);
+    /* Say which check refused, on the panel. The module otherwise gives up silently: no USB
+     * device appears and nothing anywhere says why, because the console it would have reported
+     * on is the one that failed. boot_progress_stage writes into the diagnostic page the board
+     * already draws, so one photograph names the failing precondition. The persist entry point is a
+     * weak definition at the top of this file, so a board without that page links and loses the row. */
+    /* A persistent row, not boot_progress_stage: that ring keeps six lines, and this runs at
+     * time=0s, so the exit log overwrites the line within seconds and a refused controller then
+     * looks exactly like one that never ran. boot_progress_persist redraws every frame.
+     * Built by hand: the module's import audit allows only a fixed set of XNU symbols and
+     * snprintf is not one of them, so the in-band append helpers format the line. */
+    {
+        char line[192];
+        char *p = append_text(line, "QCOM USB REFUSED error=");
+        p = append_decimal(p, error);
+        p = append_text(p, " core=");
+        p = append_decimal(p, (uint64_t)(unsigned int)core_result);
+        /* The domain refusal at error 10 is one of twelve distinct results (QusbDomainOkay=0
+         * through QusbDomainCleanFailed=12 in QcomUsbDmaDomain.h), and which one it is decides
+         * the fix: StreamExists means firmware still owns the stream, NoSlot means the SMMU has
+         * no free context, ReadFailed means the registers did not answer at all. */
+        p = append_text(p, " domain=");
+        p = append_decimal(p, (uint64_t)native.status.domain_result);
+        /* For StreamExists, scan() records what firmware mapped SID 0 to: smr and s2cr.
+         * s2cr bits 17:16 are the memory-access type (0 translation, 1 bypass, 2 fault), and
+         * that decides the fix, so both words are printed. */
+        p = append_text(p, " smr=");
+        p = append_hex(p, native.status.domain_last_address);
+        p = append_text(p, " s2cr=");
+        p = append_hex(p, native.status.domain_last_readback & 0xffffffffu);
+        p = append_text(p, " sctlr=");
+        p = append_hex(p, native.status.domain_last_readback >> 32);
+        p = append_text(p, " ttbr0=");
+        p = append_hex(p, native.status.domain_last_expected);
+        *p = 0;
+        /* 0xffff6600: the amber refusal colour the panel already uses for failures. */
+        boot_progress_persist(line, 0xffff6600u);
+    }
+}
+static int in_range(uint64_t address, uint64_t base, uint64_t bytes)
+{
+    return !(address & 3u) && address >= base && address - base <= bytes - 4;
+}
+static volatile uint32_t *mmio(uint64_t physical)
+{
+    vm_offset_t base = 0;
+    uint64_t offset = 0;
+    if (in_range(physical, QUSB_GCC_BASE, GCC_BYTES)) {
+        base = native.gcc_va; offset = physical - QUSB_GCC_BASE;
+    } else if (in_range(physical, QUSB_DWC3_BASE, USB_BYTES)) {
+        base = native.usb_va; offset = physical - QUSB_DWC3_BASE;
+    } else if (in_range(physical, QUSB_SMMU_BASE, QUSB_SMMU_BYTES)) {
+        base = native.smmu_va; offset = physical - QUSB_SMMU_BASE;
+    }
+    if (!base) {
+        native.status.io_failed = 1;
+        native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
+        return 0;
+    }
+    return (volatile uint32_t *)(uintptr_t)(base + offset);
+}
+static int physical_read(void *cookie, QUSB_U64 address, QUSB_U32 *value)
+{
+    volatile uint32_t *p;
+    (void)cookie;
+    if (!value || deadline_expired()) {
+        native.status.io_failed = 1;
+        return 0;
+    }
+    p = mmio(address);
+    if (!p) return 0;
+    barrier(0); *value = *p; barrier(0);
+    return 1;
+}
+static int physical_write(void *cookie, QUSB_U64 address, QUSB_U32 value)
+{
+    volatile uint32_t *p;
+    (void)cookie;
+    if (deadline_expired()) { native.status.io_failed = 1; return 0; }
+    /* Only USB registers or shared-policy-approved selected-domain registers
+     * can be written. Private CB, local TLB and exact SID40 SMR/S2CR writes
+     * must match the recorded phase/value. Global SMMU/GCC writes are denied. */
+    if (!in_range(address, QUSB_DWC3_BASE, USB_BYTES) &&
+        !in_range(address, QUSB_SMMU_BASE, QUSB_SMMU_BYTES)) {
+        native.status.io_failed = 1;
+        native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
+        return 0;
+    }
+    if (in_range(address, QUSB_SMMU_BASE, QUSB_SMMU_BYTES) &&
+        !QcomUsbDomainWriteAllowed(&native.lease, address, value, 4)) {
+        native.status.io_failed = 1;
+        native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
+        return 0;
+    }
+    if (in_range(address, QUSB_SMMU_BASE, QUSB_SMMU_BYTES)) {
+        QUSB_U32 cr0;
+        if (!physical_read(0, QUSB_SMMU_BASE, &cr0) ||
+            (cr0 & 0x409u) != (native.lease.original_cr0 & 0x409u)) {
+            native.status.io_failed = 1;
+            native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
+            return 0;
+        }
+    }
+    p = mmio(address);
+    if (!p) return 0;
+    barrier(0); *p = value; barrier(0);
+    return 1;
+}
+static int physical_read64(void *cookie, QUSB_U64 address, QUSB_U64 *value)
+{
+    volatile QUSB_U64 *p;
+    (void)cookie;
+    if (!value || (address & 7u) || address < QUSB_SMMU_BASE ||
+        address - QUSB_SMMU_BASE > QUSB_SMMU_BYTES - 8u || !native.smmu_va || deadline_expired()) {
+        native.status.io_failed = 1;
+        native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
+        return 0;
+    }
+    p = (volatile QUSB_U64 *)(uintptr_t)(native.smmu_va + address - QUSB_SMMU_BASE);
+    barrier(0); *value = *p; barrier(0);
+    return 1;
+}
+static int physical_write64(void *cookie, QUSB_U64 address, QUSB_U64 value)
+{
+    volatile QUSB_U64 *p;
+    QUSB_U32 cr0;
+    (void)cookie;
+    if ((address & 7u) || address < QUSB_SMMU_BASE ||
+        address - QUSB_SMMU_BASE > QUSB_SMMU_BYTES - 8u || !native.smmu_va || deadline_expired() ||
+        !QcomUsbDomainWriteAllowed(&native.lease, address, value, 8) ||
+        !physical_read(0, QUSB_SMMU_BASE, &cr0) ||
+        (cr0 & 0x409u) != (native.lease.original_cr0 & 0x409u)) {
+        native.status.io_failed = 1;
+        native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
+        return 0;
+    }
+    /* One aligned volatile 64-bit access: never split a high TTBR into two
+     * 32-bit writes with an intermediate truncated translation-table base. */
+    p = (volatile QUSB_U64 *)(uintptr_t)(native.smmu_va + address - QUSB_SMMU_BASE);
+    barrier(0); *p = value; barrier(0);
+    return 1;
+}
+static uint32_t core_read(void *cookie, uint32_t offset)
+{
+    QUSB_U32 value;
+    if (offset >= USB_BYTES || (offset & 3u) ||
+        !physical_read(cookie, QUSB_DWC3_BASE + offset, &value)) return UINT32_MAX;
+    if (usb_diag_polling && usb_diag_mode == 201u && offset == 0xc40cu)
+        diag_reset(value == 0u ? 0u : (value <= 4096u && !(value & 3u)) ? 4u : 8u);
+    return value;
+}
+static void core_write(void *cookie, uint32_t offset, uint32_t value)
+{
+    if (offset >= USB_BYTES || (offset & 3u)) {
+        native.status.io_failed = 1;
+        native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
+        return;
+    }
+    (void)physical_write(cookie, QUSB_DWC3_BASE + offset, value);
+}
+static void delay_us(void *cookie, uint32_t usec)
+{
+    uint64_t start, ticks, iterations;
+    (void)cookie;
+    if (!usec || deadline_expired()) return;
+    /* Core and qualification delays are 1us or 1ms; refuse unbounded input. */
+    if (usec > 10000u || !native.status.counter_frequency) {
+        native.status.io_failed = 1;
+        return;
+    }
+    start = counter();
+    ticks = (native.status.counter_frequency * usec + 999999u) / 1000000u;
+    iterations = (uint64_t)usec * 1024u + 1024u;
+    while (counter() - start < ticks && iterations--) {
+        if (deadline_expired()) return;
+        __asm__ volatile("yield" ::: "memory");
+    }
+    if (counter() - start < ticks) native.status.io_failed = 1;
+}
+static int cache_sync(void *cpu, size_t bytes, enum dwc3_sync_direction direction,
+                       const void *arena, size_t arena_bytes)
+{
+    uintptr_t address = (uintptr_t)cpu, start, end;
+    uintptr_t base = (uintptr_t)arena;
+    size_t line = (size_t)native.status.cache_line;
+    if (!bytes) return 1;
+    if (!line || address < base || address - base >= arena_bytes ||
+        bytes > arena_bytes - (address - base)) {
+        native.status.io_failed = 1;
+        native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
+        return 0;
+    }
+    start = address & ~(line - 1u);
+    end = (address + bytes + line - 1u) & ~(line - 1u);
+    for (; start < end; start += line) {
+        if (direction == DWC3_TO_DEVICE)
+            __asm__ volatile("dc cvac, %0" :: "r"(start) : "memory");
+        else
+            __asm__ volatile("dc ivac, %0" :: "r"(start) : "memory");
+    }
+    barrier(0);
+    return 1;
+}
+static void dma_sync(void *cookie, void *cpu, size_t bytes,
+                     enum dwc3_sync_direction direction)
+{
+    (void)cookie;
+    if (usb_diag_polling && usb_diag_mode == 202u && direction == DWC3_FROM_DEVICE)
+        diag_reset(0);
+    if (cache_sync(cpu, bytes, direction, usb_dma, sizeof(usb_dma)) &&
+        usb_diag_polling && usb_diag_mode == 203u && direction == DWC3_FROM_DEVICE)
+        diag_reset(0);
+}
+static int clean_tables(void *cookie, void *cpu, QUSB_U32 bytes)
+{
+    (void)cookie;
+    if (deadline_expired()) return 0;
+    return cache_sync(cpu, bytes, DWC3_TO_DEVICE, usb_tables, sizeof(usb_tables));
+}
+static void core_trace(void *cookie, enum dwc3_trace event, uint32_t a, uint32_t b)
+{
+    (void)cookie;
+    native.status.last_trace = (uint32_t)event;
+    native.status.trace_a = a; native.status.trace_b = b;
+    native.status.traces++;
+    /* A COMMAND trace only ever happens for a command the core refused; keep the last one in its own
+     * slot so the following event traces cannot erase it. */
+    if (event == DWC3_TRACE_COMMAND) {
+        native.status.command_a = a; native.status.command_b = b;
+    }
+    /* Every trace is evidence that the controller posted an event and the core drained it, so the
+     * count in the phase record answers "is the event path alive" on its own. The setup packet gets
+     * its own slot; a periodic refresh keeps the count current without writing on every event. */
+    {
+        char line[36];
+        char *p = append_text(line, "T");
+        p = append_decimal(p, (uint64_t)event);
+        *p++ = ' ';
+        p = append_hex(p, a);
+        *p++ = ' ';
+        p = append_hex(p, b);
+        *p = 0;
+        if (fb_trace_count == 0 || !fb_same(fb_trace_lines[0], line)) {
+            unsigned i;
+            /* New trace lines only, and into msgbuf as well: the panel keeps four of them and needs a
+             * photograph, while the userdata log keeps the tail of everything this boot said. That is
+             * what separates "the controller never posted an event" from "it posted one the state
+             * machine refused" without a second hardware round. */
+            IOLog("QCOMUSB %s\n", line);
+            for (i = QCOM_USB_FB_TRACES - 1; i > 0; --i) fb_copy(fb_trace_lines[i], fb_trace_lines[i - 1]);
+            fb_copy(fb_trace_lines[0], line);
+            if (fb_trace_count < QCOM_USB_FB_TRACES) ++fb_trace_count;
+            fb_payload_dirty = 1;
+        }
+    }
+    if (event == DWC3_TRACE_SETUP) {
+        pram_setup(a, b);
+        if (usb_panic_mode == QCOM_USB_PANIC_REQUEST)
+            panic("QCOMUSB request rt=%x rq=%x v=%x i=%x l=%x phase=%u mode=%u",
+                  a >> 24, (a >> 16) & 0xffu, a & 0xffffu, b >> 16, b & 0xffffu,
+                  native.status.diag_checkpoint, usb_panic_mode);
+    } else if ((native.status.traces & 63u) == 0u) {
+        pram_state();
+    }
+}
+static int halt_inherited(void)
+{
+    QUSB_U32 control, status;
+    unsigned int i;
+    if (!physical_read(0, QUSB_DWC3_BASE + USB_DCTL, &control) ||
+        !physical_write(0, QUSB_DWC3_BASE + USB_DCTL, control & ~USB_RUN_STOP)) return 0;
+    for (i = 0; i < 10000u; i++) {
+        if (!physical_read(0, QUSB_DWC3_BASE + USB_DCTL, &control) ||
+            !physical_read(0, QUSB_DWC3_BASE + USB_DSTS, &status)) return 0;
+        if (!(control & USB_RUN_STOP) && (status & USB_HALTED)) return 1;
+        delay_us(0, 1);
+    }
+    return 0;
+}
+static int restore_lease(void)
+{
+    QUSB_DOMAIN_RESULT result;
+    if (!native.lease.active) return 1;
+    if (!halt_inherited()) return 0;
+    result = QcomUsbDomainRestore(&native.domain_platform, &native.lease);
+    native.status.restore_result = (uint32_t)result;
+    native.status.dma_lease_active = native.lease.active;
+    native.status.domain_stage = native.lease.stage;
+    native.status.domain_last_address = native.lease.last_address;
+    native.status.domain_last_expected = native.lease.last_expected;
+    native.status.domain_last_readback = native.lease.last_readback;
+    return result == QusbDomainOkay;
+}
+static int acquire_vbus(void)
+{
+    QUSB_U32 saved, check;
+    if (!halt_inherited() ||
+        !physical_read(0, QUSB_DWC3_BASE + USB_HS_PHY_CTRL, &saved)) return 0;
+    native.status.vbus_saved = saved;
+    if ((saved & USB_SW_VBUS_MASK) == USB_SW_VBUS_MASK) return 1;
+    /* The pinned dwc3-msm-core.c uses QSCRATCH software session-valid/VBUS.
+     * Mark ownership before a write because even a failed readback can leave
+     * a side effect. Only these two bits will be restored after a proven halt. */
+    native.status.vbus_owned = 1;
+    if (!physical_write(0, QUSB_DWC3_BASE + USB_HS_PHY_CTRL, saved | USB_SW_VBUS_MASK) ||
+        !physical_read(0, QUSB_DWC3_BASE + USB_HS_PHY_CTRL, &check)) return 0;
+    return (check & USB_SW_VBUS_MASK) == USB_SW_VBUS_MASK;
+}
+static int restore_vbus(void)
+{
+    QUSB_U32 current, wanted, check;
+    if (!native.status.vbus_owned) return 1;
+    if (!halt_inherited() ||
+        !physical_read(0, QUSB_DWC3_BASE + USB_HS_PHY_CTRL, &current)) return 0;
+    /* Preserve all unrelated bits. If our failed set never took effect, the
+     * original selected bits already prove no restoration write is needed. */
+    if ((current & USB_SW_VBUS_MASK) == (native.status.vbus_saved & USB_SW_VBUS_MASK)) {
+        native.status.vbus_owned = 0;
+        return 1;
+    }
+    if ((current & USB_SW_VBUS_MASK) != USB_SW_VBUS_MASK) return 0;
+    wanted = (current & ~USB_SW_VBUS_MASK) | (native.status.vbus_saved & USB_SW_VBUS_MASK);
+    if (!physical_write(0, QUSB_DWC3_BASE + USB_HS_PHY_CTRL, wanted) ||
+        !physical_read(0, QUSB_DWC3_BASE + USB_HS_PHY_CTRL, &check) ||
+        (check & USB_SW_VBUS_MASK) != (wanted & USB_SW_VBUS_MASK)) return 0;
+    native.status.vbus_owned = 0;
+    return 1;
+}
+static int phy_core_halted(void)
+{
+    QUSB_U32 control, status;
+    return physical_read(0, QUSB_DWC3_BASE + USB_DCTL, &control) &&
+           physical_read(0, QUSB_DWC3_BASE + USB_DSTS, &status) &&
+           !(control & USB_RUN_STOP) && (status & USB_HALTED);
+}
+static int acquire_phy(void)
+{
+    QUSB_U32 current, check;
+    if (native.status.phy_owned || !phy_core_halted() ||
+        !physical_read(0, QUSB_DWC3_BASE + USB_GUSB2PHYCFG, &current)) return 0;
+    native.status.phy_saved = current & USB_PHY_KEEP_AWAKE_MASK;
+    native.status.phy_applied = native.status.phy_restoring = 0;
+    /* DT dis_u2_susphy requires bit6 clear. Holding bit8 clear is this
+     * HS-only, non-LPM polling diagnostic's keep-awake policy. Save only the
+     * selected controls and record a possible side effect before writing. */
+    native.status.phy_owned = 1;
+    if (!physical_write(0, QUSB_DWC3_BASE + USB_GUSB2PHYCFG,
+                         current & ~USB_PHY_KEEP_AWAKE_MASK) ||
+        !physical_read(0, QUSB_DWC3_BASE + USB_GUSB2PHYCFG, &check) ||
+        (check & USB_PHY_KEEP_AWAKE_MASK)) return 0;
+    native.status.phy_applied = 1;
+    return 1;
+}
+static int restore_phy(void)
+{
+    QUSB_U32 current, selected, wanted, check;
+    if (!native.status.phy_owned) return 1;
+    if (native.status.stop_failed || native.status.vbus_owned || native.lease.active ||
+        !phy_core_halted() ||
+        !physical_read(0, QUSB_DWC3_BASE + USB_GUSB2PHYCFG, &current)) return 0;
+    selected = current & USB_PHY_KEEP_AWAKE_MASK;
+    if ((!native.status.phy_applied || native.status.phy_restoring) &&
+        selected == native.status.phy_saved) {
+        /* Failed acquire never changed the controls, or a prior restore
+         * write completed despite its callback/readback failing. */
+        native.status.phy_owned = native.status.phy_applied = native.status.phy_restoring = 0;
+        return 1;
+    }
+    if (selected) return 0; /* Unexpected owner changed our active lease. */
+    wanted = (current & ~USB_PHY_KEEP_AWAKE_MASK) | native.status.phy_saved;
+    native.status.phy_restoring = 1;
+    if (!physical_write(0, QUSB_DWC3_BASE + USB_GUSB2PHYCFG, wanted) ||
+        !physical_read(0, QUSB_DWC3_BASE + USB_GUSB2PHYCFG, &check) ||
+        (check & USB_PHY_KEEP_AWAKE_MASK) != native.status.phy_saved) return 0;
+    native.status.phy_owned = native.status.phy_applied = native.status.phy_restoring = 0;
+    return 1;
+}
+static int restore_after_failure(void)
+{
+    /* A failed stop must retain both leases and all static DMA buffers.
+     * Never change VBUS or SMMU merely because another status bit looked idle. */
+    if (native.status.stop_failed) return 0;
+    if ((native.core_initialized && dwc3_stop(native.core)) || !halt_inherited()) {
+        native.status.stop_failed = 1; return 0;
+    }
+    if (!restore_vbus() || !restore_lease() || !restore_phy()) return 0;
+    return 1;
+}
+static int dma_addressable(uint64_t physical, size_t bytes, uint32_t width)
+{
+    uint64_t last;
+    if (!bytes || width < 32u || width > 64u || physical > UINT64_MAX - (bytes - 1u)) return 0;
+    last = physical + bytes - 1u;
+    return width == 64u || (last >> width) == 0;
+}
+static int validate_static_pages(const uint8_t *arena, size_t arena_bytes, uint64_t *address)
+{
+    uint64_t base, physical;
+    size_t offset;
+    if (!arena_bytes || (arena_bytes & (PAGE_BYTES - 1u))) return 0;
+    base = (uint64_t)ml_static_vtop((vm_offset_t)(uintptr_t)arena);
+    if ((base & (PAGE_BYTES - 1u)) || base > UINT64_MAX - arena_bytes) return 0;
+    for (offset = 0; offset < arena_bytes; offset += PAGE_BYTES) {
+        physical = (uint64_t)ml_static_vtop((vm_offset_t)(uintptr_t)(arena + offset));
+        if (physical != base + offset) return 0;
+        physical = (uint64_t)ml_static_vtop((vm_offset_t)(uintptr_t)(arena + offset + PAGE_BYTES - 1));
+        if (physical != base + offset + PAGE_BYTES - 1) return 0;
+    }
+    *address = base;
+    return 1;
+}
+
+int qcom_usb_debug_init(void)
+{
+    uint64_t flags, frequency, ctr;
+    int enabled = 0, ret = 0;
+    QUSB_RESULT result;
+    QUSB_DOMAIN_RESULT domain_result;
+    QUSB_INHERITED inherited;
+    struct dwc3_platform platform;
+    static const struct dwc3_identity identity = {
+        QUD_USB_VID, QUD_USB_PID, "UniXNU", QUD_USB_PRODUCT, QUD_USB_SERIAL
+    };
+    /* First record of the round: it says the worker reached us at all, which is the difference between
+     * "the component never ran" and "it ran and stopped at phase N" without any console. sizeof keeps
+     * the length exact instead of a hand-counted constant. */
+    static const char reached[] = "QCOMUSB INIT";
+    pram_write(QCOM_USB_PRAM_SETUP, reached, sizeof(reached) - 1u);
+    fb_report(reached, "WORKER REACHED QCOM INIT");
+    if (native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
+        int diagnostic = 0;
+        int panic_mode = 0;
+        /* 0 means off, and it has to be accepted explicitly: the board compiles a default mode in
+         * (QCOM_USB_PANIC_DEFAULT), so without an off switch every payload built from that kernel
+         * would panic on the first control request and enumeration could never be tested. */
+        if (PE_parse_boot_argn("qcom-usb-panic", &panic_mode, sizeof(panic_mode)) &&
+            panic_mode >= 0 && panic_mode <= QCOM_USB_PANIC_POLLS) {
+            usb_panic_mode = (unsigned int)panic_mode;
+        }
+        if (QUD_PSCI_SMC_RESET &&
+            PE_parse_boot_argn("qcom-usb-diag", &diagnostic, sizeof(diagnostic)) &&
+            (diagnostic == 1 || diagnostic == 2 || (diagnostic >= 101 && diagnostic <= 119) ||
+             (diagnostic >= 201 && diagnostic <= 205))) {
+            usb_diag_enabled = 1;
+            usb_diag_mode = (unsigned int)diagnostic;
+            native.status.diag_enabled = 1;
+            usb_diag_target = diagnostic >= 101 && diagnostic <= 119 ? (unsigned int)diagnostic - 100u : 0u;
+            diag_checkpoint(QCOM_USB_DEBUG_DIAG_BEFORE_ACQUIRE);
+            /* Mode2 measures this exact kernel/handoff path's zero-delay
+             * reboot baseline before interpreting mode1's encoded delays. */
+            if (diagnostic == 2) diag_reset(0);
+        }
+    }
+    if (!acquire(&flags)) {
+        if (usb_diag_enabled && native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED) {
+            fail(QCOM_USB_DEBUG_ACQUIRE_REFUSED, 0);
+            diag_reset(12u + 4u * native.status.error);
+        }
+        return 0;
+    }
+    if (native.status.phase != QCOM_USB_DEBUG_NOT_INITIALIZED) {
+        ret = native.status.phase == QCOM_USB_DEBUG_ACTIVE; goto out;
+    }
+    if (!PE_parse_boot_argn("qcom-usb-debug", &enabled, sizeof(enabled)) || enabled != 1) {
+        native.status.phase = QCOM_USB_DEBUG_DISABLED; goto out;
+    }
+    native.status.phase = QCOM_USB_DEBUG_PREPARING;
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_AFTER_ACQUIRE);
+    if (dwc3_context_bytes() > sizeof(usb_context)) {
+        fail(QCOM_USB_DEBUG_CONTEXT_TOO_SMALL, 0); goto out;
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_COUNTER_CACHE);
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    if (usb_diag_mode == 204u)
+        diag_reset(frequency == UINT64_C(19200000) ? 0u :
+                   frequency == UINT64_C(24000000) ? 4u :
+                   frequency == UINT64_C(1000000000) ? 8u : 12u);
+    if (frequency < 1000u || frequency > COUNTER_MAX_FREQUENCY) {
+        fail(QCOM_USB_DEBUG_BAD_COUNTER, 0); goto out;
+    }
+    if (usb_diag_mode == 205u) {
+        uint64_t v0 = counter(), p0, p1, vd, pd;
+        unsigned int samples = 100000000u;
+        __asm__ volatile("isb\nmrs %0, cntpct_el0" : "=r"(p0) :: "memory");
+        while (samples-- && counter() - v0 < frequency / 4u) __asm__ volatile("yield" ::: "memory");
+        __asm__ volatile("isb\nmrs %0, cntpct_el0" : "=r"(p1) :: "memory");
+        vd = counter() - v0; pd = p1 - p0;
+        /*4s=matching progress;8s=physical frozen;12s=different rate;
+         *16s=virtual sampling budget exhausted. Waits use virtual time. */
+        diag_reset(vd < frequency / 4u ? 16u : !pd ? 8u :
+                   (pd > vd ? pd - vd : vd - pd) > vd / 10u ? 12u : 4u);
+    }
+    native.status.counter_frequency = frequency;
+    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+    native.status.cache_line = UINT64_C(4) << ((ctr >> 16) & 15u);
+    if (native.status.cache_line > 64u || native.status.cache_line < 16u) {
+        fail(QCOM_USB_DEBUG_CACHE_GRANULE_UNSUPPORTED, 0); goto out;
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_DATA_VTOP);
+    if (!validate_static_pages(usb_dma, sizeof(usb_dma), &native.status.dma_pa)) {
+        fail(QCOM_USB_DEBUG_DMA_NOT_CONTIGUOUS, 0); goto out;
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_TABLE_VTOP);
+    if (!validate_static_pages(usb_tables, sizeof(usb_tables), &native.status.tables_pa)) {
+        fail(QCOM_USB_DEBUG_TABLES_NOT_CONTIGUOUS, 0); goto out;
+    }
+    native.status.dma_iova = QUSB_DOMAIN_IOVA;
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_MAP_GCC);
+    native.gcc_va = ml_io_map((vm_offset_t)QUSB_GCC_BASE, GCC_BYTES);
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_MAP_USB);
+    native.usb_va = ml_io_map((vm_offset_t)QUSB_DWC3_BASE, USB_BYTES);
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_MAP_SMMU);
+    native.smmu_va = ml_io_map((vm_offset_t)QUSB_SMMU_BASE, QUSB_SMMU_BYTES);
+    if (!native.gcc_va || !native.usb_va || !native.smmu_va) {
+        fail(QCOM_USB_DEBUG_MAP_FAILED, 0); goto out;
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_INSPECT);
+    result = QcomUsbInspectInherited(physical_read, 0, &inherited);
+    native.status.qcom_result = (uint32_t)result;
+    if (result != QusbQualified) {
+        /* In particular do not wake a clock-gated old DMA engine: the native
+         * kernel cannot prove ABL's original DMA buffers are still retained. */
+        fail(QCOM_USB_DEBUG_INHERITED_STATE_REFUSED, 0); goto out;
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_GATES_WIDTH);
+    /* GDSCR HW_CONTROL is bit1; CFG_GDSCR.POWER_UP_COMPLETE is a separate
+     * register's bit16, already checked by QcomUsbInspectInherited. */
+    if (inherited.gcc_gdscr & 3u) {
+        fail(QCOM_USB_DEBUG_UNSTABLE_POWER_STATE, 0); goto out;
+    }
+    if (((inherited.gctl >> 12) & 3u) != 2u) {
+        fail(QCOM_USB_DEBUG_CORE_NOT_DEVICE, 0); goto out;
+    }
+    {
+        QUSB_U32 hwparams0;
+        if (!physical_read(0, QUSB_DWC3_BASE + USB_GHWPARAMS0, &hwparams0)) {
+            fail(QCOM_USB_DEBUG_DMA_WIDTH_UNSUPPORTED, 0); goto out;
+        }
+        native.status.hwparams0 = hwparams0;
+        /* Linux drivers/usb/dwc3/core.h DWC3_GHWPARAMS0_AWIDTH and TI
+         * SPRUHJ7A table3-91: bits31:24 are master address width in bits.
+         * DWC3 sees only the fixed IOVA span. The domain backend separately
+         * checks high physical DMA/table addresses against SMMU output width.
+         * No truncation, identity mapping or BYPASS fallback is used. */
+        native.status.dma_address_width = (hwparams0 >> 24) & 0xffu;
+        if (!dma_addressable(native.status.dma_iova, sizeof(usb_dma), native.status.dma_address_width)) {
+            fail(QCOM_USB_DEBUG_DMA_WIDTH_UNSUPPORTED, 0); goto out;
+        }
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_HALT);
+    if (!halt_inherited()) { fail(QCOM_USB_DEBUG_HALT_TIMEOUT, 0); goto out; }
+    bytes_zero(&native.domain_platform, sizeof(native.domain_platform));
+    native.domain_platform.read32 = physical_read;
+    native.domain_platform.write32 = physical_write;
+    native.domain_platform.read64 = physical_read64;
+    native.domain_platform.write64 = physical_write64;
+    native.domain_platform.barrier = barrier;
+    native.domain_platform.delay_us = delay_us;
+    native.domain_platform.clean_tables = clean_tables;
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_DOMAIN);
+    domain_result = QcomUsbDomainInstall(&native.domain_platform, usb_tables, native.status.tables_pa,
+                                         sizeof(usb_tables), native.status.dma_pa, sizeof(usb_dma), &native.lease);
+    native.status.domain_result = (uint32_t)domain_result;
+    native.status.domain_stage = native.lease.stage;
+    native.status.domain_bank = native.lease.cb;
+    native.status.domain_slot = native.lease.index;
+    native.status.domain_asid = native.lease.asid;
+    native.status.domain_last_address = native.lease.last_address;
+    native.status.domain_last_expected = native.lease.last_expected;
+    native.status.domain_last_readback = native.lease.last_readback;
+    native.status.dma_lease_active = native.lease.active;
+    if (domain_result != QusbDomainOkay) {
+        fail(QCOM_USB_DEBUG_DMA_REFUSED, 0); (void)restore_lease(); goto out;
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_VERIFY_DOMAIN);
+    {
+        QUSB_U32 sctlr, s2cr;
+        if (!native.lease.active || native.status.io_failed ||
+            native.lease.iova != native.status.dma_iova ||
+            native.lease.dma_pa != native.status.dma_pa || native.lease.table_pa != native.status.tables_pa ||
+            !in_range(native.lease.cb_base, QUSB_SMMU_BASE, QUSB_SMMU_BYTES) ||
+            native.lease.index >= native.lease.stream_count ||
+            !physical_read(0, native.lease.cb_base, &sctlr) || !(sctlr & 1u) ||
+            !physical_read(0, QUSB_SMMU_BASE + 0xc00u + 4u * native.lease.index, &s2cr) ||
+            ((s2cr >> 16) & 3u) != 0u || (s2cr & 0xffu) != native.lease.cb) {
+            fail(QCOM_USB_DEBUG_DOMAIN_STATE_INVALID, 0); (void)restore_lease(); goto out;
+        }
+    }
+    native.status.dma_mode = QCOM_USB_DEBUG_DMA_PRIVATE_TRANSLATED;
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_VBUS);
+    if (!acquire_phy()) {
+        fail(QCOM_USB_DEBUG_PHY_LEASE_FAILED, 0); (void)restore_after_failure(); goto out;
+    }
+    if (!acquire_vbus()) {
+        fail(QCOM_USB_DEBUG_VBUS_FAILED, 0); (void)restore_after_failure(); goto out;
+    }
+    bytes_zero(&platform, sizeof(platform));
+    platform.read32 = core_read; platform.write32 = core_write;
+    platform.delay_us = delay_us; platform.dma_sync = dma_sync;
+    platform.barrier = barrier; platform.trace = core_trace;
+    native.core = (struct dwc3 *)(void *)usb_context;
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_CORE_INIT);
+    ret = dwc3_init(usb_context, sizeof(usb_context), &platform, &identity, usb_dma,
+                         native.status.dma_iova, sizeof(usb_dma));
+    if (ret || native.status.io_failed) {
+        fail(QCOM_USB_DEBUG_CORE_INIT_FAILED, ret); (void)restore_after_failure(); ret = 0; goto out;
+    }
+    native.core_initialized = 1;
+    {
+        static const char banner[] = "QCOM XNU USB CDC ACM v1\n";
+        (void)backlog_write(banner, sizeof(banner) - 1);
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_CORE_START);
+    ret = dwc3_start(native.core);
+    if (ret || native.status.io_failed) {
+        fail(QCOM_USB_DEBUG_CORE_START_FAILED, ret);
+        (void)restore_after_failure(); ret = 0; goto out;
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_CORE_STARTED);
+    usb_diag_polling = 1;
+    /* Let the host complete EP0 enumeration before early kernel startup can
+     * reach a path with no more log output. Once-per-character polling alone
+     * may stop before the host has even requested the device descriptor.
+     * This is bounded without installing an asynchronous worker or IRQ. */
+    {
+        uint64_t start = counter();
+        unsigned int attempts = 50000u;
+        while (attempts-- && counter() - start < frequency * 5u) {
+            int events;
+            backlog_drain_owned();
+            events = dwc3_poll(native.core, 64);
+            native.status.poll_calls++;
+            native.status.last_poll_events = events < 0 ? 0u : (uint32_t)events;
+            if (events < 0 || native.status.io_failed) {
+                usb_diag_polling = 0;
+                native.status.core_event_bytes = dwc3_event_count(native.core);
+                native.status.core_last_event = dwc3_last_event(native.core);
+                fail(QCOM_USB_DEBUG_CORE_POLL_FAILED, events);
+                (void)restore_after_failure(); ret = 0; goto out;
+            }
+            if (native.status.poll_calls == 1u) diag_checkpoint(QCOM_USB_DEBUG_DIAG_FIRST_POLL);
+            if (dwc3_ready(native.core)) break;
+            delay_us(0, 100);
+        }
+    }
+    usb_diag_polling = 0;
+    if (usb_diag_mode >= 201u && usb_diag_mode <= 203u) diag_reset(12);
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_ENUM_DONE);
+    native.status.phase = QCOM_USB_DEBUG_ACTIVE;
+    /* The success counterpart of fail()'s persistent row. Without it a working controller and a
+     * controller that never ran both leave the row empty, which is the ambiguity this whole
+     * change exists to remove. */
+    boot_progress_persist("QCOM USB ACTIVE (CDC-ACM up)", 0xff00ff88u);
+    ret = 1;
+out:
+    buffer_status_owned();
+    release(flags);
+    if (usb_diag_enabled && native.status.phase == QCOM_USB_DEBUG_REFUSED)
+        diag_reset(12u + 4u * native.status.error);
+    return ret;
+}
+
+static int poll_owned(void)
+{
+    int ret;
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE) return 0;
+    backlog_drain_owned();
+    loss_notice_owned();
+    /* Drain a burst, not a single event: one control transfer is a setup event plus data and status
+     * events, and the host gives SET_ADDRESS tens of milliseconds. With a budget of 1 the worker
+     * needed one 5 ms sleep per event, which is exactly the window that failed on this board
+     * ("Device not responding to setup address", STATE 81). The core caps the budget at 256. */
+    ret = dwc3_poll(native.core, 128);
+    native.status.poll_calls++;
+    native.status.last_poll_events = ret < 0 ? 0u : (uint32_t)ret;
+    buffer_status_owned();
+    if (ret < 0 || native.status.io_failed) {
+        native.status.core_result = ret;
+        native.status.core_event_bytes = dwc3_event_count(native.core);
+        native.status.core_last_event = dwc3_last_event(native.core);
+        native.status.error = native.deadline_active && native.deadline_expired ? QCOM_USB_DEBUG_DEADLINE_EXPIRED :
+                                                      QCOM_USB_DEBUG_CORE_POLL_FAILED;
+        native.status.phase = QCOM_USB_DEBUG_IO_FAILED;
+        return 0;
+    }
+    return 1;
+}
+static uint64_t control_mix(uint64_t value)
+{
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    value ^= value >> 31;
+    return value;
+}
+static void control_rotate_session_owned(void)
+{
+    qcom_usb_shot_cancel();
+    uint64_t next = 0;
+    unsigned int attempt;
+    for (attempt = 0; attempt < 4u; attempt++) {
+        usb_control_context.seed += UINT64_C(0x9e3779b97f4a7c15);
+        next = control_mix(counter() ^ usb_control_context.seed);
+        if (!next) next = UINT64_C(0x53584e55314b4559); /* "SXNU1KEY" */
+        if (next != usb_control_context.state.session) break;
+    }
+    /* A transport generation change must never restart sequence numbering in
+     * the same session. The bounded fallback also covers a theoretical mix
+     * collision with the previous value. */
+    if (next == usb_control_context.state.session)
+        next = next == UINT64_MAX ? 1u : next + 1u;
+    sxnu_control_state_reset(&usb_control_context.state, next,
+                             usb_control_context.state.generation);
+    sxnu_control_parser_reset(&usb_control_context.parser);
+}
+static size_t control_reply_queue(const char *reply, size_t bytes)
+{
+    uint8_t wire[SXNU_CONTROL_REPLY_BYTES + 1u];
+    uint64_t flags;
+    int queued = 0;
+    if (!reply || !bytes || bytes > SXNU_CONTROL_REPLY_BYTES || !acquire(&flags)) return 0;
+    if (native.status.phase == QCOM_USB_DEBUG_ACTIVE) {
+        backlog_drain_owned();
+        if (DWC3_TX_BYTES - dwc3_queued(native.core) >= bytes + 1u) {
+            wire[0] = (uint8_t)'\n';
+            bytes_copy(wire + 1u, reply, bytes);
+            if (dwc3_queue(native.core, wire, bytes + 1u) == bytes + 1u) queued = 1;
+        }
+    }
+    release(flags);
+    if (queued) (void)__atomic_add_fetch(&control_reply_count, 1u, __ATOMIC_RELAXED);
+    return queued ? bytes : 0;
+}
+static size_t control_reply_hello(char *reply, size_t capacity,
+                                  const struct sxnu_control_frame *frame)
+{
+    struct sxnu_control_writer writer;
+    sxnu_control_writer_init(&writer, reply, capacity);
+    if (!sxnu_control_reply_start(&writer, usb_control_context.state.session, frame->seq,
+                                  frame->verb, "OK") ||
+        !sxnu_control_writer_text(&writer, " session=") ||
+        !sxnu_control_writer_hex(&writer, usb_control_context.state.session,
+                                 SXNU_CONTROL_SESSION_HEX) ||
+        !sxnu_control_writer_text(&writer, " last_seq=") ||
+        !sxnu_control_writer_hex(&writer, usb_control_context.state.last_seq,
+                                 SXNU_CONTROL_SEQ_HEX) ||
+        !sxnu_control_writer_text(&writer, " control=1")) return 0;
+    return sxnu_control_reply_finish(&writer);
+}
+static size_t control_reply_ping(char *reply, size_t capacity,
+                                 const struct sxnu_control_frame *frame,
+                                 const struct qcom_usb_debug_status *status)
+{
+    struct sxnu_control_writer writer;
+    sxnu_control_writer_init(&writer, reply, capacity);
+    if (!sxnu_control_reply_start(&writer, frame->session, frame->seq, frame->verb, "OK") ||
+        !sxnu_control_writer_text(&writer, " rx=") ||
+        !sxnu_control_writer_decimal(&writer, status->rx_pending) ||
+        !sxnu_control_writer_text(&writer, " rxo=") ||
+        !sxnu_control_writer_decimal(&writer, status->rx_overflow) ||
+        !sxnu_control_writer_text(&writer, " tx=") ||
+        !sxnu_control_writer_decimal(&writer, status->transport_pending) ||
+        !sxnu_control_writer_text(&writer, " poll=") ||
+        !sxnu_control_writer_decimal(&writer, status->poll_calls)) return 0;
+    return sxnu_control_reply_finish(&writer);
+}
+static size_t control_reply_status(char *reply, size_t capacity,
+                                   const struct sxnu_control_frame *frame,
+                                   const struct qcom_usb_debug_status *status)
+{
+    struct sxnu_control_writer writer;
+    sxnu_control_writer_init(&writer, reply, capacity);
+    if (!sxnu_control_reply_start(&writer, frame->session, frame->seq, frame->verb, "OK") ||
+        !sxnu_control_writer_text(&writer, " usb=") ||
+        !sxnu_control_writer_decimal(&writer, status->phase) ||
+        !sxnu_control_writer_text(&writer, " er=") ||
+        !sxnu_control_writer_decimal(&writer, status->error) ||
+        !sxnu_control_writer_text(&writer, " rx=") ||
+        !sxnu_control_writer_decimal(&writer, status->rx_pending) ||
+        !sxnu_control_writer_text(&writer, " rxo=") ||
+        !sxnu_control_writer_decimal(&writer, status->rx_overflow) ||
+        !sxnu_control_writer_text(&writer, " tx=") ||
+        !sxnu_control_writer_decimal(&writer, status->transport_pending) ||
+        !sxnu_control_writer_text(&writer, " bp=") ||
+        !sxnu_control_writer_decimal(&writer, status->buffer_pending) ||
+        !sxnu_control_writer_text(&writer, " bo=") ||
+        !sxnu_control_writer_decimal(&writer, status->buffer_overflow) ||
+        !sxnu_control_writer_text(&writer, " poll=") ||
+        !sxnu_control_writer_decimal(&writer, status->poll_calls) ||
+        !sxnu_control_writer_text(&writer, " ev=") ||
+        !sxnu_control_writer_decimal(&writer, status->last_poll_events) ||
+        !sxnu_control_writer_text(&writer, " gen=") ||
+        !sxnu_control_writer_decimal(&writer, status->rx_generation) ||
+        !sxnu_control_writer_text(&writer, " rej=") ||
+        !sxnu_control_writer_decimal(&writer, status->control_rejected)) return 0;
+    return sxnu_control_reply_finish(&writer);
+}
+static size_t control_reply_reboot(char *reply, size_t capacity,
+                                   const struct sxnu_control_frame *frame,
+                                   const char *status, const char *reason)
+{
+    struct sxnu_control_writer writer;
+    sxnu_control_writer_init(&writer, reply, capacity);
+    if (!sxnu_control_reply_start(&writer, frame->session, frame->seq, frame->verb, status) ||
+        !sxnu_control_writer_text(&writer, " state=") ||
+        !sxnu_control_writer_text(&writer, reason)) return 0;
+    return sxnu_control_reply_finish(&writer);
+}
+static void control_handle_frame(const struct sxnu_control_frame *frame,
+                                 const struct qcom_usb_debug_status *status,
+                                 uint32_t generation)
+{
+    enum sxnu_control_verb accepted = sxnu_control_accept(&usb_control_context.state, frame);
+    char reply[SXNU_CONTROL_REPLY_BYTES];
+    size_t reply_bytes = 0;
+    int queued = 0;
+    int reboot_accepted = 0;
+    size_t shot_bytes = 0;
+
+    if (accepted == SXNU_CONTROL_VERB_INVALID) {
+        (void)__atomic_add_fetch(&control_rejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    switch (accepted) {
+    case SXNU_CONTROL_VERB_HELLO:
+        reply_bytes = control_reply_hello(reply, sizeof(reply), frame);
+        break;
+    case SXNU_CONTROL_VERB_PING:
+        reply_bytes = control_reply_ping(reply, sizeof(reply), frame, status);
+        break;
+    case SXNU_CONTROL_VERB_STATUS:
+        reply_bytes = control_reply_status(reply, sizeof(reply), frame, status);
+        break;
+    case SXNU_CONTROL_VERB_SCREENSHOT: {
+        struct qcom_usb_screenshot_info info;
+        struct sxnu_control_writer writer;
+        int result = __atomic_load_n(&control_reboot_requested, __ATOMIC_ACQUIRE) ?
+                     -3 : qcom_usb_shot_capture(frame->seq);
+        if (result != 1 || !qcom_usb_shot_info(&info)) {
+            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "ERR",
+                result == -1 ? "unavailable" : result == -3 ? "busy" : "capture-failed");
+            break;
+        }
+        sxnu_control_writer_init(&writer, reply, sizeof(reply));
+        (void)sxnu_control_reply_start(&writer, frame->session, frame->seq, frame->verb, "OK");
+        (void)sxnu_control_writer_text(&writer, " state=ready width=");
+        (void)sxnu_control_writer_decimal(&writer, info.width);
+        (void)sxnu_control_writer_text(&writer, " height=");
+        (void)sxnu_control_writer_decimal(&writer, info.height);
+        (void)sxnu_control_writer_text(&writer, " bytes=");
+        (void)sxnu_control_writer_decimal(&writer, info.bytes);
+        (void)sxnu_control_writer_text(&writer, " encoded=");
+        (void)sxnu_control_writer_decimal(&writer, info.encoded_bytes);
+        (void)sxnu_control_writer_text(&writer, " crc32=");
+        (void)sxnu_control_writer_hex(&writer, info.crc32, 8);
+        (void)sxnu_control_writer_text(&writer, " frame=");
+        (void)sxnu_control_writer_decimal(&writer, info.frame);
+        (void)sxnu_control_writer_text(&writer, info.rle ? " encoding=rle" : " encoding=rgb");
+        reply_bytes = sxnu_control_reply_finish(&writer);
+        break;
+    }
+    case SXNU_CONTROL_VERB_SHOTNEXT: {
+        struct qcom_usb_screenshot_info info;
+        struct sxnu_control_writer writer;
+        uint8_t chunk[QUD_SCREENSHOT_CHUNK];
+        uint32_t offset;
+        if (!qcom_usb_shot_info(&info)) {
+            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "ERR", "noimage");
+            break;
+        }
+        shot_bytes = qcom_usb_shot_peek(chunk, sizeof(chunk), &offset);
+        if (!shot_bytes) {
+            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "ERR", "done");
+            break;
+        }
+        sxnu_control_writer_init(&writer, reply, sizeof(reply));
+        (void)sxnu_control_reply_start(&writer, frame->session, frame->seq, frame->verb, "OK");
+        (void)sxnu_control_writer_text(&writer, " state=data frame=");
+        (void)sxnu_control_writer_decimal(&writer, info.frame);
+        (void)sxnu_control_writer_text(&writer, " offset=");
+        (void)sxnu_control_writer_decimal(&writer, offset);
+        (void)sxnu_control_writer_text(&writer, " data=");
+        for (size_t i = 0; i < shot_bytes; ++i)
+            (void)sxnu_control_writer_hex(&writer, chunk[i], 2);
+        reply_bytes = sxnu_control_reply_finish(&writer);
+        break;
+    }
+    case SXNU_CONTROL_VERB_REBOOT:
+        if (!__atomic_load_n(&control_hook_owned, __ATOMIC_ACQUIRE))
+            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "ERR", "nohook");
+        else if (__atomic_load_n(&control_reboot_requested, __ATOMIC_ACQUIRE) ||
+                 __atomic_load_n(&control_reboot_taken, __ATOMIC_ACQUIRE))
+            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "ERR", "busy");
+        else {
+            reply_bytes = control_reply_reboot(reply, sizeof(reply), frame, "OK", "queued");
+            reboot_accepted = 1;
+        }
+        break;
+    default:
+        return;
+    }
+    if (!reply_bytes) {
+        (void)__atomic_add_fetch(&control_rejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    queued = control_reply_queue(reply, reply_bytes) == reply_bytes;
+    if (!queued || !sxnu_control_commit(&usb_control_context.state, frame, accepted)) {
+        (void)__atomic_add_fetch(&control_rejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    if (shot_bytes) (void)qcom_usb_shot_commit(shot_bytes);
+    if (accepted == SXNU_CONTROL_VERB_REBOOT && reboot_accepted) {
+        qcom_usb_shot_cancel();
+        __atomic_store_n(&control_reboot_seq, frame->seq, __ATOMIC_RELAXED);
+        __atomic_store_n(&control_reboot_session, frame->session, __ATOMIC_RELAXED);
+        __atomic_store_n(&control_reboot_generation, generation, __ATOMIC_RELAXED);
+        __atomic_store_n(&control_reboot_taken, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&control_reboot_armed, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&control_reboot_requested, 1u, __ATOMIC_RELEASE);
+    }
+}
+static void control_service(const uint8_t *bytes, size_t count, uint32_t generation,
+                            const struct qcom_usb_debug_status *status)
+{
+    size_t i;
+    if (!__atomic_load_n(&control_enabled, __ATOMIC_ACQUIRE)) return;
+    if (generation != usb_control_context.state.generation) {
+        usb_control_context.state.generation = generation;
+        control_rotate_session_owned();
+    }
+    for (i = 0; i < count; i++) {
+        char line[SXNU_CONTROL_FRAME_BYTES];
+        size_t line_bytes = 0;
+        int complete = sxnu_control_parser_feed(&usb_control_context.parser, bytes[i], line,
+                                                 sizeof(line), &line_bytes);
+        if (complete > 0) {
+            struct sxnu_control_frame frame;
+            if (sxnu_control_parse(line, line_bytes, &frame))
+                control_handle_frame(&frame, status, generation);
+            else
+                (void)__atomic_add_fetch(&control_rejected, 1u, __ATOMIC_RELAXED);
+        } else if (complete < 0) {
+            (void)__atomic_add_fetch(&control_rejected, 1u, __ATOMIC_RELAXED);
+        }
+    }
+}
+int qcom_usb_debug_control_start(void)
+{
+    uint64_t flags;
+    unsigned int expected = 0;
+    int (*halt_expected)(unsigned int) = 0;
+    int installed;
+    if (!__atomic_compare_exchange_n(&control_started, &expected, 1u, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return __atomic_load_n(&control_started, __ATOMIC_ACQUIRE) == 2u;
+    if (!acquire(&flags)) {
+        __atomic_store_n(&control_started, 0u, __ATOMIC_RELEASE);
+        return 0;
+    }
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE) {
+        release(flags);
+        __atomic_store_n(&control_started, 0u, __ATOMIC_RELEASE);
+        return 0;
+    }
+    usb_control_context.seed = counter() ^
+                               ((uint64_t)native.status.counter_frequency << 32) ^
+                               UINT64_C(0x53584e554354524c);
+    usb_control_context.state.generation = dwc3_rx_generation(native.core);
+    control_rotate_session_owned();
+    release(flags);
+    installed = QUD_PSCI_SMC_RESET &&
+                __atomic_compare_exchange_n(&PE_halt_restart, &halt_expected,
+                  qcom_usb_control_halt_restart, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&control_hook_owned, installed ? 1u : 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&control_enabled, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&control_started, 2u, __ATOMIC_RELEASE);
+    return 1;
+}
+int qcom_usb_debug_control_take_reboot(void)
+{
+    unsigned int expected = 0;
+    unsigned int claimed;
+    if (!__atomic_load_n(&control_reboot_requested, __ATOMIC_ACQUIRE)) return 0;
+    if (!__atomic_compare_exchange_n(&control_reboot_taken, &expected, 1u, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 0;
+    if (__atomic_load_n(&control_reboot_requested, __ATOMIC_ACQUIRE)) return 1;
+    /* A concurrent failure cleared the request after the initial load. Release
+     * our now-empty claim so a later acknowledged REBOOT is not left busy. */
+    claimed = 1u;
+    (void)__atomic_compare_exchange_n(&control_reboot_taken, &claimed, 0u, 0,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    return 0;
+}
+int qcom_usb_debug_control_arm_reboot(void)
+{
+    uint64_t flags;
+    uint32_t generation;
+    int armed = 0;
+    if (!__atomic_load_n(&control_hook_owned, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&control_reboot_requested, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&control_reboot_taken, __ATOMIC_ACQUIRE) || !acquire(&flags)) return 0;
+    generation = __atomic_load_n(&control_reboot_generation, __ATOMIC_ACQUIRE);
+    if (native.status.phase == QCOM_USB_DEBUG_ACTIVE && native.core_initialized &&
+        dwc3_ready(native.core) && dwc3_rx_generation(native.core) == generation) {
+        __atomic_store_n(&control_reboot_armed, 1u, __ATOMIC_RELEASE);
+        armed = 1;
+    }
+    release(flags);
+    return armed;
+}
+void qcom_usb_debug_control_reboot_failed(int result)
+{
+    struct sxnu_control_frame frame;
+    struct sxnu_control_writer writer;
+    char reply[SXNU_CONTROL_REPLY_BYTES];
+    unsigned int requested;
+    requested = __atomic_exchange_n(&control_reboot_requested, 0u, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&control_reboot_taken, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&control_reboot_armed, 0u, __ATOMIC_RELEASE);
+    if (!requested) return;
+    (void)__atomic_add_fetch(&control_failures, 1u, __ATOMIC_RELAXED);
+    frame.session = __atomic_load_n(&control_reboot_session, __ATOMIC_RELAXED);
+    frame.seq = __atomic_load_n(&control_reboot_seq, __ATOMIC_RELAXED);
+    frame.verb = SXNU_CONTROL_VERB_REBOOT;
+    frame.crc = 0;
+    sxnu_control_writer_init(&writer, reply, sizeof(reply));
+    if (sxnu_control_reply_start(&writer, frame.session, frame.seq, frame.verb, "ERR") &&
+        sxnu_control_writer_text(&writer, " state=reboot result=") &&
+        sxnu_control_writer_signed(&writer, result)) {
+        size_t bytes = sxnu_control_reply_finish(&writer);
+        if (bytes) (void)control_reply_queue(reply, bytes);
+    }
+}
+int qcom_usb_debug_wait_drained(unsigned int timeout_ms)
+{
+    uint64_t start, ticks;
+    if (timeout_ms > 10000u) timeout_ms = 10000u;
+    if (!timeout_ms || !native.status.counter_frequency) return 0;
+    start = counter();
+    ticks = native.status.counter_frequency * timeout_ms / 1000u;
+    for (;;) {
+        uint64_t flags;
+        int pending;
+        if (!acquire(&flags)) return 0;
+        if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !poll_owned()) {
+            release(flags);
+            return 0;
+        }
+        buffer_status_owned();
+        pending = native.status.buffer_pending != 0 || native.status.transport_pending != 0;
+        release(flags);
+        if (!pending) return 1;
+        if (counter() - start >= ticks) return 0;
+        delay_us(0, 1000);
+    }
+}
+size_t qcom_usb_debug_write(const void *bytes, size_t count)
+{
+    uint64_t flags;
+    size_t accepted = 0;
+    if (!bytes || !count || native.status.phase == QCOM_USB_DEBUG_DISABLED ||
+        native.status.phase == QCOM_USB_DEBUG_STOPPED) return 0;
+    accepted = backlog_write(bytes, count);
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !acquire(&flags)) return accepted;
+    if (native.status.phase == QCOM_USB_DEBUG_ACTIVE) {
+        (void)poll_owned();
+        /* Explicit diagnostic mode uses a 1ms flush window for a ready host so
+         * the last character remains observable if a later kernel path
+         * stops servicing USB. One bounded core operation may extend it.
+         * No-host and normal mode remain nonblocking. */
+        if (usb_diag_enabled && native.status.phase == QCOM_USB_DEBUG_ACTIVE && dwc3_ready(native.core)) {
+            uint64_t start = counter();
+            unsigned int attempts = 128u;
+            while (attempts-- && (dwc3_queued(native.core) || soc_usb_buffer_pending(&usb_log_buffer)) &&
+                   counter() - start < native.status.counter_frequency / 1000u) {
+                if (!poll_owned()) break;
+                delay_us(0, 10);
+            }
+        }
+    }
+    release(flags); return accepted;
+}
+void qcom_usb_debug_putc(char c) { (void)qcom_usb_debug_write(&c, 1); }
+void qcom_usb_debug_poll(void)
+{
+    uint64_t flags;
+    fb_cycle();
+    if ((++pram_polls & 255u) == 1u) pram_state();
+    if (usb_panic_mode == QCOM_USB_PANIC_POLLS && pram_polls == 64u)
+        panic("QCOMUSB poll64 phase=%u err=%u tr=%u last=%u a=%x b=%x",
+              native.status.diag_checkpoint, native.status.error, native.status.traces,
+              native.status.last_trace, native.status.trace_a, native.status.trace_b);
+    uint8_t control_bytes[SXNU_CONTROL_WORK_BYTES];
+    struct qcom_usb_debug_status control_status = {0};
+    uint32_t generation = 0;
+    size_t control_bytes_count = 0;
+    int observed = 0;
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !acquire(&flags)) return;
+    (void)poll_owned();
+    if (__atomic_load_n(&control_enabled, __ATOMIC_ACQUIRE) &&
+        native.status.phase == QCOM_USB_DEBUG_ACTIVE) {
+        buffer_status_owned();
+        bytes_copy(&control_status, &native.status, sizeof(control_status));
+        generation = dwc3_rx_generation(native.core);
+        control_bytes_count = dwc3_read(native.core, control_bytes,
+                                            sizeof(control_bytes));
+        observed = 1;
+    }
+    release(flags);
+    if (observed)
+        control_service(control_bytes, control_bytes_count, generation, &control_status);
+}
+void qcom_usb_debug_panic_prepare(void)
+{
+    /* An early panic can stall in platform/debugger handling before the final
+     * spin hook. Diagnose PREPARING before entering those paths. */
+    if (usb_diag_enabled && (native.status.phase == QCOM_USB_DEBUG_PREPARING ||
+        (native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED && usb_diag_checkpoint)))
+        diag_reset(100u + 2u * usb_diag_checkpoint);
+}
+void qcom_usb_debug_panic_drain(void)
+{
+    static const char end[] = "\nQCOM PANIC END\n";
+    uint64_t flags, now;
+    unsigned int iterations = 200000u, marker_queued = 0, announced = 0;
+    char announcement[192];
+    size_t announcement_bytes;
+    if (usb_diag_enabled && (native.status.phase == QCOM_USB_DEBUG_PREPARING ||
+        (native.status.phase == QCOM_USB_DEBUG_NOT_INITIALIZED && usb_diag_checkpoint)))
+        diag_reset(100u + 2u * usb_diag_checkpoint);
+    /* panic_spin_forever can precede CPU-data initialization. Inactive USB
+     * must not call cpu_number(), touch MMIO or acquire a guard in that case. */
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE || !acquire(&flags)) return;
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE) goto out;
+    {
+        char *p = append_text(announcement, "\nQCOM USB PANIC pending_at_start=");
+        p = append_decimal(p, soc_usb_buffer_pending(&usb_log_buffer) + dwc3_queued(native.core));
+        p = append_text(p, " dropped_at_start=");
+        p = append_decimal(p, soc_usb_buffer_dropped(&usb_log_buffer) + dwc3_dropped(native.core));
+        p = append_text(p, " buffer_capacity=");
+        p = append_decimal(p, sizeof(usb_log_bytes));
+        *p++ = '\n';
+        announcement_bytes = (size_t)(p - announcement);
+    }
+    now = counter();
+    native.deadline = now + native.status.counter_frequency * 2u;
+    if (native.deadline < now) goto out;
+    native.deadline_expired = 0; native.deadline_active = 1;
+    while (iterations-- && !deadline_expired()) {
+        if (!announced && DWC3_TX_BYTES - dwc3_queued(native.core) >= announcement_bytes)
+            announced = dwc3_queue(native.core, announcement, announcement_bytes) == announcement_bytes;
+        /* End marker follows all queued bytes, and appears only after there
+         * is room for the entire marker. Never partially queue it. */
+        if (announced && !marker_queued && dwc3_queued(native.core) == 0 &&
+            soc_usb_buffer_pending(&usb_log_buffer) == 0) {
+            char text[160];
+            size_t bytes = loss_record(text, 1);
+            (void)dwc3_queue(native.core, text, bytes);
+            marker_queued = dwc3_queue(native.core, end, sizeof(end) - 1) == sizeof(end) - 1;
+        }
+        if (!poll_owned()) break;
+        if (marker_queued && dwc3_queued(native.core) == 0 &&
+            soc_usb_buffer_pending(&usb_log_buffer) == 0) break;
+        delay_us(0, 10);
+    }
+    native.deadline_active = 0;
+    if (native.deadline_expired) {
+        native.status.error = QCOM_USB_DEBUG_DEADLINE_EXPIRED;
+        if (native.status.io_failed) native.status.phase = QCOM_USB_DEBUG_IO_FAILED;
+    }
+out:
+    buffer_status_owned();
+    release(flags);
+    if (usb_diag_enabled) diag_reset(10);
+}
+int qcom_usb_debug_stop(void)
+{
+    uint64_t flags;
+    int ret = 0;
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE && native.status.phase != QCOM_USB_DEBUG_IO_FAILED &&
+        !native.lease.active && !native.status.vbus_owned && !native.status.phy_owned) return 0;
+    if (native.status.stop_failed) return 0;
+    if (!acquire(&flags)) return 0;
+    if (native.status.phase != QCOM_USB_DEBUG_ACTIVE && native.status.phase != QCOM_USB_DEBUG_IO_FAILED &&
+        !native.lease.active && !native.status.vbus_owned && !native.status.phy_owned)
+        goto out;
+    native.deadline_active = 0;
+    if ((native.core_initialized && dwc3_stop(native.core)) ||
+        (!native.core_initialized && !halt_inherited())) {
+        native.status.stop_failed = 1;
+        fail(QCOM_USB_DEBUG_HALT_TIMEOUT, 0); goto out;
+    }
+    if (!restore_vbus() || !restore_lease() || !restore_phy()) { fail(QCOM_USB_DEBUG_RESTORE_FAILED, 0); goto out; }
+    native.status.phase = QCOM_USB_DEBUG_STOPPED; ret = 1;
+out:
+    release(flags); return ret;
+}
+void qcom_usb_debug_get_status(struct qcom_usb_debug_status *status)
+{
+    uint64_t flags;
+    if (!status || !acquire(&flags)) return;
+    buffer_status_owned();
+    bytes_copy(status, &native.status, sizeof(*status)); release(flags);
+}
