@@ -1,13 +1,14 @@
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index ccc2950..59993d3 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -550,9 +550,82 @@
+@@ -550,11 +550,86 @@ __dead2 __unused
  static void
  arm64_implementation_specific_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far)
  {
--#pragma unused (state, esr, far)
--	panic_plain("Unhandled implementation specific error\n");
--}
+-#pragma unused (state)
+-	/* The syndrome and the address name the access the system refused (an external abort: memory another owner keeps). */
+-	panic_plain("Unhandled implementation specific error: esr 0x%llx far 0x%llx\n", (unsigned long long)esr, (unsigned long long)far);
 +	/*
 +	 * uke-serror-detail: a photograph of "Unhandled implementation specific error" says nothing
 +	 * about which fault it was, from where, or on which core, so every platform error on this
@@ -22,6 +23,9 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 +	 * 0x21-0x23 are translation faults raised during a table walk. ec 0x2f is an SError taken on
 +	 * this core, which is asynchronous and imprecise: far is then only a hint, so pc and lr are
 +	 * what place it in the kernel.
++	 *
++	 * platform-error-name-address (os series) already reported esr and far from here; both stay
++	 * in the line below, which adds the pc, the exception class and the core it could not name.
 +	 */
 +	uint64_t uke_pc = (state != NULL) ? get_saved_state_pc(state) : 0;
 +
@@ -36,8 +40,8 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 +	    "ec 0x%02x cpu %u\n",
 +	    (unsigned long long)esr, (unsigned long long)far, (unsigned long long)uke_pc,
 +	    (unsigned int)ESR_EC(esr), (unsigned int)getCpuDatap()->cpu_id);
-+}
-+
+ }
+ 
 +#if DEVELOPMENT || DEBUG
 +/*
 + * uke-serror-resume: reports the same detail but does not stop the boot, for the case where the
@@ -84,10 +88,11 @@ diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 +	return TRUE;
 +}
 +#endif /* DEVELOPMENT || DEBUG */
- 
++
  #if CONFIG_KERNEL_INTEGRITY
  #pragma clang diagnostic push
-@@ -612,6 +685,11 @@
+ #pragma clang diagnostic ignored "-Wunused-parameter"
+@@ -623,6 +698,11 @@ arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, pl
  	} else if (cdp->platform_error_handler != NULL) {
  		cdp->platform_error_handler(cdp->cpu_id, far);
  	} else {
