@@ -42,11 +42,17 @@ on:
       core_repository:
         description: 'Core UniXNU repository (owner/name)'
         required: true
-        default: 'Allenwdk/UniXNU'
+        # The dispatch default has to be the core the push fallback names below. It said
+        # Allenwdk/UniXNU@uke-gpu while the fallback said TongHuaQWQ/UniXNU@macos, and workflow_dispatch
+        # always fills an input that declares a default, so `||` never ran: a dispatch that changed only
+        # the defconfig built the upstream core, which has no macos-27.3-uke profile at all. Run
+        # 43059841513 died there -- 'unixnu: missing file: /.../UniXNU/profiles/os/macos-27.3-uke/
+        # profile.toml' -- 90 seconds in, before it compiled anything.
+        default: 'TongHuaQWQ/UniXNU'
       core_ref:
         description: 'Core UniXNU ref (branch or commit)'
         required: true
-        default: 'uke-gpu'
+        default: 'macos'
       skip_prelink:
         description: 'Copy the native kernel without the kernelcache kexts (boot test only)'
         required: true
