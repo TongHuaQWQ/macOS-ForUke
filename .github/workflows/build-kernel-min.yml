@@ -452,6 +452,19 @@ jobs:
             echo "no logs under out/uke/*/*/logs"
             exit 0
           fi
+          # The bootstrap pass links WITHOUT the archive builders on purpose (XNU_BOOTSTRAP=1: it only
+          # has to leave the compile records and link.filelist behind), so its "Undefined symbols for
+          # architecture arm64e.kernel" -- _corecrypto_kext_start and the three _mockfs_* -- are expected
+          # and are never the failure. Every 26.5.2 run printed them too (b107-ci.log, r0c1920d.log), and
+          # no build has ever resolved them at that point.
+          #
+          # It is split out because the annotation loop below used to keep the LAST log with a matching
+          # line, and this pass's log is not first in the glob, so the tolerated linker error was
+          # annotated as the build failure and hid the archive step that actually failed (a RELEASE
+          # fileset-reference compile error in one round, an archive -Werror in another). A reader of
+          # the run page then diagnoses four symbols that are not the problem.
+          tolerated=$(printf '%s\n' $logs | grep 'bootstrap/logs/' || true)
+          real_logs=$(printf '%s\n' $logs | grep -v 'bootstrap/logs/' || true)
           # The step summary is rendered into the run page itself, and the run page is readable without
           # authentication — the job logs are not. Writing the error lines here is what makes a failure
           # diagnosable from outside the runner.
@@ -461,30 +474,33 @@ jobs:
             echo "\`${GITHUB_JOB}\` · defconfig \`${{ env.UKE_DEFCONFIG }}\` · core \`${{ env.UKE_CORE_REPO }}@${{ env.UKE_CORE_REF }}\` · skip_prelink \`${{ env.UKE_SKIP_PRELINK }}\`"
             echo
             echo '```'
-            grep -h -B1 -A3 -E '(^|[^a-zA-Z])error:|fatal error:|undefined (symbol|reference)|ld: |cannot find|needs component entries|only supports|no policy directory' $logs \
+            grep -h -B1 -A3 -E '(^|[^a-zA-Z])error:|fatal error:|undefined (symbol|reference)|ld: |cannot find|needs component entries|only supports|no policy directory' ${real_logs:-/dev/null} \
               | head -120 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           # Annotations are rendered into the run page as plain text, so the first few real failures are
           # repeated as ::error:: lines: that is what a reader without log access can actually see.
           #
-          # Each line names the log it came from, and the last matching logs win instead of the first:
-          # kernel-bootstrap.log links without the archive builders by design (XNU_BOOTSTRAP=1), so its
-          # linker error is tolerated and the pass that matters is a later one. An earlier round annotated
-          # exactly that tolerated error and hid the real failure.
-          for log in $logs; do
+          # Each line names the log it came from, and the FIRST matching logs win: the archives run in
+          # dependency order, so the earliest one that reports an error is the one that broke the chain.
+          for log in $real_logs; do
             line=$(grep -m 1 -E '(^|[^a-zA-Z])error:|needs component entries|only supports|no policy directory|undefined symbol|symbol\(s\) not found' "$log" 2>/dev/null | cut -c1-160)
             if [ -n "$line" ]; then echo "$(basename "$log"): $line"; fi
-          done | tail -3 | cut -c1-200 | while IFS= read -r line; do
+          done | head -3 | cut -c1-200 | while IFS= read -r line; do
               echo "::error title=build failure::${line}"
             done || true
-          for log in $logs; do
+          for log in $real_logs; do
             echo "=================== $log ($(wc -l < "$log") lines)"
             echo "------------------- error lines, with context"
             grep -n -B2 -A6 -E '(^|[^a-zA-Z])error:|fatal error:|undefined (symbol|reference)|ld: |No such file or directory|cannot find|Error [0-9]+$' "$log" \
               | head -300 || true
             echo "------------------- last 80 lines"
             tail -80 "$log" || true
+          done
+          # The tolerated pass, last and labelled: still readable, but not dressed up as the failure.
+          for log in $tolerated; do
+            echo "=================== $log (tolerated: the bootstrap pass links without the archives)"
+            tail -20 "$log" || true
           done
 
       - name: Collect artifacts (always)
