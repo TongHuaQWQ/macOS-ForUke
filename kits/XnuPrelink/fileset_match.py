@@ -612,6 +612,22 @@ class Matcher:
                 if hashlib.sha256(self.original.image.read(orig, fn['end'] - orig)).hexdigest() != entry['original_sha256']:
                     raise ValueError(f'Reviewed function bytes changed: {entry["original"]}')
                 native = self.native.named_functions.get(entry['native_symbol'])
+                if entry.get('native_address'):
+                    # A reviewed identity may name the native side by address when the symbol name is not
+                    # unique: named_functions only carries names with exactly one address, so a function
+                    # that also appears under an <name>_external alias elsewhere in __TEXT_EXEC cannot be
+                    # bound by name at all -- kalloc_type_impl and kfree_type_var_impl are both like that,
+                    # and they are what AppleImage4 calls through its __DATA_CONST slots on this board.
+                    # The address is cross-checked against the declared symbol, so a reviewed entry cannot
+                    # drift onto a different function silently.
+                    address = int(entry['native_address'], 16)
+                    if address not in self.native.functions:
+                        raise ValueError('Reviewed native address is not a function start: '
+                                         f'{entry["native_address"]}')
+                    if entry['native_symbol'] not in self.native.symbol_names.get(address, ()):
+                        raise ValueError(f'Reviewed symbol {entry["native_symbol"]} is not at '
+                                         f'{entry["native_address"]}')
+                    native = address
                 if native is not None:
                     added += self.bind(orig, native, 'reviewed')
         return added

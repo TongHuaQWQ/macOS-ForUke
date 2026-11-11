@@ -1,0 +1,36 @@
+{
+ "_comment": [
+  "Reviewed ABI identities for the macOS 27.3 (26C5035r) kernelcache, pinned to that exact image.",
+  "Everything here was identified from the chip's own bytes; the evidence field says how. Two entries",
+  "were added after hardware round b141: the kernel booted, AppleImage4 loaded, and it called through a",
+  "__DATA_CONST slot that prelink emission had stubbed, which is what the fileset unmapped-call guard",
+  "reports as 'original component called an unmapped kernel function'. The two targets are ordinary",
+  "kernel functions this tree does build; the matcher simply could not pair them, because both are the",
+  "kind of three-instruction forwarder its shape methods have nothing to bite on, and both symbol names",
+  "are duplicated in the native kernel (each also carries an _external alias at another address), which",
+  "keeps them out of named_functions. Pairing them removes four stub sites across three kexts.",
+  "See work/analysis/2026-11-12-b141-appleimage4-stub.md in the porting workspace."
+ ],
+ "inputs": {
+  "kernelcache_sha256": "d1003b5143ffd88439b4d45b6017f587171cfe6855660bed05370a2ea5db9fe9",
+  "entry": "com.apple.kernel"
+ },
+ "functions": [
+  {
+   "original": "0xfffffe000bb2c26c",
+   "original_size": 160,
+   "original_sha256": "872866b91ee16aaf7597cbcecb7a399b1988a26e9176324f64ed9a3dc017c54e",
+   "native_symbol": "_kalloc_type_impl",
+   "native_address": "0xfffffff007364b28",
+   "evidence": "Typed kalloc entry: materialises 0xD1000 (mov w9,#4096; movk w9,#13,lsl#16), loads the zone pointer from [x0], merges the low three bits of w1 into the size with and w10,w1,#0x7 / orr w2,w10,w9, and dispatches on whether the zone pointer is null. The native function at 0xfffffff007364b28 is the same shape instruction for instruction except that Apple's build inlines the per-CPU zone peek (mrs x11,TPIDR_EL1; ldrh w11,[x11,#440]; add x11,x1,x11,lsl#14) where this tree calls out. Position agrees: it sits between _kalloc_data_require and _kalloc_type_var_impl in the original, as in osfmk/kern/kalloc.c. The other native symbol of that name (0xfffffff00754d388) opens with mov w1,#4 and b, and is not this function. Referenced by __DATA_CONST slots in com.apple.security.AppleImage4 (0xfffffff00814de80), com.apple.driver.AppleMobileFileIntegrity (0xfffffff0081d4288) and, in the boot that exposed it, an indirect call from AppleImage4 __TEXT_EXEC+0xee0c."
+  },
+  {
+   "original": "0xfffffe000bb2c744",
+   "original_size": 12,
+   "original_sha256": "92adc05b8a7850a201ff34477eb389cf421f81f0af753584aec84e49d6c3bb4c",
+   "native_symbol": "_kfree_type_var_impl",
+   "native_address": "0xfffffff007365020",
+   "evidence": "Three instructions: bti c; orr x0,x0,#1; b <kfree_type_impl_internal>. The native function at 0xfffffff007365020 is byte-identical in shape (bti c; orr x0,x0,#1; b) and is the same twelve bytes long, which is the whole function: the original's next function, _kfree_data, starts at 0xfffffe000bb2c750, exactly as _kfree_data starts at 0xfffffff00736502c after the native one. It sits between _kfree_type_impl and _kfree_data in both images, matching the order in osfmk/kern/kalloc.c. The other native symbol of that name (0xfffffff007adb020) is a stack-framed wrapper with three calls and is not this function. Referenced by __DATA_CONST slots in com.apple.driver.AppleARMWatchdogTimer (0xfffffff007fbc468) and com.apple.driver.AppleMobileFileIntegrity (0xfffffff0081d42c8)."
+  }
+ ]
+}
