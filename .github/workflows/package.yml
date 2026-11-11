@@ -1,0 +1,140 @@
+name: package
+
+# scripts/package.sh of this repository on a macOS runner, with the UniXNU, UniXNU-sm7675-common and
+# uefi-uke checkouts beside it: the layout board.toml [package] unixnu names, the layout feeds.toml's
+# sm7675 "local" entry names, and the layout the workspace itself has (work/push/macOS-ForUke next to
+# work/push/UniXNU and work/push/UniXNU-sm7675-common). One run packages one OS profile — board.toml
+# [package.defconfig] picks the configuration of that profile — and offers the boot image, the payload,
+# the prelinked kernel and the manifest as its artifacts.
+#
+# The platform seed comes from the repository secret UNIXNU_UNIQUE_CHIP_ID and is baked into the images,
+# so a run's artifacts serve that device alone: download them, then delete the run (gh run delete).
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS profile of the images"
+        type: choice
+        options:
+          # board.toml [package.defconfig]: this board's thin 26C5035r identity -> uke-macos_defconfig.
+          - macos-27.3-uke
+          # upstream's own 27.3 profile, the identity [ipsw] declares -> uke_defconfig (no archives).
+          - macos-27.3-26C5035r
+        default: macos-27.3-uke
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - name: Check out the device repository
+        uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+
+      # The driver. Pinned: profiles/os/macos-27.3-uke (the profile [board] os_profile names) exists in
+      # this fork only; upstream UniXNU/UniXNU carries macos-27.3-26C5035r and no uke profile. The commit
+      # is the fork's macos tip of 2026-11-11.
+      - name: Check out UniXNU
+        uses: actions/checkout@v4
+        with:
+          repository: TongHuaQWQ/UniXNU
+          ref: 1b9e53a2e38b80a716c920d438b28b8d55bfe2cc
+          path: UniXNU
+          submodules: recursive
+
+      # The SoC layer. feeds.toml declares it with "local = ../UniXNU-sm7675-common", and resolve_soc()
+      # raises "soc sm7675: ... is not a directory" instead of falling back to the git pin, so the
+      # checkout has to sit beside the device repository like the workspace one does. Same commit as the
+      # feeds.toml pin.
+      - name: Check out the SM7675 SoC layer
+        uses: actions/checkout@v4
+        with:
+          repository: Allenwdk/UniXNU-sm7675-common
+          ref: 98618c197e789acfd7ac6755ad23bf7e04881780
+          path: UniXNU-sm7675-common
+
+      # The device firmware: board.toml [firmware] names Platforms/Xiaomi/ukePkg/uke.dsc and
+      # Resources/Configs/uke.toml of this checkout, and the boot image step takes it as --uefi.
+      - name: Check out the device firmware
+        uses: actions/checkout@v4
+        with:
+          repository: Allenwdk/uefi-uke
+          path: uefi-uke
+          submodules: recursive
+
+      - name: tools
+        run: |
+          brew install dtc llvm lld cmake ninja mtools unifdef bison pkgconf blacktop/tap/ipsw
+          {
+            echo "/opt/homebrew/opt/llvm/bin"
+            echo "/opt/homebrew/opt/lld/bin"
+            echo "/opt/homebrew/opt/bison/bin"
+          } >> "$GITHUB_PATH"
+          # Fail fast, naming the tool, before forty minutes of build.
+          ok=1
+          for t in clang xcodebuild make git python3 ninja cmake dtc fdtget fdtput aea \
+                   compression_tool mformat mcopy ipsw; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
+          done
+          for t in lld-link llvm-lib llvm-rc llvm-nm llvm-objcopy; do
+            [ -f "/opt/homebrew/opt/llvm/bin/$t" ] || [ -f "/opt/homebrew/opt/lld/bin/$t" ] \
+              || { echo "missing tool: $t"; ok=0; }
+          done
+          [ "$ok" = 1 ]
+
+      # The same fail-fast for the checkouts: a missing sibling used to surface as "soc sm7675: ... is
+      # not a directory" eight minutes into the run, or as a firmware step without a platform.
+      - name: layout
+        working-directory: device
+        run: |
+          ok=1
+          for path in ../UniXNU/unixnu ../UniXNU/scripts/unixnu/cli.py \
+                      ../UniXNU-sm7675-common/soc.toml \
+                      ../uefi-uke/Resources/Configs/uke.toml \
+                      ../uefi-uke/Platforms/Xiaomi/ukePkg/uke.dsc \
+                      ../uefi-uke/Resources/Scripts/mkbootimg.py; do
+            [ -e "$path" ] || { echo "missing checkout path: $path"; ok=0; }
+          done
+          [ "$ok" = 1 ]
+
+      - name: platform seed
+        env:
+          seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          if ! [[ "$seed" =~ ^[0-9a-fA-F]{8}$ ]]; then
+            echo 'Set the repository secret UNIXNU_UNIQUE_CHIP_ID: the platform seed of the device, 8 hex digits.' >&2
+            exit 1
+          fi
+
+      - name: package
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          OS_PROFILE: ${{ inputs.os }}
+        run: scripts/package.sh --os "$OS_PROFILE" --uefi ../uefi-uke
+
+      - name: images
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ inputs.os }}
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            UniXNU/out/uke/*/*/boot/boot.img
+            UniXNU/out/uke/*/*/payload/payload.img
+            UniXNU/out/uke/*/*/kernel/kernel.macho
+            UniXNU/out/uke/*/*/package.manifest.json

@@ -3,8 +3,8 @@ schema_version = 1
 [device]
 name = "uke"
 soc = "SM7675"
-os_profile = "macos-26.5.2-25F84"
-summary = "Xiaomi Pad 7 (SM7675/cliffs) port: format-2 repository migration verified by from-scratch kernel builds; the shared patch set is fully upstream-aligned (73 patches, four-layer chain); the bring-up runs through GPU mode 9, a real on-screen UI and touch scanning, with host-only migration verification on 2026-10-28."
+os_profile = "macos-27.3-uke"
+summary = "Xiaomi Pad 7 (SM7675/cliffs) port: format-2 repository migration verified by from-scratch kernel builds; the shared patch set is fully upstream-aligned (73 patches, four-layer chain); the bring-up runs through GPU mode 9, a real on-screen UI and touch scanning, with host-only migration verification on 2026-10-28. On 2026-11-11 the board moved to a fork-owned thin macOS 27.3 (26C5035r) profile, `macos-27.3-uke`; the areas below still describe measurements taken on the macOS 26.5.2 (25F84) profile unless an entry says otherwise."
 
 [[area]]
 id = "configuration"
@@ -268,21 +268,37 @@ evidence = [
 id = "packaging"
 status = "host-verified"
 components = ["DarwinBoot", "XnuPrelink", "VerifiedRoot"]
-paths = ["board.toml", "scripts/build-session-image.sh"]
+paths = ["board.toml", "scripts/build-session-image.sh", "scripts/package.sh", ".github/workflows/package.yml"]
 inputs = ["Stock vendor_boot DTB with the board's dtb_node patches (splash reservation, payload at 0x1000000).",
-  "Trust cache bundle and the recorded Data seed."]
+  "Trust cache bundle and the recorded Data seed.",
+  "The UniXNU checkout as a sibling of this repository (board.toml [package] unixnu = ../UniXNU), the SM7675 SoC layer as another sibling (feeds.toml sm7675 local = ../UniXNU-sm7675-common) and the uefi-uke firmware checkout as a third (--uefi ../uefi-uke)."]
 configuration = ["[payload]: volume UKEESP, 80 MiB, loader firmware, panic_screen true, 35 kernel arguments.",
-  "[bootimg.image]: v4 header, page 4096; the stock DTB keeps its /chosen and gains the initrd nodes."]
+  "[bootimg.image]: v4 header, page 4096; the stock DTB keeps its /chosen and gains the initrd nodes.",
+  "[package]: unixnu = ../UniXNU, boot_partition_bytes = 0x6000000 (boot_a of this unit per fastboot getvar all, docs/STATE.md §18). scripts/package.sh is the UniXNU repository's templates/package.sh, byte-identical (sha256 f7b8e3ea043058b9c61d5b45c32b8e7669a85737c89d55d404957c3b43ec4aab).",
+  "[package.defconfig]: macos-27.3-uke = uke-macos_defconfig (the macOS prelink track, CONFIG_XNU_BUILD_ARCHIVES=y) and macos-27.3-26C5035r = uke_defconfig (the baseline configuration without the archive chain). No [os_overrides] table: both configurations package the same board values, and the two check runs below are clean without one."]
 procedure = ["./unixnu build payload --kernel kernel.macho --unique-chip-id HEX -D ../UniXNU-uke-format2",
-  "./unixnu bootimg --uefi ../uefi-uke --dtb ../uke-port/data/vendor_boot.dtb --ramdisk none -D ../UniXNU-uke-format2"]
+  "./unixnu bootimg --uefi ../uefi-uke --dtb ../uke-port/data/vendor_boot.dtb --ramdisk none -D ../UniXNU-uke-format2",
+  "scripts/package.sh --check --os macos-27.3-uke   # deps, preflight and the patch series, no build",
+  "scripts/package.sh --check --os macos-27.3-26C5035r"]
 findings = ["The v4 header parsing and the existing-/chosen fdtput tolerance stay board-side; upstream expects a fresh /chosen.",
-  "payload.img and boot.img build on Linux; userdata imaging and skip-setup still need macOS."]
-completion = ["payload.img contains unixnu.toml, kernel.macho and its ADT; boot.img boots from the stock DTB."]
-limits = ["Host-only verification; the platform seed is not stored in any repository and was substituted for the structural build."]
-next_action = ["Build with the real unique_chip_id and flash the inactive slot."]
+  "payload.img and boot.img build on Linux; userdata imaging and skip-setup still need macOS.",
+  "Adopted the official pipeline (docs/porting/packaging.md): scripts/package.sh is the fixed template copied unchanged, and the board adds [package] and [package.defconfig] only. --check on 2026-11-11 resolved 144 patches for macos-27.3-uke (uke-macos_defconfig) and 110 for macos-27.3-26C5035r (uke_defconfig), both exit 0.",
+  "The deps step settled two values board.toml had recorded as inherited: the 26C5035r manifest does carry Cryptex1,AppTrustCache (extracted as Firmware/141-22106-021.dmg.trustcache), and the KernelCache member decompresses to 124,518,400 bytes whose sha256 is exactly the pinned d1003b51... (Mach-O cputype 0x100000c, cpusubtype 0xc0000002, i.e. arm64e). The 'INHERITED, NOT MEASURED HERE' note above that pin in board.toml is therefore obsolete.",
+  "The 26C5035r StaticTrustCache member hashes to 6bc49e0dffade1c61401fd3e087636627f1ae7eca26df9b8890b1cb78ffb2963 (445,681 bytes), which is the replacement for the commented-out 25F84 pin 7416ca4f... in [payload] trust_cache_sha256. It is left unset: payload.py applies that list only to a cache passed with --trust-cache.",
+  "deps rewrites unixnu.lock on every run (its xnu pin moves from d8b8029 to the profile's ac9718fb, and the macos-27.3-26C5035r run adds IOHIDFamily and repins AvailabilityVersions, libdispatch, libplatform and libpthread). The working tree was restored, so unixnu.lock still carries the pre-adoption pins and needs one deliberate refresh.",
+  ".github/workflows/package.yml needs a fourth checkout: feeds.toml declares the SM7675 layer as a local sibling and feeds.resolve_soc() raises 'soc sm7675: <path> is not a directory' instead of falling back to the git pin, so UniXNU-sm7675-common has to be checked out beside the device repository — the same defect class build-kernel-min.yml documents for a clean runner."]
+completion = ["payload.img contains unixnu.toml, kernel.macho and its ADT; boot.img boots from the stock DTB.",
+  "scripts/package.sh --check --os <profile> passes for every configuration [package.defconfig] declares."]
+limits = ["Host-only verification; the platform seed is not stored in any repository and was substituted for the structural build.",
+  "Only --check has run: the full release (deps, preflight, patches, build, pack, verify) has not been executed from this repository, and the CI workflow has not been triggered."]
+next_action = ["Build with the real unique_chip_id and flash the inactive slot.",
+  "Run the package workflow once from a fork with the UNIXNU_UNIQUE_CHIP_ID secret, download the artifacts (boot.img, payload.img, kernel.macho, package.manifest.json) and delete the run."]
 evidence = [
   { kind = "host", reference = "board.toml", result = "payload.img 80 MiB with the UKEESP volume and boot.img 1,515,520 bytes over the stock vendor_boot DTB", command = "./unixnu build payload && ./unixnu bootimg --uefi ../uefi-uke --dtb ../uke-port/data/vendor_boot.dtb --ramdisk none", revision = "4f4bf7e1f4ad56743562777becd7ac7d6714216c" },
   { kind = "device", reference = "docs/GPU-PORT.md", result = "the fmt2 test image booted to userland on hardware with the recovered platform seed and the Data seed handoff", command = "fastboot flash boot_a vendor_boot_a && fastboot set_active a && fastboot reboot", revision = "bdb1af9a7100367cde283ff5408681de8fbbcfe3" },
+  { kind = "host", reference = "board.toml", result = "PASS: deps, preflight and the patch series of macos-27.3-uke resolve; 144 patches, configuration uke-macos_defconfig, exit 0", command = "./scripts/package.sh --check --os macos-27.3-uke", revision = "63b8618b4d95e2c7d2c8821eab174a234e2d260d" },
+  { kind = "host", reference = "board.toml", result = "PASS: deps, preflight and the patch series of macos-27.3-26C5035r resolve; 110 patches, configuration uke_defconfig, exit 0", command = "./scripts/package.sh --check --os macos-27.3-26C5035r", revision = "63b8618b4d95e2c7d2c8821eab174a234e2d260d" },
+  { kind = "source", reference = "scripts/package.sh", result = "byte-identical to UniXNU templates/package.sh (sha256 f7b8e3ea043058b9c61d5b45c32b8e7669a85737c89d55d404957c3b43ec4aab, 17 lines, mode 755)" },
 ]
 
 [[area]]
@@ -309,29 +325,35 @@ id = "arm64e-capability"
 status = "device-verified"
 components = []
 paths = ["board.toml", "configs/uke-macos_defconfig", ".github/workflows/build-kernel-min.yml"]
-configuration = ["The arch layer is profiles/arch/arm64e: board.toml's os_profile macos-26.5.2-25F84 declares arch = arm64e, and the resolver selects that profile instead of profiles/arch/arm64.",
-  "configs/uke-macos_defconfig is the configuration CI builds (run 41387605078); scripts/build-xnu-4k-baseline.sh passes ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64e to the XNU build and UNIXNU_XNU_ARCH to build-firehose.sh, so the kernel and the firehose stub agree on the ABI.",
-  "The deployment target follows the profile (26.5.2), so every object the build links — the comparison kernel, libcorecrypto_kernel_noasm-namespaced.a, libpthread_kernel.a, libmockfs_fixture.a and the arm64e driver archives — is audited by scripts/kernel_target.py for an arm64e LC_BUILD_VERSION at that deployment."]
-inputs = ["Xiaomi Pad 7 (uke, SM7675, 2410CRP4CC) running its stock Android 16 build with SukiSU root, adb reachable.",
-  "The requirements table of docs/porting/arm64e.md in the shared UniXNU checkout.",
-  "scripts/check-arm64e-pac.c, the EL0 half of the check, built freestanding for aarch64 +pauth."]
+configuration = ["The arch layer is profiles/arch/arm64e: board.toml's os_profile macos-27.3-uke declares arch = arm64e (as macos-26.5.2-25F84 did before the 2026-11-11 identity switch), and the resolver selects that profile instead of profiles/arch/arm64.",
+  "configs/uke-macos_defconfig is the configuration CI builds; scripts/build-xnu-4k-baseline.sh passes ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64e to the XNU build and UNIXNU_XNU_ARCH to build-firehose.sh, so the kernel and the firehose stub agree on the ABI.",
+  "The deployment target follows the profile, so every object the build links — the comparison kernel, libcorecrypto_kernel_noasm-namespaced.a, libpthread_kernel.a, libmockfs_fixture.a and the arm64e driver archives — is audited by scripts/kernel_target.py for an arm64e LC_BUILD_VERSION at that deployment."]
+inputs = ["Xiaomi Pad 7 (uke, SM7675, 2410CRP4CC) running its stock Android build with SukiSU root, adb reachable.",
+  "The requirements table of docs/porting/arm64e.md in the shared UniXNU checkout: (1) every enabled CPU implements FEAT_PAuth, address and generic keys, checked through ID_AA64ISAR1_EL1 APA/API + GPA/GPI or ID_AA64ISAR2_EL1 APA3 + GPA3; (2) XNU runs at EL1 and can write APIAKey, APIBKey, APDAKey, APDBKey and APGAKey without trapping; (3) PAC instructions do not trap at EL1 or EL0, the acceptance test being PACIA changing and AUTIA restoring a pointer on every core.",
+  "scripts/check-arm64e-pac.c, the EL0 half of check 3, built freestanding for aarch64 +pauth."]
 procedure = ["adb shell 'grep -m1 Features /proc/cpuinfo'",
   "adb shell 'grep -c paca /proc/cpuinfo'  and  grep -c ^processor /proc/cpuinfo",
   "adb shell 'su -c \"dmesg | grep -i authentication\"'",
   "adb shell 'su -c \"zcat /proc/config.gz | grep ARM64_PTR_AUTH\"'",
   "build scripts/check-arm64e-pac.c and run it on the device"]
-findings = ["Pointer authentication is implemented by the hardware, not emulated: /proc/cpuinfo advertises paca and pacg on 8 of 8 CPUs, and the kernel reports CPU features: detected: Address authentication (architected QARMA3 algorithm) plus the same line for generic authentication. The cores are 3x CPU part 0xd80 (Cortex-X4), 4x 0xd81 (Cortex-A720) and 1x 0xd82 (Cortex-A520), all carrying the feature.",
-  "The round trip holds on every core. check-arm64e-pac signs 0x20023c with PACIA and gets 0x68fe000020023c, then AUTIA returns 0x20023c, on cpu 0 through cpu 7: cores=8, pacia_changed=8, autia_restored=8. A changed pointer is the proof that matters, because a CPU without the feature executes PACIA as a hint and leaves the value alone.",
+findings = ["Requirement 1 (every enabled CPU implements FEAT_PAuth, address and generic keys) — device-verified at the level Linux reports it: /proc/cpuinfo advertises paca and pacg on 8 of 8 CPUs, and the kernel reports CPU features: detected: Address authentication (architected QARMA3 algorithm) plus the same line for generic authentication. The cores are 3x CPU part 0xd80 (Cortex-X4), 4x 0xd81 (Cortex-A720) and 1x 0xd82 (Cortex-A520), all carrying the feature.",
+  "Requirement 1, in the check method the page prescribes — UNVERIFIED. docs/porting/arm64e.md asks for ID_AA64ISAR1_EL1 APA/API and GPA/GPI non-zero, or ID_AA64ISAR2_EL1 APA3/GPA3 non-zero. No raw ID-register value is recorded anywhere in this repository: the entry above is the Android kernel's decode of those registers, not a value read out and quoted here.",
+  "Requirement 2 (EL1 can write all five key registers without trapping) — PARTIALLY EVIDENCED, and the fifth register is UNVERIFIED. What is measured is weaker than the requirement: the stock kernel is built with CONFIG_ARM64_PTR_AUTH=y and CONFIG_ARM64_PTR_AUTH_KERNEL=y and boots normally under Running under Gunyah hypervisor 51/v1, so the EL1 key writes a Linux kernel performs do not trap under the same hypervisor XNU will run under. Linux does not use FEAT_PAuth's generic keys, so no APGAKey write was ever exercised, and this is Linux's key-setup path, not XNU's PAC_INIT_KEY_STATE.",
+  "Requirement 3 at EL0 — device-verified. check-arm64e-pac signs 0x20023c with PACIA and gets 0x68fe000020023c, then AUTIA returns 0x20023c, on cpu 0 through cpu 7: cores=8, pacia_changed=8, autia_restored=8. A changed pointer is the proof that matters, because a CPU without the feature executes PACIA as a hint and leaves the value alone.",
+  "Requirement 3 at EL1 — UNVERIFIED as a measurement. The evidence that exists is indirect: this port's kernel links as arm64e and executes at EL1 far enough to format and print a platform-error panic carrying its esr, far and pc (b127: esr 0x96000010, pc 0xfffffff00c0321e4, which resolves to _uke_gic_arm_cpu+0x2c0 because the collection keeps its linked addresses), and an arm64e link materialises PAC-authenticated pointer stubs (l_native_exit_trace$auth_ptr$ia$61145 in the 27.3-series link). Neither is the requirement's acceptance test, which is PACIA changing and AUTIA restoring a pointer on every core at EL1.",
   "All eight cores produced the same signature for the same input and modifier, which is the signature of one key set shared by every CPU. That matches the arm64e profile, which loads a single random key set per boot and leaves EnIA, EnIB, EnDA and EnDB set.",
-  "The Android kernel is built with CONFIG_ARM64_PTR_AUTH=y and CONFIG_ARM64_PTR_AUTH_KERNEL=y and boots normally under Running under Gunyah hypervisor 51/v1, so EL1 writes to those SCTLR_EL1 bits and to the APIAKey, APIBKey, APDAKey, APDBKey and APGAKey registers do not trap. That is requirements 2 and 4 of docs/porting/arm64e.md under the same hypervisor XNU will run under.",
   "The algorithm is architecturally QARMA3 rather than Apple's own, and that does not matter here: no signature is computed off the device. dyld signs user pointers when it loads an image and XNU signs the kernel collection during early boot, so the CPU only has to be self-consistent.",
-  "The kernelcache this port prelinks against is arm64e: kernelcache.release.mac17g, decompressed through the driver, has Mach-O cputype 0x0100000c with subtype 0xc0000002 - low byte 2 (CPU_SUBTYPE_ARM64E) with the PTRAUTH ABI flag set. An arm64 kernel cannot host it."]
-completion = ["All four requirements of docs/porting/arm64e.md pass on this unit, so the macOS 26 profile is built as arm64e. board.toml selects os_profile macos-26.5.2-25F84, whose arch = arm64e selects profiles/arch/arm64e, and scripts/build-xnu-4k-baseline.sh passes that value to both the kernel build and build-firehose.sh."]
-limits = ["Every check ran under Android's kernel. XNU programs the keys itself in PAC_INIT_KEY_STATE, so the first XNU boot repeats requirements 2 and 3; the key derivation there is splitmix64 over CNTPCT_EL0 on the first CPU, not whatever Android chose.",
+  "The kernelcache this port prelinks against is arm64e: kernelcache.release.mac17g, decompressed through the driver, has Mach-O cputype 0x0100000c with subtype 0xc0000002 - low byte 2 (CPU_SUBTYPE_ARM64E) with the PTRAUTH ABI flag set. An arm64 kernel cannot host it. The 27.3 identity's own cache was not measured here: kernelcache_sha256 d1003b51... is mac17j's, inherited from upstream, and no 26C5035r image is in this repository."]
+completion = ["Requirements 1 and 3 pass at EL0 on this unit, which is what lets the macOS profile be built as arm64e: board.toml selects os_profile macos-27.3-uke, whose arch = arm64e selects profiles/arch/arm64e, and scripts/build-xnu-4k-baseline.sh passes that value to both the kernel build and build-firehose.sh. Requirements 2 and 3-at-EL1 are recorded above as partially evidenced and unverified; the per-device record the official page asks for is complete only when those two are measured under XNU."]
+limits = ["Two of the three recorded requirements are not fully evidenced: no APGAKey write at EL1 was ever exercised (requirement 2), and no per-core PACIA/AUTIA round trip at EL1 was ever run (requirement 3 at EL1).",
+  "Every check ran under Android's kernel. XNU programs the keys itself in PAC_INIT_KEY_STATE, so the first XNU boot repeats requirements 2 and 3; the key derivation there is splitmix64 over CNTPCT_EL0 on the first CPU, not whatever Android chose.",
   "The three-argument PACIA forms, the JOP/GA keys and per-process key isolation are not exercised: the arm64e profile shares one key set between EL0 and EL1, so process isolation through PAC is deliberately absent."]
-next_action = ["Build with the arm64e profile and confirm on the first boot that PAC_INIT_KEY_STATE runs and the kernel reaches its panic or console output without a trap."]
+next_action = ["Run the EL1 half under XNU: a boot that reaches PAC_INIT_KEY_STATE and reports, per core, the APIAKey/APIBKey/APDAKey/APDBKey/APGAKey writes and a PACIA/AUTIA round trip at EL1 - or the trap that proves it cannot.",
+  "Record the raw ID_AA64ISAR1_EL1 / ID_AA64ISAR2_EL1 values the next time Android is reachable, so requirement 1 stops resting on the Android kernel's decode."]
 evidence = [
   { kind = "device", reference = "docs/ARM64E-PORT.md", result = "8/8 CPUs report paca and pacg (3x Cortex-X4, 4x Cortex-A720, 1x Cortex-A520); architected QARMA3 address and generic authentication; CONFIG_ARM64_PTR_AUTH=y and CONFIG_ARM64_PTR_AUTH_KERNEL=y; Running under Gunyah hypervisor 51/v1", command = "adb shell 'grep -m1 Features /proc/cpuinfo'", revision = "c2b06127ee439d8fbc9f59ced40061a373ff064a" },
   { kind = "device", reference = "scripts/check-arm64e-pac.c", result = "cores=8 pacia_changed=8 autia_restored=8; 0x20023c -> 0x68fe000020023c -> 0x20023c on every core", command = "adb shell /data/local/tmp/pac_rt", revision = "c2b06127ee439d8fbc9f59ced40061a373ff064a" },
   { kind = "host", reference = "board.toml", result = "the pinned kernelcache.release.mac17g (sha256 697e01d6…) decompresses to a Mach-O with cputype 0x0100000c, subtype 0xc0000002 - CPU_SUBTYPE_ARM64E with the PTRAUTH ABI flag - so board.toml can only resolve an arm64e profile", command = "python3 -c 'import struct; d=open(path, \"rb\").read(32); print(hex(struct.unpack_from(\"<I\", d, 8)[0]))'", revision = "c2b06127ee439d8fbc9f59ced40061a373ff064a" },
+  { kind = "device", reference = "docs/STATE.md", result = "requirement 3 at EL1, indirect only: the arm64e kernel executes at EL1 far enough to format and print a platform-error panic with its esr, far and pc (b127: esr 0x96000010, pc 0xfffffff00c0321e4 = _uke_gic_arm_cpu+0x2c0). This is not the requirement's acceptance test and is recorded as unverified for it", command = "fastboot boot work/flash/boot-round-b127-noufslog.img", revision = "63b8618b4d95e2c7d2c8821eab174a234e2d260d" },
+  { kind = "source", reference = "docs/PROBLEMS.md", result = "the per-requirement status this area states: rows 1-2 supply the EL1 execution evidence, row 10 the arm64e authenticated-pointer stub, and the missing APGAKey write plus the missing EL1 PACIA/AUTIA round trip are carried as unverified rather than as results" },
 ]

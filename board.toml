@@ -10,6 +10,32 @@ os_profile = "macos-27.3-uke"    # thin macOS 27.3 profile: upstream 26C5035r id
 description = "Xiaomi Pad 7"
 kit = "uke"                      # the package/ of this repository appears as kits/uke in the build tree
 
+# The packaging half of the board (docs/porting/packaging.md): scripts/package.sh is the UniXNU
+# repository's templates/package.sh copied unchanged, and it reads exactly one board value here — the
+# path of the driver. Everything else the run needs comes from the sections below and the profile.
+[package]
+# The UniXNU checkout beside this repository. Both layouts this board is built in are siblings: the
+# workspace (work/push/macOS-ForUke + work/push/UniXNU) and .github/workflows/package.yml, which
+# checks the device repository out as `device/` and the core as `UniXNU/` next to it.
+unixnu = "../UniXNU"
+# The `boot` partition of this unit, from `fastboot getvar all` (docs/STATE.md §18: boot_a/b and
+# vendor_boot_a/b are 0x6000000 each, 96 MiB). verify refuses a larger boot.img; the shim + firmware
+# volume + device tree + payload ramdisk of this board are many times smaller, so this is the device's
+# limit and not a budget the build spends.
+boot_partition_bytes = 0x6000000
+
+# The configuration each OS profile packages. "unixnu release" always selects through this table, so a
+# profile named here never depends on the out/ state of the machine that runs it.
+[package.defconfig]
+# macos-27.3-uke — profiles/os/macos-27.3-uke, this board's own thin 26C5035r identity: the macOS
+# prelink track. configs/uke-macos_defconfig sets CONFIG_XNU_BUILD_ARCHIVES=y, which is what makes the
+# kernel step build the archives the prelink reads.
+"macos-27.3-uke" = "uke-macos_defconfig"
+# macos-27.3-26C5035r — upstream's own 27.3 profile, the identity [ipsw] declares (Mac17,11 / k114cap /
+# 26C5035r): the baseline configuration, the same one [kernel] defconfig names. It builds a boot-test
+# kernel without the archive chain, exactly as the CI round builds it beside the prelink candidate.
+"macos-27.3-26C5035r" = "uke_defconfig"
+
 # The full component selection; the resolver adds dependencies and orders their recipes.
 [components]
 include = [
