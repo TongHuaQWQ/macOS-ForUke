@@ -2,7 +2,7 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 index bb558ee..82e3e51 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -506,6 +506,19 @@ bsd_init(void)
+@@ -506,6 +506,15 @@ bsd_init(void)
  	throttle_init();
  
  	printf(copyright);

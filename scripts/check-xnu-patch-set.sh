@@ -62,6 +62,15 @@ else:
 PY
 )}
 
+# Patch hygiene before the expensive part: a hunk header whose counts disagree with its body, or an
+# added line written with two plus signs, both apply "successfully" and produce garbage in the tree.
+# Two kernel rounds (43211608117, 43221930075) died that way, as `unterminated conditional directive` in
+# pe_init.c and `invalid argument type 'void' to unary expression` in IOService.cpp. Device layer only:
+# two core-layer patches carry a benign count mismatch and have built correctly for many rounds.
+if [ -f "$ROOT/scripts/check-patch-hygiene.py" ]; then
+  python3 "$ROOT/scripts/check-patch-hygiene.py" "$ROOT"/patches/xnu/*.patch
+fi
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 if [ -n "${XNU_SOURCE:-}" ]; then

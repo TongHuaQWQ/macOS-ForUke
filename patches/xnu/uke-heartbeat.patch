@@ -41,7 +41,7 @@ index 6824ed8..824ba32 100644
 +		uke_log_snapshot("heartbeat");
 +	}
 +#endif /* XNU_LAST_LOG_ARCHIVE */
-++	clock_interval_to_deadline(2, kSecondScale, &deadline);
++	clock_interval_to_deadline(2, kSecondScale, &deadline);
 +	thread_call_enter_delayed(gUkeHeartbeatCall, deadline);
 +}
 +#endif /* DEVELOPMENT || DEBUG */
