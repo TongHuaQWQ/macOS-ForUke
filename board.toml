@@ -699,11 +699,25 @@ boot-manifest-hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5
 #   * a 141 ms window is the kext-load/security-policy stall this board is already known to sit in
 #     (AppleImage4 waits for a nonce slot that does not exist; see the security keys above), not a
 #     separate fault: the watchdog fires inside the wait it is supposed to diagnose.
-# Traced, not disabled: SCHED_HYGIENE_MODE_TRACE (1) keeps the measurement and its telemetry and drops
-# only the panic, so this can be turned back into a panic the moment the wait itself is fixed. The value
-# lives in the ADT because the command line has 16 bytes of headroom under DarwinBoot's 1000-byte cap.
+# OFF, not traced. TRACE (1) was tried first and is worse: it keeps the measurement, and the measurement
+# itself is what round b144 died on. With the mode non-zero, the first 0->1 preemption disable calls
+# _prepare_preemption_disable_measurement() (osfmk/arm/preemption_disable.c:325), which unconditionally
+# calls ml_set_interrupts_enabled_with_debug(false) -- a call that asserts the hardware was fully
+# UNmasked -- and on this board the first preemption disable happens with I and F already masked:
+#   machine_routines_common.c:1128 Assertion failed: state & DAIF_STANDARD_DISABLE == 0
+#   (0xc0 == 0x0, 192 == 0) at pc _ml_set_interrupts_enabled_with_debug+0x1e8,
+#   lr __prepare_preemption_disable_measurement+0x44
+# So both hygiene symptoms this board has produced -- the 141 ms timeout of b142 and this assertion --
+# come from the same optional instrumentation. OFF (0) removes the measurement path, which is the only
+# thing that reaches that assertion from here.
+#
+# OPEN, and worth answering rather than forgetting: XNU expects the first preemption disable to happen
+# with interrupts enabled. On this board it happens with them masked, which is legal but not Apple's
+# boot order -- either early init disables preemption before ml_set_interrupts_enabled(TRUE) is reached,
+# or the loader hands off with DAIF masked where iBoot would not. Once that is understood, SCHED_HYGIENE
+# can be turned back on (mode 2) and the timeout becomes a useful tripwire again instead of a wall.
 [adt.chosen.machine-timeouts.u32]
-sched-preemption-disable-mode = 1
+sched-preemption-disable-mode = 0
 
 [adt.defaults.u32]
 sleep-disabled = 1
