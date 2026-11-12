@@ -22,7 +22,9 @@
 |---|---|---|
 | `uke-firmware.patch` | 相对上游 Mu-Silicium 的**已提交**改动 | 23 文件 / 2912 行 / 105 KB |
 | `uke-firmware-worktree-wip.patch` | 在上一份之上的**未提交**改动（`UkeUsbLogDxe` 那一大批） | 7 文件 / 1163 行 / 45 KB |
-| `files/` | 补丁覆盖不到的**未跟踪文件 + 二进制**（见下） | 5 文件 / 2.0 MB |
+| `files/` | 补丁覆盖不到的**未跟踪文件 + 二进制**（见下） | 6 文件 / 2.0 MB |
+| `2026-11-12-panic-header-offsets.patch` | panic 头按 XNU 的 packed 布局解析（0x14/0x18），b147 用 | 1 文件 / 3 KB |
+| `2026-11-12-uke-log-record.patch` | 上一轮内核日志：`UKELOG:` 记录读出来打进固件日志，b150 用 | 2 文件 / 12 KB |
 
 `files/` 四类，缺一不可：
 
@@ -31,6 +33,7 @@ Binaries/uke/RawFiles/Panel_O82_42_02_0b_dualdsi_dsc_vid.xml   ← 面板 XML，
                                                                   子模块的未跟踪目录里，全系统仅此一份
 Platforms/Xiaomi/ukePkg/Drivers/UkeProgressDxe/{.c,.inf}       ← 未跟踪的驱动
 Platforms/Xiaomi/ukePkg/Include/UkePersist.h                   ← 未跟踪的头文件
+Platforms/Xiaomi/ukePkg/Include/UkePramLog.h                   ← 未跟踪的头文件（b150：pram 日志记录的格式与窗口几何，唯一一份）
 Resources/DTBs/uke.dtb                                         ← 1.9 MB 二进制；uke.toml 要 append_dtb，
                                                                   缺它 build_uefi.py 会 exit 1（已实测）
 ```

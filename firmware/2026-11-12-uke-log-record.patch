@@ -1,0 +1,302 @@
+Proposed firmware change for round b150: print the previous boot's *kernel log*.
+
+What it adds, and why it is a separate patch from 2026-11-12-panic-header-offsets.patch:
+
+  * Include/UkePramLog.h (new, also under firmware/files/) is the single owner of the pram window's
+    geometry and of the log record's format. Until now the window base/size were a #define inside
+    UkeBootMemoryDxe.c; the kernel writer is documented against the same numbers, and this port's
+    recurring failure mode is one fact in two places with only one updated. The header also carries the
+    STATIC_ASSERTs that make a layout change fail the build instead of reading the wrong bytes.
+  * UkeBootMemoryDxe.c gains ReadKernelLogRecord(), called once from the driver entry before the kernel
+    that will overwrite the window is started. It prints the previous boot's kernel log as UKELOG: lines
+    through DEBUG(), which is what lands in the Advanced Logger buffer that AdvancedLogDxe exports as
+    log/<model>-<date>.log - the file a human already collects. Nothing is written: the reader is
+    read-only, it validates the record (magic, version, commit word, length within the slot) before
+    printing anything, and it prints one diagnostic line when there is no record, so "the kernel never
+    wrote" cannot be mistaken for "the reader did not run".
+  * It does not touch the panic path: the panic header stays at +0 and is parsed exactly as before (the
+    same UKE_PANIC_HEADER_PREFIX at 0x14/0x18); the log record lives at +0x1C0000 with its own magic.
+
+Apply it on a tree that already has 2026-11-12-panic-header-offsets.patch (b147), which is the state
+round b147/b148 were built from:
+
+    cd workspace/uefi-uke
+    git apply ../uke-main-merge/firmware/2026-11-12-uke-log-record.patch
+    cp -r ../uke-main-merge/firmware/files/Platforms .   # UkePramLog.h is untracked
+    ./.venv-edk2/bin/python3 build_uefi.py -d uke -r DEBUG     # ~7 s
+
+What that produces, verified here: Build/ukePkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd
+sha256 c7dcfca4e9686c4ac2ca01123a9b28a3df8cb3b3b2ad71a9d9f60868accebd45, and
+Build/ukePkg/DEBUG_CLANGPDB/FV/Ffs/7E3A5B2C-...UkeBootMemoryDxe/*.ffs contains the string UKELOG.
+work/round.py repacks that FD into work/flash/boot-round-b150-logpram.img (75a0948a...), whose gzip
+payload contains the FD byte for byte.
+
+Note for a reviewer: the same tree also carries unrelated uncommitted work (UkeUsbLogDxe, the handoff
+and progress drivers). This patch is the diff of the two files above against that tree, not against
+upstream, so it applies on top of it and touches nothing else.
+
+--- a/Platforms/Xiaomi/ukePkg/Drivers/UkeBootMemoryDxe/UkeBootMemoryDxe.c
++++ b/Platforms/Xiaomi/ukePkg/Drivers/UkeBootMemoryDxe/UkeBootMemoryDxe.c
+@@ -32,6 +32,7 @@
+ #include <Protocol/DevicePath.h>
+ 
+ #include "UkePersist.h"
++#include "UkePramLog.h"
+ 
+ #define MAX_RANGES        64
+ #define MIN_PIECE_SIZE    SIZE_16MB
+@@ -627,8 +628,12 @@
+   had in fact been staged: the record was written at 0x9FFE00000 and the reader looked at 0xFF800000.
+   Both are tried, this port's window first, and the one that answered is named in the log.
+ **/
+-#define UKE_PANIC_WINDOW_BASE   0x9FFE00000ULL   /* board.toml [payload.adt] panic_region */
+-#define UKE_PANIC_WINDOW_SIZE   0x200000ULL
++/* The two numbers now live in Include/UkePramLog.h, because the kernel's log record sits in the same
++ * window and a second copy of the base/size pair is how this port has lost four rounds: the window the
++ * panic reader and the log reader name must be the same one, or a record written at one address is
++ * looked for at another and reads as "the kernel never wrote". */
++#define UKE_PANIC_WINDOW_BASE   UKE_PRAM_WINDOW_BASE
++#define UKE_PANIC_WINDOW_SIZE   UKE_PRAM_WINDOW_SIZE
+ 
+ /**
+   Read one panic line out of a candidate pram window.
+@@ -732,6 +737,223 @@
+   }
+ }
+ 
++//
++// How much of the kernel's snapshot reaches this log file.
++//
++// The limit is not about pram (the record holds 128 KiB) but about the firmware's own log: DEBUG() goes
++// into Advanced Logger's 256 KiB wrapping ring, which is what AdvancedLogDxe exports as
++// log/<model>-<date>.log, and the DXE phase already fills about 67 KiB of it. Printing the whole record
++// would push the early boot evidence -- the memory map, the device tree, the driver loads -- out of the
++// ring it is meant to preserve, and each line also costs a panel write (~13 ms per line measured on
++// log/uke-20190100-000202.log). 16 KiB is roughly 250 kernel lines, which is ten times a panel screen
++// and far more than the point at which this port's kernels have stopped dying. Raise it here when a
++// round needs more; the kernel keeps writing all 128 KiB either way, so no kernel rebuild is involved.
++//
++#define UKE_LOG_PRINT_MAX   (16 * 1024)
++#define UKE_LOG_LINE_CHARS  240
++
++STATIC
++UINT32
++ReadRecordWord (
++  IN UINT64  Address
++  )
++{
++  return *(volatile UINT32 *)(UINTN)Address;
++}
++
++/**
++  Print a slot's header line, whether or not it is usable, so a reader of the log can tell "the kernel
++  never wrote" (all zeros) from "it wrote something this reader does not understand" (a magic it does
++  not know) from "a reset landed in the middle of the copy" (Commit cleared).
++**/
++STATIC
++BOOLEAN
++SlotIsComplete (
++  IN  UINT64                 Address,
++  IN  CONST UINTN            Slot,
++  IN  UKE_LOG_RECORD_HEADER  *Header
++  )
++{
++  CopyMem (Header, (VOID *)(UINTN)Address, sizeof (*Header));
++
++  if (Header->Magic != UKE_LOG_MAGIC) {
++    DEBUG ((DEBUG_WARN, "UKELOG: slot %u at 0x%lx rejected: magic 0x%x\n", (UINT32)Slot, Address, Header->Magic));
++    return FALSE;
++  }
++
++  if (Header->Version != UKE_LOG_VERSION) {
++    DEBUG ((DEBUG_WARN, "UKELOG: slot %u at 0x%lx rejected: version %u, this reader knows %u\n",
++            (UINT32)Slot, Address, Header->Version, (UINT32)UKE_LOG_VERSION));
++    return FALSE;
++  }
++
++  if (Header->Commit != UKE_LOG_COMMIT) {
++    DEBUG ((DEBUG_WARN, "UKELOG: slot %u at 0x%lx rejected: commit 0x%x (a reset landed in the copy)\n",
++            (UINT32)Slot, Address, Header->Commit));
++    return FALSE;
++  }
++
++  if ((Header->Length == 0) || (Header->Length > Header->Capacity) ||
++      (Header->Capacity > UKE_LOG_TEXT_CAPACITY))
++  {
++    DEBUG ((DEBUG_WARN, "UKELOG: slot %u at 0x%lx rejected: len %u cap %u, slot capacity is %u\n",
++            (UINT32)Slot, Address, Header->Length, Header->Capacity, UKE_LOG_TEXT_CAPACITY));
++    return FALSE;
++  }
++
++  return TRUE;
++}
++
++STATIC
++VOID
++PrintRecordText (
++  IN CONST UINT8  *Text,
++  IN UINTN         Length
++  )
++{
++  CHAR8  Line[UKE_LOG_LINE_CHARS + 1];
++  UINTN  Index;
++  UINTN  Chars = 0;
++  UINTN  Lines = 0;
++
++  for (Index = 0; Index < Length; Index++) {
++    UINT8  Byte = Text[Index];
++
++    if (Byte == '\n') {
++      Line[Chars] = '\0';
++      DEBUG ((DEBUG_WARN, "UKELOG: %a\n", Line));
++      Lines++;
++      Chars = 0;
++      continue;
++    }
++
++    Line[Chars++] = ((Byte >= 0x20) && (Byte < 0x7f)) ? (CHAR8)Byte : (CHAR8)'.';
++    if (Chars == UKE_LOG_LINE_CHARS) {
++      Line[Chars] = '\0';
++      DEBUG ((DEBUG_WARN, "UKELOG: %a\n", Line));
++      Lines++;
++      Chars = 0;
++    }
++  }
++
++  if (Chars != 0) {
++    Line[Chars] = '\0';
++    DEBUG ((DEBUG_WARN, "UKELOG: %a\n", Line));
++    Lines++;
++  }
++
++  DEBUG ((DEBUG_WARN, "UKELOG: end of record, %u lines\n", (UINT32)Lines));
++}
++
++/**
++  Print the kernel's log snapshot from the pram window.
++
++  The kernel (package/UkeLastLog.c) copies the newest bytes of its message buffer into one of the two
++  slots in this window every second and on the way into panic(). Nothing here writes: this runs before
++  the kernel that will overwrite the window is started, which is the whole point - the previous boot's
++  log becomes text in this boot's firmware log, with no photograph and no storage driver.
++
++  Every line carries the UKELOG: prefix, so `grep UKELOG: log/<model>-<date>.log` yields the kernel's
++  log and nothing else.
++**/
++STATIC
++VOID
++ReadKernelLogRecord (
++  VOID
++  )
++{
++  EFI_STATUS                       Status;
++  EFI_GCD_MEMORY_SPACE_DESCRIPTOR  Descriptor;
++  UKE_LOG_RECORD_HEADER            Header;
++  UKE_LOG_RECORD_HEADER            Best;
++  BOOLEAN                          Found = FALSE;
++  UINT64                           BestAddress = 0;
++  UINTN                            BestSlot = 0;
++  UINT64                           Address;
++  UINTN                            Slot;
++  UINTN                            Shown;
++  UINTN                            Dropped;
++  CONST UINT8                      *Text;
++
++  //
++  // Only touch the window when the DXE core knows it: an unmapped read here would fault before
++  // anything reaches the log. The arena is inside the same run as the panic region, so one check on
++  // the window covers it.
++  //
++  Status = gDS->GetMemorySpaceDescriptor (UKE_PRAM_WINDOW_BASE, &Descriptor);
++  if (EFI_ERROR (Status)) {
++    DEBUG ((DEBUG_WARN, "UKELOG: window 0x%lx not described %r\n", UKE_PRAM_WINDOW_BASE, Status));
++    return;
++  }
++
++  for (Slot = 0; Slot < UKE_LOG_SLOTS; Slot++) {
++    Address = UKE_PRAM_WINDOW_BASE + UKE_LOG_ARENA_OFFSET + Slot * UKE_LOG_SLOT_BYTES;
++    if (!SlotIsComplete (Address, Slot, &Header)) {
++      continue;
++    }
++
++    if (!Found || (Header.Sequence > Best.Sequence)) {
++      CopyMem (&Best, &Header, sizeof (Best));
++      Found       = TRUE;
++      BestAddress = Address;
++      BestSlot    = Slot;
++    }
++  }
++
++  if (!Found) {
++    //
++    // One line, with the raw words a reviewer needs to tell the three cases apart. panic-magic is the
++    // first word of the window: 0x46554e4b ('FUNK') means the previous boot panicked and XNU owns the
++    // window, 0 means it did not.
++    //
++    DEBUG ((
++      DEBUG_WARN,
++      "UKELOG: no record at 0x%lx (slot magics 0x%x/0x%x, commits 0x%x/0x%x, panic-magic 0x%x)\n",
++      UKE_PRAM_WINDOW_BASE + UKE_LOG_ARENA_OFFSET,
++      ReadRecordWord (UKE_PRAM_WINDOW_BASE + UKE_LOG_ARENA_OFFSET),
++      ReadRecordWord (UKE_PRAM_WINDOW_BASE + UKE_LOG_ARENA_OFFSET + UKE_LOG_SLOT_BYTES),
++      ReadRecordWord (UKE_PRAM_WINDOW_BASE + UKE_LOG_ARENA_OFFSET + 0x14),
++      ReadRecordWord (UKE_PRAM_WINDOW_BASE + UKE_LOG_ARENA_OFFSET + UKE_LOG_SLOT_BYTES + 0x14),
++      ReadRecordWord (UKE_PRAM_WINDOW_BASE)
++      ));
++    return;
++  }
++
++  DEBUG ((
++    DEBUG_WARN,
++    "UKELOG: record 0x%lx slot %u seq %u len %u cap %u flags 0x%x panic-magic 0x%x\n",
++    BestAddress,
++    (UINT32)BestSlot,
++    Best.Sequence,
++    Best.Length,
++    Best.Capacity,
++    Best.Flags,
++    ReadRecordWord (UKE_PRAM_WINDOW_BASE)
++    ));
++
++  //
++  // The newest bytes, because that is where the machine stopped. The window's first line is usually a
++  // fragment (the snapshot starts mid-line), so start after the first newline in it.
++  //
++  Text    = (CONST UINT8 *)(UINTN)BestAddress + sizeof (Best);
++  Shown   = (Best.Length > UKE_LOG_PRINT_MAX) ? UKE_LOG_PRINT_MAX : Best.Length;
++  Dropped = Best.Length - Shown;
++  Text   += Dropped;
++  while ((Shown != 0) && (Text[0] != '\n')) {
++    Text++;
++    Shown--;
++  }
++  if (Shown != 0) {
++    Text++;
++    Shown--;
++  }
++
++  DEBUG ((DEBUG_WARN, "UKELOG: newest %u of %u bytes, %u older bytes not shown\n",
++          (UINT32)Shown, Best.Length, (UINT32)Dropped));
++
++  PrintRecordText (Text, Shown);
++}
++
+ STATIC
+ CONST CHAR8 *
+ CrashEcName (
+@@ -942,6 +1164,15 @@
+   //
+   ReadPanicLine ();
+   //
++  // Then the kernel's *log* record, from the same window but its own area: a snapshot the kernel takes
++  // every second and on the way into panic(), so its text lands in this boot's firmware log even when
++  // the previous kernel died without panicking, and even when it died before any driver existed.
++  // Kept separate from the panic line on purpose - "the last words" and "the last words before a
++  // panic" are different questions, and a reader that cannot tell a log snapshot from a panic presents
++  // a random kernel line as a panic. It prints one diagnostic line when no record was left.
++  //
++  ReadKernelLogRecord ();
++  //
+   // Then the firmware's own crash record, which wins the single menu line when there is
+   // one: a UEFI exception is newer evidence than a kernel panic log that may be from an
+   // earlier boot, and its full dump goes to the panel right here.
