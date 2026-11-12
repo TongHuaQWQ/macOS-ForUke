@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
 index 6824ed8..824ba32 100644
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -450,9 +450,63 @@ void userServerAckTimerExpired(void *, void *);
+@@ -450,9 +450,69 @@ void userServerAckTimerExpired(void *, void *);
  
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  
@@ -13,6 +13,17 @@ index 6824ed8..824ba32 100644
 + * kernel still runs and one thread is blocked, while silence means the console itself stopped.
 + */
 +static thread_call_t gUkeHeartbeatCall;
++
++#if XNU_LAST_LOG_ARCHIVE
++/*
++ * uke_log_snapshot() is defined in package/UkeLastLog.c, a C translation unit, and this file is C++:
++ * the declaration has to say extern "C" here at namespace scope, or the reference is mangled to
++ * uke_log_snapshot(char const*) while lto.o exports _uke_log_snapshot. It also cannot sit inside the
++ * heartbeat body, where a linkage specification is not a declaration clang accepts
++ * ("expected unqualified-id", round 43226563573).
++ */
++extern "C" void uke_log_snapshot(const char *);
++#endif
 +
 +static void
 +ukeHeartbeat(thread_call_param_t p0, thread_call_param_t p1)
@@ -36,12 +47,7 @@ index 6824ed8..824ba32 100644
 +	 * $auth_ptr stub). build-xnu-4k-baseline.sh defines XNU_LAST_LOG_ARCHIVE=1 exactly when that archive
 +	 * is force-loaded, so the call exists in the real kernel and not in the pass that has no archives.
 +	 */
-+	{
-+		/* C++ translation unit: the definition is C, so the declaration needs extern "C" or the
-+ 		 * link sees uke_log_snapshot(char const*) and lto.o only exports _uke_log_snapshot. */
-+		extern "C" void uke_log_snapshot(const char *);
-+		uke_log_snapshot("heartbeat");
-+	}
++	uke_log_snapshot("heartbeat");
 +#endif /* XNU_LAST_LOG_ARCHIVE */
 +	clock_interval_to_deadline(2, kSecondScale, &deadline);
 +	thread_call_enter_delayed(gUkeHeartbeatCall, deadline);
