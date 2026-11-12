@@ -1,0 +1,55 @@
+Proposed firmware change for round b146 (NOT applied to workspace/uefi-uke by the b146 work).
+
+Why: `struct embedded_panic_header` (work/analysis/xnu-12377/osfmk/kern/debug.h:417) is
+__attribute__((packed)), so on the shipping kernel eph_panic_log_offset is at 0x14 and
+eph_panic_log_len at 0x18 -- the comment and both STATIC_ASSERTs in UkeBootMemoryDxe.c say
+0x18/0x1C, which is the layout an UNPACKED struct would have. Reading through that prefix takes
+eph_panic_log_len for the offset and eph_stackshot_offset for the length, so a genuine FUNK header
+fails the sanity checks in ReadPanicAt() (LogLen == 0 whenever there is no stackshot) and the panic
+is not reported. Verified in the built collection: PE_init_panicheader bzeroes 224 bytes plus one
+(sizeof 225) and stores the offset with `str w10, [x9, #20]` (= 0x14) -- see
+work/analysis/2026-11-12-panic-capture.md.
+
+The kernel side of the chain is fixed by the b146 payload (top-level `pram` node from
+[payload.adt] panic_region). Without this change the panic record reaches 0x9FFE00000 and stays
+unreadable: the "panic(" scan below cannot match either, because the text starts at header+0xE1
+preceded by a NUL, not by a newline.
+
+Apply from the uefi-uke checkout with:  git apply <this file>
+
+diff --git a/Platforms/Xiaomi/ukePkg/Drivers/UkeBootMemoryDxe/UkeBootMemoryDxe.c b/Platforms/Xiaomi/ukePkg/Drivers/UkeBootMemoryDxe/UkeBootMemoryDxe.c
+--- a/Platforms/Xiaomi/ukePkg/Drivers/UkeBootMemoryDxe/UkeBootMemoryDxe.c
++++ b/Platforms/Xiaomi/ukePkg/Drivers/UkeBootMemoryDxe/UkeBootMemoryDxe.c
+@@ -48,24 +48,26 @@
+ //
+ // The prefix of XNU's struct embedded_panic_header (osfmk/kern/debug.h) that this driver reads.
+-// eph_panic_flags_t is a uint64_t, so on a 64-bit build eph_panic_log_offset is at 0x18 and the log
+-// length at 0x1C; nothing past them is needed here. The layout is asserted below rather than
++// That header is __attribute__((packed)), so eph_panic_flags_t (a uint64_t) follows eph_version with
++// no padding: eph_panic_log_offset is at 0x14 and eph_panic_log_len at 0x18, and sizeof is 225. This
++// struct is packed for the same reason -- without it the compiler puts the flags at 0x10 and both
++// offsets below move by four, which is exactly the bug this replaced. Nothing past the length is
++// needed here. The layout is asserted below rather than
+ // trusted, because reading the wrong offset would report a length that fails the sanity checks and
+ // leave the panic unreadable exactly when it matters.
+ //
+ typedef struct {
+   UINT32    Magic;
+   UINT32    Crc;
+   UINT32    Version;
+-  UINT32    Reserved;
+   UINT64    PanicFlags;
+   UINT32    LogOffset;
+   UINT32    LogLen;
+-} UKE_PANIC_HEADER_PREFIX;
++} __attribute__((packed)) UKE_PANIC_HEADER_PREFIX;
+ 
+ #define UKE_PANIC_MAGIC  0x46554E4B  /* EMBEDDED_PANIC_MAGIC ("FUNK"), written by the kernel */
+ 
+-STATIC_ASSERT (OFFSET_OF (UKE_PANIC_HEADER_PREFIX, LogOffset) == 0x18, "panic header offset moved");
+-STATIC_ASSERT (OFFSET_OF (UKE_PANIC_HEADER_PREFIX, LogLen) == 0x1C, "panic header length moved");
++STATIC_ASSERT (OFFSET_OF (UKE_PANIC_HEADER_PREFIX, LogOffset) == 0x14, "panic header offset moved");
++STATIC_ASSERT (OFFSET_OF (UKE_PANIC_HEADER_PREFIX, LogLen) == 0x18, "panic header length moved");
+ 
+ STATIC
+ UINT64

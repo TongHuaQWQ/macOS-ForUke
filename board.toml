@@ -432,7 +432,21 @@ gpu_addon = "build/uke-gpu-addon/gpu-addon.z"
 kernel_args = [
   "-v",
   "serial=3",
-  "debug=0x14e",
+  # 0x14a = 0x14e minus DB_NMI (0x4). The rest is unchanged and inert on a board with no UART (DB_PRT
+  # 0x2 / DB_KPRT 0x8 are serial output, DB_ARP 0x40 is arp debugging); the console text this board
+  # actually reads comes from -v, -enable_kprintf_spam and -uketextconsole. DB_NMI is deliberately OFF
+  # because it is the bit that makes a panic end in a spin instead of a reset, which is what keeps the
+  # pram panic log from ever being readable:
+  #   debug.c panic_init()  -> panicDebugging = TRUE when (debug_boot_arg & DB_NMI)
+  #   debug.c Debugger()    -> if (PE_i_can_has_debugger(NULL) && panicDebugging) { ...; panic_spin_shmcon(); }
+  #                            and the only path to the reset, `if (!panicDebugging) kdp_machine_reboot_type(...)`,
+  #                            is skipped; PE_reboot_on_panic() also answers FALSE in that case.
+  # A spinning kernel leaves the buffers only recoverable by a long press, and a power-off drops the DRAM
+  # the log lives in. With DB_NMI clear the panic path flushes the region (paniclog_flush ->
+  # PE_sync_panic_buffers) and then calls PEHaltRestart(kPEPanicRestartCPU). Note the remainder: that
+  # reset goes through gIOPlatform, so a panic taken before an IOPlatformExpert exists still spins
+  # (PEHaltRestartInternal returns -1) -- the stall probe and the lock watchdog cover that window.
+  "debug=0x14a",
   # Round B14 diagnostics: fileset-wait-log names every IOService a kext waits on, and
   # fileset-wait-cap-ms turns an unbounded wait into a 5 s one so the caller reports what it wanted
   # instead of hanging silently. Both are inert unless this kernel carries fileset-wait-probe.patch.
@@ -599,9 +613,17 @@ text_fixups = [
 ]
 
 [payload.adt]
-# The kernel console/panic region, carved out of the tail of the managed window so it is real RAM that
-# XNU itself never allocates, and handed over as /chosen/pram (see devicetree.py). This is what makes the
-# next boot print the previous boot's log instead of "pram=0 size=0".
+# The kernel panic-log region: the 2 MiB tail of the 5 GiB high run, carved out of the managed window
+# (dts/uke.dts memory@8c0000000 stops at 0x9FFE00000 for exactly this) so it is real DRAM that XNU's VM
+# never allocates. devicetree.py writes TWO things from this one value, because XNU reads two things:
+#   * a TOP-LEVEL `pram` node with `reg = <0x9FFE00000 0x200000>` -- check_for_panic_log() resolves it
+#     with SecureDTLookupEntry(0, "pram") from the ROOT node (pexpert/gen/device_tree.c FindChild walks
+#     direct children only), so the `/chosen/pram` this used to emit was never found at all and the
+#     panel said "pram=0 size=0" every round;
+#   * /chosen/embedded-panic-log-size = 0x200000, the length it maps and writes. It must be <= reg[1]
+#     (native-dt-panic-region.patch returns early otherwise) and it is the ONE place that number may
+#     live now: the [adt.chosen.u32] copy that said 0x380000 is gone, and devicetree.py refuses to
+#     build if a board declares its own again.
 panic_region = "0x9FFE00000:0x200000"
 tool = "scripts/make-uke-adt.py"
 chip_id = "207"
@@ -651,9 +673,14 @@ source = "device:dts/uke.dts"
 include_dirs = ["soc:dts"]
 
 # Board ADT overrides on top of the OS profile identity (the make-uke-adt.py
-# baseline). The panic log and the GMU pool ride as top-level nodes.
+# baseline). The GMU pool rides as a top-level node; the panic log's top-level
+# `pram` node is generated from [payload.adt] panic_region, not from here.
 [adt.chosen.u32]
-embedded-panic-log-size = 0x380000
+# `embedded-panic-log-size` deliberately absent: panic_region writes it, and
+# SecureDTGetProperty returns the FIRST property of a name, so a copy here wins
+# over the one that matches pram.reg -- which is how 0x380000 (the old
+# 0xFF800000/llcc_lpi size) came to describe a 0x200000 region and made
+# check_for_panic_log() bail out. devicetree.py now refuses the combination.
 # SecureBootModel=Disabled, in the only form XNU reads it. AppleImage4 asks the security state whether this
 # is a production device before it reads a nonce slot; on this board there is no such slot, so it reports
 # "failed to read nonce slot data: 2" for every magazine and then waits. Production status 0 with security
@@ -745,18 +772,22 @@ button-names = ["hold", "voldown", "volup"]
 [adt.buttons.u32]
 home-button-type = 2
 
-# Round B26b (2026-11-04) disabled both nodes below: publishing them (the core generator now honours
-# every [adt.<name>] table, so these finally reach the kernel) hangs the boot before the kernel prints
-# a single line — the panel stays on the loader's hand-off frame. The kernel maps pram at
-# PE_create_console(), i.e. before the video console exists, so anything it does there is invisible:
-# either the 3.5 MB uncached mapping of the llcc_lpi reservation, or the region's uninitialised first
-# word reading as 'SHMC' (pe_init.c then points the console at a garbage shared-memory console), is
-# enough to explain a totally silent hand-off. Re-enable only together with a kernel-side probe that
-# maps the region lazily and zeroes it before trusting its header.
-# [adt.pram.bytes]
-# reg = "000080ff000000000000380000000000"
+# The panic log's top-level `pram` node is NOT configured here: [payload.adt] panic_region writes it
+# (devicetree.py) and [adt.pram] is refused, so there is one number pair and not two.
 #
-# gmu-memory is inert until the GPU stage adopts the pool, so it goes with pram to keep the shipped
-# ADT byte-for-byte the one that booted.
+# Round B26b (2026-11-04) had it here, as
+#   # [adt.pram.bytes]
+#   # reg = "000080ff000000000000380000000000"      # 0xFF800000, 0x380000
+# and disabled it again: publishing it hung the boot before the kernel printed a single line, with the
+# panel left on the loader's hand-off frame. 0xFF800000 is not DRAM to hand to an OS -- it is the
+# llcc_lpi_region reservation of the UEFI memory map (MemoryMapLib.c: {"llcc_lpi_region@ff800000",
+# 0xFF800000, 0x00380000, AddMem, MEM_RES, UNCACHEABLE, ...}) -- and PE_create_console() maps and
+# bzeroes the region before the video console exists, so a fault or a stall there is completely silent.
+# The region in use now, 0x9FFE00000, is the tail of the managed DRAM run instead. What that old attempt
+# proves is that this code path can stop the boot, not that this address does: the panel line
+# "PREVIOUS XNU LOG (pram=0 size=0)" is the evidence that the node was never found at all since.
+#
+# gmu-memory is inert until the GPU stage adopts the pool, so it goes with the ADT above to keep the
+# shipped ADT byte-for-byte the one that booted.
 # [adt.gmu-memory.bytes]
 # reg = "000000c8000000000000000200000000"
