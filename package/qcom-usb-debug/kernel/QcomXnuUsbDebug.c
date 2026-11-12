@@ -602,6 +602,16 @@ static void fb_build_payload(void)
     fb_payload_len = used;
     fb_payload_dirty = 0;
 }
+/* qcom-usb-qr=1 is the only way to get the OneSend QR card; see the call site in qcom_usb_debug_poll. */
+static int fb_card_wanted(void)
+{
+    static int wanted = -1;
+    if (wanted < 0) {
+        int qr = 0;
+        wanted = (PE_parse_boot_argn("qcom-usb-qr", &qr, sizeof(qr)) && qr == 1) ? 1 : 0;
+    }
+    return wanted;
+}
 static void fb_paint(void)
 {
     static uint8_t frame[ONESEND_FRAME_SIZE];
@@ -1988,13 +1998,16 @@ void qcom_usb_debug_putc(char c) { (void)qcom_usb_debug_write(&c, 1); }
 void qcom_usb_debug_poll(void)
 {
     uint64_t flags;
-    /* The console card belongs to this component, so qcom-usb-debug=0 has to silence it too. The gate
-     * cannot be inside fb_cycle: the phase only becomes DISABLED at the first real poll, and until then
-     * the card is exactly what this port wants to see. What must not happen is the old behaviour, where
-     * the poll painted the OneSend QR over the kernel console even with the component disabled - the
-     * card repaints every second to stay on top, carries ONESEND_BLOCK = 60 bytes of text per QR and
-     * cycles blocks every ~8 s, so a few KiB of log was dozens of QRs and the plain text was hidden. */
-    if (native.status.phase != QCOM_USB_DEBUG_DISABLED) {
+    /* The console card is opt-in, and the argument is read here rather than from native.status.phase.
+     * Gating on the phase does nothing: the phase only becomes DISABLED inside the start path, which is
+     * later than the first polls, so the card was painted anyway (round b151: qcom-usb-debug=0 in the
+     * payload and the OneSend QR still covered the kernel console).
+     * The card is also a poor channel on its own terms - ONESEND_BLOCK = 60 bytes of text per QR, a new
+     * block every ~8 s, repainted every second so it stays on top - so it has to be asked for:
+     * qcom-usb-qr=1 turns it on, and the kernel's own video console is what a panel photograph reads by
+     * default. The log itself no longer needs this card: panics go to the pram record (official XNU
+     * embedded panic log, b147) and long-running logs go to the ULOG record (package/UkeLastLog.c). */
+    if (fb_card_wanted() && (native.status.phase != QCOM_USB_DEBUG_DISABLED)) {
         fb_cycle();
     }
     if ((++pram_polls & 255u) == 1u) pram_state();
