@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,527 @@
+@@ -1050,3 +1056,531 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
