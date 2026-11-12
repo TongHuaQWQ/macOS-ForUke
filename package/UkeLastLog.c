@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: MIT
 // Keep a persistent dump of the kernel message buffer in the reserved pram.
-// The low half keeps the embedded-panic FUNK record that the next XNU boot
-// prints; the high half is a ramoops-compatible console ring
-// (persistent_ram_buffer, sig 0x43474244) that a reader can expose at
-// /sys/fs/pstore/console-ramoops-0. Enabled with sheng-log=1. The pram half is
-// the only thing written directly: the same snapshot is also appended to the
-// userdata log window through NativeUfs, which is what makes it readable from
-// recovery. Apart from those two the writer never allocates, changes
-// translation, or touches a device register.
+//
+// The window is the one XNU maps for its embedded panic log (`[payload.adt] panic_region`,
+// 0x9FFE00000 for 0x200000 bytes, published as the root `pram` node). This file writes a *log record*
+// of its own at +0x1C0000 - see the constants below - and the firmware that boots next prints it as
+// UKELOG: lines in its own log file, which is how a kernel log becomes readable without a photograph
+// of the panel and without a storage driver inside the kernel.
+//
+// The low half of the window stays XNU's embedded-panic FUNK record; the ramoops half at +0x200000 is
+// a Linux pstore console ring (persistent_ram_buffer, sig 0x43474244) and is inert while the window is
+// 2 MiB (its guard below skips it). The same snapshot can also be appended to the userdata log window
+// through NativeUfs, which is what makes it readable from recovery; that half needs sheng-log=1 and
+// the writer never allocates, changes translation, or touches a device register.
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -33,14 +37,77 @@ extern void pe_print_last_panic_again(void);
 
 #define UKE_LAST_LOG_INTERVAL_MS 500
 
-// The 4 MiB pram region is split in two halves. The low half keeps the
-// embedded-panic FUNK record for the XNU console; the high half is a Linux
-// ramoops console zone (persistent_ram_buffer, no ECC), which the uke Linux
-// ramoops backend exposes at /sys/fs/pstore/console-ramoops-0.
-#define UKE_FUNK_LOG_SIZE   0x200000u
+// The userdata (UFS) half is built only when the configuration asks for it
+// (build-boot-log.py passes -DUKE_LOG_USERDATA=1 when CONFIG_XNU_LOG_USERDATA=y). Without it only the
+// pram record is written, which is the half the firmware reads back on the next boot.
+#ifndef UKE_LOG_USERDATA
+#define UKE_LOG_USERDATA 0
+#endif
+
+// The ramoops console zone: a Linux pstore region at the window's second MiB, which the uke Linux
+// ramoops backend exposes at /sys/fs/pstore/console-ramoops-0. Skipped unless the window is >= 4 MiB.
 #define UKE_RAMOOPS_OFFSET  0x200000u
 #define UKE_RAMOOPS_SIZE    0x200000u
 #define UKE_RAMOOPS_MAGIC   0x43474244u /* "DBGC", see Linux pstore_ram.h */
+
+// ---- the log record ------------------------------------------------------------------------
+//
+// Why this is not the embedded-panic FUNK header any more. Until b150 this writer published the msgbuf
+// tail *as* an embedded panic record (eph_magic = FUNK, text after the header, eph_panic_log_len =
+// length). Three readers take that header at its word - XNU's own check_for_panic_log /
+// pe_print_last_panic, the firmware's ReadPanicAt (UkeBootMemoryDxe.c) and the boot menu's "last
+// panic:" line - so a plain log snapshot was indistinguishable from a real panic: the menu showed a
+// random kernel log line as the panic, and the firmware's UKEMEM: panic line did the same. The FUNK
+// header now belongs to the panic path alone (XNU's PE_init_panicheader / SavePanicInfo and the port's
+// uke_stage_last_panic), and the log record has its own magic, in its own area of the same window.
+//
+// Layout of the record area, at the tail of the 2 MiB window:
+//
+//   0x9FFE00000 + 0x000000   XNU's panic header (0xE1 bytes) and panic text, growing forward
+//   0x9FFE00000 + 0x1C0000   slot 0: 32-byte header + up to 131040 bytes of msgbuf
+//   0x9FFE00000 + 0x1E0000   slot 1: the same
+//   0x9FFE00000 + 0x200000   end of the window = end of physical DRAM
+//
+//   arena      = 0x200000 - 0x1C0000 = 0x40000 = 262144 bytes, two slots of 0x20000 = 131072
+//   text/slot  = 0x20000 - 32 = 131040 bytes; msgbuf is 128 KiB in a DEVELOPMENT kernel
+//                (CONFIG_MSG_BSIZE_DEV, config/MASTER:282), so a full ring fits with 32 bytes spare
+//   collision  = a panic text would have to exceed 0x1C0000 - 0xE1 = 1834783 bytes (1.75 MiB) to reach
+//                slot 0, and XNU caps it at gPanicSize - 0xE1 = 2096927; the writer also stops for good
+//                as soon as the header reads FUNK, so the only way to touch it is a panic that both ran
+//                past 1.75 MiB and happened after this writer's last snapshot.
+//
+// Mirrored, field for field, in the firmware reader
+// workspace/uefi-uke/Platforms/Xiaomi/ukePkg/Include/UkePramLog.h (also archived as
+// firmware/files/Platforms/Xiaomi/ukePkg/Include/UkePramLog.h); work/analysis/check-log-pram.py
+// parses both sources and fails when they drift.
+#define UKE_LOG_ARENA_OFFSET   0x1C0000u
+#define UKE_LOG_SLOT_BYTES     0x20000u
+#define UKE_LOG_SLOTS          2u
+#define UKE_LOG_HDR_BYTES      32u
+#define UKE_LOG_TEXT_CAPACITY  (UKE_LOG_SLOT_BYTES - UKE_LOG_HDR_BYTES)
+#define UKE_LOG_MAGIC          0x474F4C55u /* 'ULOG' */
+#define UKE_LOG_COMMIT         0x54494D43u /* 'CMIT' */
+#define UKE_LOG_VERSION        1u
+
+struct uke_log_header {
+	uint32_t magic;
+	uint32_t version;
+	uint32_t sequence;
+	uint32_t length;
+	uint32_t capacity;
+	uint32_t commit;
+	uint32_t flags;
+	uint32_t reserved;
+} __attribute__((packed));
+
+static uint32_t ukeLogSequence;
+static uint64_t ukeLogLastTick;
+#if UKE_LOG_USERDATA
+// sheng-log=1: the userdata (UFS) half only. It is a boot arg of its own because that transport maps
+// the UFS controller and programs its SMMU before any kext runs, which is a separate experiment from
+// "keep a log in DRAM" and must stay switchable without touching this writer.
+static int ukeShengLog;
+#endif
 
 struct uke_ramoops_buffer {
 	uint32_t sig;
@@ -162,16 +229,31 @@ uke_ramoops_write(struct msgbuf *m)
 	uke_ramoops_last_write = (uint32_t)write;
 }
 
+// Copy the newest bytes of msgbuf into the log record's next slot. Plain stores into the
+// write-combining mapping XNU already made for this window, plus a barrier; no allocation, no lock, and
+// nothing that can sleep, so this is safe from a thread call, from a probe and from a lock path.
 static void
-uke_last_log_write(void)
+uke_log_record_write(void)
 {
-	struct embedded_panic_header *hdr;
+	struct uke_log_header *hdr;
 	struct msgbuf *m = msgbufp;
+	uintptr_t slot;
+	char *text;
 	size_t size, cap, start, first;
 	int write;
+	uint32_t sequence;
 
-	if (gPanicBase == 0 || ukePanicStaged ||
-	    gPanicSize <= sizeof(struct embedded_panic_header) + 1) {
+	if (gPanicBase == 0 || ukePanicStaged) {
+		return;
+	}
+	if ((uint64_t)gPanicSize <
+	    (uint64_t)UKE_LOG_ARENA_OFFSET + UKE_LOG_SLOTS * UKE_LOG_SLOT_BYTES) {
+		return;
+	}
+	// Once the header reads FUNK the window belongs to the panic, and a snapshot here would be a log
+	// line written over a panic record. See the arena arithmetic above for the only case where the two
+	// can meet at all; the panic wins.
+	if (*(volatile uint32_t *)(uintptr_t)gPanicBase == (uint32_t)EMBEDDED_PANIC_MAGIC) {
 		return;
 	}
 	if (m == NULL || m->msg_bufc == NULL || m->msg_size <= 1 || m->msg_magic != MSG_MAGIC) {
@@ -182,40 +264,84 @@ uke_last_log_write(void)
 		return;
 	}
 
-	hdr = (struct embedded_panic_header *)(uintptr_t)gPanicBase;
 	size = (size_t)m->msg_size;
-	cap = UKE_FUNK_LOG_SIZE - sizeof(*hdr) - 1;
+	cap = UKE_LOG_TEXT_CAPACITY;
 	if (cap > size) {
 		cap = size;
 	}
+	sequence = ukeLogSequence + 1u;
+	slot = (uintptr_t)gPanicBase + UKE_LOG_ARENA_OFFSET +
+	    (uintptr_t)(sequence % UKE_LOG_SLOTS) * UKE_LOG_SLOT_BYTES;
+	hdr = (struct uke_log_header *)slot;
+	text = (char *)(slot + UKE_LOG_HDR_BYTES);
 
-	// msg_bufr only advances when a reader drains the log, so it may point at
-	// stale bytes after the ring wraps. The newest cap bytes before msg_bufx
-	// are the ones a reset needs.
+	// Publish order: clear Commit first, copy the text, fill the header, set Commit last. A reset
+	// anywhere in between leaves this slot rejected by the firmware reader and the other slot holding
+	// the previous snapshot, which is why the slot alternates.
+	hdr->commit = 0;
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	// msg_bufr only advances when a reader drains the log, so it may point at stale bytes after the
+	// ring wraps. The newest cap bytes before msg_bufx are the ones a reset needs.
 	start = ((size_t)write + size - cap) % size;
 	first = size - start;
 	if (first > cap) {
 		first = cap;
 	}
-	memcpy((void *)(hdr + 1), m->msg_bufc + start, first);
+	memcpy(text, m->msg_bufc + start, first);
 	if (cap > first) {
-		memcpy((char *)(hdr + 1) + first, m->msg_bufc, cap - first);
+		memcpy(text + first, m->msg_bufc, cap - first);
 	}
-	((char *)(hdr + 1))[cap] = '\0';
-
-	hdr->eph_magic = EMBEDDED_PANIC_MAGIC;
-	hdr->eph_crc = 0;
-	hdr->eph_version = EMBEDDED_PANIC_HEADER_CURRENT_VERSION;
-	hdr->eph_panic_flags = 0;
-	hdr->eph_panic_log_offset = (uint32_t)sizeof(*hdr);
-	hdr->eph_panic_log_len = (uint32_t)cap;
-	hdr->eph_stackshot_offset = 0;
-	hdr->eph_stackshot_len = 0;
-	hdr->eph_other_log_offset = 0;
-	hdr->eph_other_log_len = 0;
 	__asm__ volatile("dsb sy" ::: "memory");
 
-	uke_ramoops_write(m);
+	hdr->magic = UKE_LOG_MAGIC;
+	hdr->version = UKE_LOG_VERSION;
+	hdr->sequence = sequence;
+	hdr->length = (uint32_t)cap;
+	hdr->capacity = (uint32_t)UKE_LOG_TEXT_CAPACITY;
+	hdr->flags = 0;
+	hdr->reserved = 0;
+	__asm__ volatile("dsb sy" ::: "memory");
+	hdr->commit = UKE_LOG_COMMIT;
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	ukeLogSequence = sequence;
+}
+
+// Entry point for call sites outside this file. `why` names the caller in a future record version and is
+// not stored yet; it exists so a reader of the call site does not have to guess what it is for.
+//
+// Rate limited to one snapshot per second, because the callers are independent of each other (the
+// heartbeat thread call every 2 s, the writer thread below every 500 ms, and any probe added later) and
+// each snapshot is up to 128 KiB through a write-combining mapping.
+void
+uke_log_snapshot(const char *why)
+{
+	uint64_t now, frequency;
+
+	(void)why;
+	__asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+	if (ukeLogLastTick != 0) {
+		__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+		if (frequency == 0) {
+			frequency = 24000000u;   // the platform's reference clock; backstop for a bad CNTFRQ
+		}
+		if ((now - ukeLogLastTick) < frequency) {
+			return;
+		}
+	}
+	ukeLogLastTick = now;
+	uke_log_record_write();
+}
+
+// The writer thread's tick: one snapshot, plus the ramoops half when the window is large enough.
+static void
+uke_last_log_write(void)
+{
+	if (gPanicBase != 0 && !ukePanicStaged) {
+		uke_ramoops_write(msgbufp);
+	}
+	uke_log_snapshot("thread");
 }
 
 // ---- userdata copy --------------------------------------------------------------------------
@@ -241,10 +367,6 @@ uke_last_log_write(void)
 // that links it brings the second copy back; without it only the pram half is
 // built, which is the half the UEFI side reads back over USB.
 //
-#ifndef UKE_LOG_USERDATA
-#define UKE_LOG_USERDATA 0
-#endif
-
 #define UKE_UFS_RECORD_BYTES   (16 * 1024)
 #define UKE_UFS_RECORD_BLOCKS  (UKE_UFS_RECORD_BYTES / 4096)
 #define UKE_UFS_PAYLOAD_BYTES  (UKE_UFS_RECORD_BYTES - 32)
@@ -501,7 +623,7 @@ uke_last_log_writer(void *arg, wait_result_t result)
 		// this copy exists to keep. Two seconds stretches the ring to about an
 		// hour.
 #if UKE_LOG_USERDATA
-		if ((tick % (UKE_UFS_INTERVAL_MS / UKE_LAST_LOG_INTERVAL_MS)) == 0) {
+		if (ukeShengLog && ((tick % (UKE_UFS_INTERVAL_MS / UKE_LAST_LOG_INTERVAL_MS)) == 0)) {
 			uke_ufs_publish();
 		}
 #endif
@@ -553,20 +675,39 @@ uke_last_log_hook_entry(const char *who)
 static void
 uke_last_log_start(void)
 {
-	uint32_t enabled = 0;
+	static int started;
 	thread_t thread;
 
-	uke_last_log_beacon("UKELASTLOG-STARTUP-ENTERED");
-	if (!PE_parse_boot_argn("sheng-log", &enabled, (int)sizeof(enabled)) || enabled != 1) {
-		uke_last_log_beacon("UKELASTLOG-DISABLED");
+	if (started) {
+		// uke_last_log_hook_entry() is called from csr_check and from bsd_init, and the STARTUP()
+		// registration is a third path: one writer thread is all this needs, and the first call that
+		// gets here owns it.
 		return;
 	}
+	started = 1;
+	uke_last_log_beacon("UKELASTLOG-STARTUP-ENTERED");
+	// The pram record runs unconditionally, and sheng-log no longer switches it on. Two reasons:
+	// the boot argument does not fit (the command line is 998 of DarwinBoot's 1000 bytes, so a new
+	// one costs a byte that is not there), and the record is what makes a kernel log readable without
+	// a photograph - a diagnostic channel that has to be enabled by a boot arg is one that will be off
+	// on the boot that mattered. sheng-log=1 now selects only the userdata (UFS) half below, which is
+	// the experiment that reaches out to a controller before any kext runs.
+#if UKE_LOG_USERDATA
+	{
+		uint32_t enabled = 0;
+
+		ukeShengLog = PE_parse_boot_argn("sheng-log", &enabled, (int)sizeof(enabled)) && enabled == 1;
+	}
+#endif
 	if (kernel_thread_start_priority(uke_last_log_writer, NULL, BASEPRI_KERNEL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 		uke_last_log_beacon("UKELASTLOG-THREAD-STARTED");
 	} else {
 		uke_last_log_beacon("UKELASTLOG-THREAD-FAILED");
 	}
+	// One snapshot here regardless of the thread, so a kernel that dies before the first tick still
+	// leaves its log up to this point in the window.
+	uke_log_snapshot("start");
 }
 
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, uke_last_log_start);

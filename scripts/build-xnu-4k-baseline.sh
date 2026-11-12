@@ -366,6 +366,12 @@ if [ -d "$MOCKFS_OBJECT_DIR" ]; then
 fi
 EXTRA_MAKE_ARGS+=("ubc_subr.o_CFLAGS_ADD=-DXNU_NATIVE_CS_HASH_CACHE=$CS_HASH_CACHE_MODE")
 EXTRA_CFLAGS=${XNU_EXTRA_CFLAGS:--Wno-reserved-identifier -Wno-pre-c11-compat -Wno-missing-designated-field-initializers -Wno-suggest-override -Wno-unnecessary-virtual-specifier -Wno-suggest-destructor-override -Wno-ms-bitfield-padding}
+# 1 only when libUkeLastLog.a is actually force-loaded below. Call sites in the patch series that name
+# uke_log_snapshot() are guarded on it: the bootstrap pass links without the archive builders, and on
+# arm64e a weak reference does not save that link -- taking the symbol's address needs the pac-signed
+# $auth_ptr stub, so the reference is strong. Same reason uke-bsd-init-hook guards on
+# XNU_QCOM_USB_DEBUG; this flag says what it means.
+LAST_LOG_LINKED=0
 OWNER_ROOT_PROBE=${XNU_VERIFIED_ROOT_PROBE:-0}
 if [ "$OWNER_ROOT_PROBE" != 0 ] && [ "$OWNER_ROOT_PROBE" != 1 ]; then
   echo 'XNU_VERIFIED_ROOT_PROBE must be 0 or 1' >&2
@@ -902,6 +908,7 @@ PY_BINDINGS
     if [ -f "$LAST_LOG_ARCHIVE" ]; then
       KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$LAST_LOG_ARCHIVE"
       KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $LAST_LOG_ARCHIVE"
+      LAST_LOG_LINKED=1
     fi
   fi
   KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES ${XNU_EXTRA_LD_ARCHIVES:-}"
@@ -945,6 +952,7 @@ if not stamp.exists() or stamp.read_text() != identity:
 PY
 EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS"
 EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_WATCHDOG_POLICY=$WATCHDOG_POLICY"
+EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_LAST_LOG_ARCHIVE=$LAST_LOG_LINKED"
 # Which guest OS the kernel is built FOR. Apple's macOS kernel is compiled with XNU_TARGET_OS_OSX, and
 # the XNU_TARGET_OS_* macros decide which code is compiled in at all -- not just which deployment flag
 # is attached. Hosting macOS kexts on an iOS-target kernel leaves whole families out, so a fileset

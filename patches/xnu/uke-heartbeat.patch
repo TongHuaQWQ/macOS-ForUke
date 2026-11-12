@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
 index 6824ed8..824ba32 100644
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -450,9 +450,42 @@ void userServerAckTimerExpired(void *, void *);
+@@ -450,9 +450,61 @@ void userServerAckTimerExpired(void *, void *);
  
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  
@@ -22,7 +22,26 @@ index 6824ed8..824ba32 100644
 +
 +	beats++;
 +	kprintf("uke-heartbeat %llu\n", beats);
-+	clock_interval_to_deadline(2, kSecondScale, &deadline);
++#if XNU_LAST_LOG_ARCHIVE
++	/*
++	 * The kernel's own log, into the reserved pram window: the firmware that boots next prints it as
++	 * UKELOG: lines in its log file, so a boot that dies without panicking still leaves its text behind.
++	 * This is the periodic trigger because a patched call site is the only thing that demonstrably runs
++	 * on this board (STARTUP()-registered threads have never produced output here), and two seconds is
++	 * the rate at which that already happens; uke_log_snapshot() itself keeps at most one copy per
++	 * second. Placed after the kprintf so the heartbeat line itself is in the snapshot.
++	 *
++	 * The guard is not decoration: uke_log_snapshot() lives in libUkeLastLog.a, which the bootstrap pass
++	 * links without (and a weak reference would not help - on arm64e the call needs the pac-signed
++	 * $auth_ptr stub). build-xnu-4k-baseline.sh defines XNU_LAST_LOG_ARCHIVE=1 exactly when that archive
++	 * is force-loaded, so the call exists in the real kernel and not in the pass that has no archives.
++	 */
++	{
++		extern void uke_log_snapshot(const char *);
++		uke_log_snapshot("heartbeat");
++	}
++#endif /* XNU_LAST_LOG_ARCHIVE */
+++	clock_interval_to_deadline(2, kSecondScale, &deadline);
 +	thread_call_enter_delayed(gUkeHeartbeatCall, deadline);
 +}
 +#endif /* DEVELOPMENT || DEBUG */
