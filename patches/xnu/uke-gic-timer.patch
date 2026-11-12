@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,607 @@
+@@ -1050,3 +1056,630 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -95,6 +95,26 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +#define UKE_GIC_CTLR_RWP           (1u << 31)
 +#define UKE_GICR_CTLR              0x0000u
 +#define UKE_GICR_CTLR_RWP          (1u << 3)
++/*
++ * Staging for a console that does not exist yet: uke_gic_arm_cpu() runs before pe_init's video console,
++ * so its printf lines are thrown away on exactly the boots that matter. Each decision point writes
++ * three words into the pram window instead, where the firmware prints them on the next boot as
++ * `UKEMEM: last log from window 0x9ffe00000+0x1100: UKEGIC-<n> <a> <b>`. The tag says how far it got:
++ *   1 = distributor programmed  (a = GICD_CTLR after the write, b = a fresh read-back)
++ *   2 = redistributor woken     (a = 0, b = WAKER after the wake attempt)
++ *   3 = SGI frame about to be touched   (a = 1, b = 0)
++ * Declared here, above every use: a first version of this put the macro next to the function that
++ * follows uke_gic_arm_cpu, i.e. after the call sites, which does not build.
++ * Guarded on XNU_LAST_LOG_ARCHIVE for the same reason the heartbeat call is: the bootstrap pass links
++ * without libUkeLastLog.a, and a weak reference does not survive arm64e's pac-signed stub.
++ */
++#if XNU_LAST_LOG_ARCHIVE
++extern void uke_stage_beacon(uint32_t tag, uint32_t first, uint32_t second);
++#define UKE_GIC_BEACON(tag, a, b)   uke_stage_beacon((tag), (uint32_t)(a), (uint32_t)(b))
++#else
++#define UKE_GIC_BEACON(tag, a, b)   do { } while (0)
++#endif
++
 +#define UKE_MPIDR_AFF0             0x000000FFull
 +#define UKE_MPIDR_AFF1             0x0000FF00ull
 +#define UKE_GIC_SPURIOUS           1020u
@@ -331,6 +351,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	 * Whatever the remaining wake problem is, it now surfaces as one printed line and the timer is
 +	 * left unarmed instead of taking the machine down with it.
 +	 */
++	UKE_GIC_BEACON(2, 0, waker);
 +	if ((waker & (UKE_GICR_WAKER_PSLEEP | UKE_GICR_WAKER_ASLEEP)) != 0) {
 +		printf("uke-gic: redistributor %#llx not awake (waker %#x), not touching the SGI frame\n",
 +		    (unsigned long long)redistributor, waker);
@@ -409,6 +430,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		    uke_gic_dist_ctlr);
 +		return;
 +	}
++	UKE_GIC_BEACON(1, uke_gic_dist_ctlr, uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR));
 +	printf("uke-gic: GICD_CTLR %#x (ARE_NS %u, ENABLE_G1 %u, RWP %u)\n", uke_gic_dist_ctlr,
 +	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_NS) ? 1u : 0u,
 +	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_ENABLE_GRP0) ? 1u : 0u,
@@ -428,6 +450,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	 * refused (esr 0x96000010 has WnR = 0). A store has no such failure mode, and every PPI belongs
 +	 * in group 1 anyway, so ~0 is also the value Linux and this board want -- the timer PPI is bit 27.
 +	 */
++	UKE_GIC_BEACON(3, 1, 0);
 +	uke_gic_write32(redistributor + UKE_GICR_IGROUPR0, 0xFFFFFFFFu);
 +	igroupr = 0xFFFFFFFFu;
 +	(void)igroupr;

@@ -634,21 +634,36 @@ uke_last_log_writer(void *arg, wait_result_t result)
 
 /* A pram beacon of its own: this STARTUP and the USB one are the two places whose threads have
  * never produced observable output, so each says whether it ran at all in a slot the firmware's
- * printable-run scan can read on the next boot. 0xFF800000 is the /pram window the ADT declares. */
+ * printable-run scan can read on the next boot.
+ *
+ * The window is gPanicBase when XNU found it, and only then the legacy 0xFF800000. The comment here
+ * used to claim 0xFF800000 is "the /pram window the ADT declares"; it has not been since the ADT moved
+ * the node to the root with [payload.adt] panic_region = 0x9FFE00000, so every beacon this port has
+ * ever written went into LLCC hardware space, which is exactly the junk the firmware kept reporting as
+ * `pram first text: <garbage>`. Fixing the address is what makes an early-boot beacon readable. */
 static void
 uke_last_log_beacon(const char *text)
 {
 	static vm_offset_t va;
+	vm_offset_t base;
 	char *slot;
 	unsigned i = 0;
 
-	if (va == 0) {
+	/*
+	 * gPanicBase is re-read on every call rather than cached: the early callers (the GIC arming code, the
+	 * USB worker) can run before or after pe_init's check_for_panic_log(), and a cached fallback would
+	 * pin every later beacon to the wrong window. Only the legacy mapping is cached, because making it is
+	 * the expensive part.
+	 */
+	base = gPanicBase != 0 ? gPanicBase : va;
+	if (base == 0) {
 		va = ml_io_map_wcomb(0xFF800000ull, 0x2000);
-		if (va == 0) {
+		base = va;
+		if (base == 0) {
 			return;
 		}
 	}
-	slot = (char *)(va + 0x1100);
+	slot = (char *)(base + 0x1100);
 	while (i < 63 && text[i] != '\0') {
 		slot[i] = text[i];
 		i++;
@@ -657,6 +672,32 @@ uke_last_log_beacon(const char *text)
 		slot[i++] = 0;
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+/*
+ * External, for the GIC arming code in pexpert/arm/pe_init.c. That runs before the console exists, so
+ * its printf output is lost exactly when it matters; a beacon lands in pram and the firmware prints it
+ * on the next boot as `UKEMEM: last log from window ...`. Three hex fields, no formatting library.
+ */
+void
+uke_stage_beacon(uint32_t tag, uint32_t first, uint32_t second)
+{
+	char text[40];
+	const char hex[] = "0123456789abcdef";
+	unsigned at = 0;
+	int shift;
+
+	text[at++] = 'U'; text[at++] = 'K'; text[at++] = 'E'; text[at++] = 'G'; text[at++] = 'I';
+	text[at++] = 'C'; text[at++] = '-' ; text[at++] = '0' + (char)(tag % 10u); text[at++] = ' ';
+	for (shift = 28; shift >= 0; shift -= 4) {
+		text[at++] = hex[(first >> shift) & 0xfu];
+	}
+	text[at++] = ' ';
+	for (shift = 28; shift >= 0; shift -= 4) {
+		text[at++] = hex[(second >> shift) & 0xfu];
+	}
+	text[at] = 0;
+	uke_last_log_beacon(text);
 }
 
 /* Defined below, but called by the external entry above it: without this prototype the call is an
