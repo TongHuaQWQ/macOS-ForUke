@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,583 @@
+@@ -1050,3 +1056,607 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -48,18 +48,24 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +#define UKE_GICR_TYPER             0x0008u
 +#define UKE_GICR_TYPER_LAST        (1ull << 4)
 +#define UKE_GICR_WAKER             0x0014u
-+/* GICv3 GICR_WAKER, and this file had it upside down. The architecture says bit 0 = ChildrenAsleep
-+ * (read-only; 1 = the PE interface is quiescent and the SGI_base frame is not accessible) and
-+ * bit 1 = ProcessorSleep (written by software; 1 asks the redistributor to sleep). The previous
-+ * version declared bit 0 as ProcessorSleep and bit 1 as ChildrenAsleep, so on this board it read
-+ * WAKER = 0x6 -- ProcessorSleep = 1, ChildrenAsleep = 0, bit 2 set -- and then (a) "cleared" bit 0,
-+ * which is read-only and stayed 0, (b) waited for bit 1 to fall, which never happens because bit 1
-+ * is the request bit it had just failed to clear, and (c) gave up after a second with
-+ * "stays asleep (waker 0x6)", leaving ProcessorSleep asserted and the SGI frame inaccessible. XNU's
-+ * own pexpert/pexpert/arm64/VMAPPLE.h agrees on ProcessorSleep = 0x2 (it puts Apple's
-+ * ChildrenAsleep at bit 2, which is why the wait below only insists on the architectural bit). */
++/*
++ * GICR_WAKER on this part: bit 1 = ProcessorSleep, bit 2 = ChildrenAsleep. Settled by the two
++ * implementations that run on this SoC rather than by the architecture manual's numbering:
++ *   * the Android kernel shipped for this board, in its own arch/arm64/include/asm/arm-gic-v3.h:
++ *       #define GICR_WAKER_ProcessorSleep (1U << 1)
++ *       #define GICR_WAKER_ChildrenAsleep (1U << 2)
++ *     and its gic_enable_redist() clears bit 1 and polls bit 2 -- disassembled in that image at
++ *     0xffffffc0087e0d7c as `tst w0, #4`, i.e. the wait tests 0x4.
++ *   * XNU's own pexpert/pexpert/arm64/VMAPPLE.h, which says the same thing (0x2 / 0x4) and whose
++ *     pe_fiq.c does the same clear-then-poll.
++ * The measured value on this board, WAKER = 0x6, is exactly bit1|bit2: ProcessorSleep requested and
++ * ChildrenAsleep acknowledged. Two previous versions of this file got the pair wrong in opposite
++ * directions (0x1/0x2 then 0x2/0x1); with ChildrenAsleep = 0x1 the wait polls a bit that always reads
++ * zero, returns immediately, and the SGI frame is touched while its children are still asleep -- which
++ * is the abort at GICR_IGROUPR0 (0x17190080) that round b158 showed.
++ */
 +#define UKE_GICR_WAKER_PSLEEP      0x2u
-+#define UKE_GICR_WAKER_ASLEEP      0x1u
++#define UKE_GICR_WAKER_ASLEEP      0x4u
 +#define UKE_GICR_IGROUPR0          0x10080u
 +#define UKE_GICR_ISENABLER0        0x10100u
 +#define UKE_GICR_ICENABLER0        0x10180u
@@ -72,11 +78,23 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 + * to touch the SGI frame -- which is refused until ARE_NS is set. Two rounds of "the ARE fix did not
 + * help" were really one wrong bit, exactly like the GICR_WAKER inversion before it.
 + */
-+#define UKE_GIC_CTLR_ENABLE_GRP0   (1u << 0)   /* DS=1: EnableGrp1; DS=0: EnableGrp1NS (ours) */
-+#define UKE_GIC_CTLR_ENABLE_GRP1S  (1u << 1)   /* DS=0 only; the secure world's, do not touch */
-+#define UKE_GIC_CTLR_ARE_S         (1u << 4)   /* DS=0: secure affinity routing, read-only to us */
-+#define UKE_GIC_CTLR_ARE_NS        (1u << 5)   /* DS=0: OURS, and the one the SGI frame needs */
++/*
++ * GICD_CTLR, with the names the Linux port for this SoC uses (its own arm-gic-v3.h, quoted above):
++ *   GICD_CTLR_ENABLE_G1   (1U << 0)      GICD_CTLR_ENABLE_G1A (1U << 1)
++ *   GICD_CTLR_ARE_NS     (1U << 4)      GICD_CTLR_DS         (1U << 6)
++ *   GICD_CTLR_RWP        (1U << 31)
++ * and gic_dist_init() writes GICD_CTLR = ARE_NS|ENABLE_G1A|ENABLE_G1 = 0x13, then polls RWP. So on
++ * this part ARE_NS is bit 4. The architecture manual's two-security-state numbering (ARE_S at 4,
++ * ARE_NS at 5) is not what either implementation here follows, and a previous version of this file
++ * believed bit 5, which no working implementation on this SoC ever writes.
++ */
++#define UKE_GIC_CTLR_ENABLE_GRP0   (1u << 0)   /* ENABLE_G1 / EnableGrp1NS */
++#define UKE_GIC_CTLR_ENABLE_GRP1A  (1u << 1)   /* ENABLE_G1A */
++#define UKE_GIC_CTLR_ARE_NS        (1u << 4)   /* ARE_NS: the SGI frame needs this */
 +#define UKE_GIC_CTLR_DS            (1u << 6)
++#define UKE_GIC_CTLR_RWP           (1u << 31)
++#define UKE_GICR_CTLR              0x0000u
++#define UKE_GICR_CTLR_RWP          (1u << 3)
 +#define UKE_MPIDR_AFF0             0x000000FFull
 +#define UKE_MPIDR_AFF1             0x0000FF00ull
 +#define UKE_GIC_SPURIOUS           1020u
@@ -360,40 +378,41 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	 * take, leaving the GIC alone costs a timer that never ticks, which the stall probe reports as a
 +	 * hang; touching the SGI frame costs a panic before IOPlatformIO exists.
 +	 */
++	/*
++	 * Exactly the distributor half of Linux's gic_dist_init() for this SoC: ARE_NS with both group 1
++	 * enables, written once, then RWP polled until the distributor has drained. The measured value on
++	 * this board was 0x12 (ENABLE_G1A|ARE already set, ENABLE_G1 clear), so 0x13 is the value that
++	 * completes it. Linux does this a whole phase before any per-CPU work; so does this function, which
++	 * is the first thing uke_gic_arm_cpu does.
++	 */
 +	uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
-+	if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_DS) != 0) {
-+		/*
-+		 * Single security state: bit 4 is ARE and there is no separate NS bit, so the old behaviour is
-+		 * right here. This board takes the other path; the branch exists so the code says which world
-+		 * it thinks it is in instead of trusting one constant.
-+		 */
-+		if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_S) == 0) {
-+			uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR,
-+			    uke_gic_dist_ctlr | UKE_GIC_CTLR_ARE_S);
-+			__builtin_arm_isb(ISB_SY);
-+			uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
-+		}
-+	} else if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_NS) == 0) {
-+		/*
-+		 * ARE_NS may only be changed while the non-secure group 1 is disabled, so it is cleared here
-+		 * and restored at the end of this function. EnableGrp1S is the secure world's and is left
-+		 * exactly as found.
-+		 */
-+		uint32_t armed = (uke_gic_dist_ctlr & ~UKE_GIC_CTLR_ENABLE_GRP0) | UKE_GIC_CTLR_ARE_NS;
-+
-+		uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, armed);
++	if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_NS) == 0 ||
++	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_ENABLE_GRP0) == 0) {
++		uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR,
++		    uke_gic_dist_ctlr | UKE_GIC_CTLR_ARE_NS | UKE_GIC_CTLR_ENABLE_GRP1A |
++		    UKE_GIC_CTLR_ENABLE_GRP0);
 +		__builtin_arm_isb(ISB_SY);
-+		uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
++		for (deadline = 0;;) {
++			uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
++			if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_RWP) == 0) {
++				break;
++			}
++			if (deadline == 0) {
++				nanoseconds_to_deadline(1000000000ull, &deadline);
++			} else if (mach_absolute_time() > deadline) {
++				break;
++			}
++		}
 +	}
-+	if ((uke_gic_dist_ctlr & (UKE_GIC_CTLR_ARE_NS | UKE_GIC_CTLR_ARE_S)) == 0) {
-+		printf("uke-gic: GICD_CTLR affinity routing stays off (%#x), not touching the SGI frame\n",
++	if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_NS) == 0) {
++		printf("uke-gic: GICD_CTLR.ARE_NS stays 0 (%#x), not touching the SGI frame\n",
 +		    uke_gic_dist_ctlr);
 +		return;
 +	}
-+	printf("uke-gic: GICD_CTLR %#x (DS %u, ARE_NS %u, ARE_S %u)\n", uke_gic_dist_ctlr,
-+	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_DS) ? 1u : 0u,
++	printf("uke-gic: GICD_CTLR %#x (ARE_NS %u, ENABLE_G1 %u, RWP %u)\n", uke_gic_dist_ctlr,
 +	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_NS) ? 1u : 0u,
-+	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_S) ? 1u : 0u);
++	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_ENABLE_GRP0) ? 1u : 0u,
++	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_RWP) ? 1u : 0u);
 +
 +	/*
 +	 * Always group 1 (IRQ), never group 0 (FIQ). The group 0 path is sleh_fiq, and the only EOI in there
@@ -403,9 +422,15 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	 * deactivates it (and brakes a storm if one still happens).
 +	 */
 +	group0 = 0;
-+	igroupr = uke_gic_read32(redistributor + UKE_GICR_IGROUPR0);
-+	igroupr |= (1u << UKE_GIC_TIMER_PPI);
-+	uke_gic_write32(redistributor + UKE_GICR_IGROUPR0, igroupr);
++	/*
++	 * Linux's gic_cpu_init() writes ~0 here, and the write is deliberate: the read-modify-write this
++	 * used to do made the *load* the first SGI-frame access, and a load is exactly what the bus
++	 * refused (esr 0x96000010 has WnR = 0). A store has no such failure mode, and every PPI belongs
++	 * in group 1 anyway, so ~0 is also the value Linux and this board want -- the timer PPI is bit 27.
++	 */
++	uke_gic_write32(redistributor + UKE_GICR_IGROUPR0, 0xFFFFFFFFu);
++	igroupr = 0xFFFFFFFFu;
++	(void)igroupr;
 +
 +	__builtin_arm_wsr64("ICC_PMR_EL1", 0xFF);
 +	ctlr_el1 = (uint32_t)__builtin_arm_rsr64("ICC_CTLR_EL1");
@@ -422,8 +447,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	uke_gic_storm_gap = 0;
 +	nanoseconds_to_absolutetime(UKE_GIC_STORM_GAP_NS, &uke_gic_storm_gap);
 +	/* Affinity routing is mandatory once redistributors exist, and the group must be forwarded. */
-+	uke_gic_dist_ctlr |= ((uke_gic_dist_ctlr & UKE_GIC_CTLR_DS ? UKE_GIC_CTLR_ARE_S
-+	    : UKE_GIC_CTLR_ARE_NS) | UKE_GIC_CTLR_ENABLE_GRP0);
++	uke_gic_dist_ctlr |= (UKE_GIC_CTLR_ARE_NS | UKE_GIC_CTLR_ENABLE_GRP0);
 +	uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, uke_gic_dist_ctlr);
 +	if (group0) {
 +		__builtin_arm_wsr64("ICC_BPR0_EL1", 0);
