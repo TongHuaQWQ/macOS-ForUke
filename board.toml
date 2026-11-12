@@ -566,14 +566,23 @@ kernel_args = [
   "uke-serror-resume=4",
   "-no_slto_panic",
   "ml-timeout-lock-panic-scale=40",
-  # IOKit match diagnostics, the documented first test for a built-in driver: gIOKitDebug bit 0x10 makes
-  # probeCandidates log "matched <class>, probe score <n>" for every candidate of every nub, which is the
-  # only way to tell "ArmCpu was never a candidate" from "ArmCpu probed and rejected the nub silently".
-  # Two offline-legacy flags were dropped to stay inside the 1000-byte command line.
-  "io=0x10",
-  # "iokit_print_verbose_match_logs=1",  (dropped for the 1000-byte command-line cap: the payload
-  # step appends native-ufs-root=0 because this defconfig has no storage stack, and 990 + 18 bytes
-  # overflowed it. io=0x10 already logs the matched candidate for every nub.)
+  # Contiguous hints off. Round b143 reached the early VM setup past kext loading and died in
+  # arm_vm_page_granular_helper (pc 0xfffffff00bbe377c = +0x3fc, lr = +0x2cc, osfmk/arm64/arm_vm_init.c)
+  # on
+  #   assert(!kva_active || (ppte[i] == ARM_PTE_EMPTY) ||
+  #          ((ppte[i] & ARM_PTE_HINT) == (ptmp & ARM_PTE_HINT)));
+  # which is XNU refusing to change the contiguous bit on a mapping that is already active: the range was
+  # first mapped with ARM_PTE_HINT and is now being updated without it (or the other way round). The hint
+  # is a TLB optimisation -- 16 adjacent PTEs declared contiguously mappable -- and it assumes the block
+  # is physically contiguous with identical attributes; the 4 KiB BCM2837 layout this port runs on is
+  # exactly the case where that assumption stops holding. Disabling it makes both passes agree instead of
+  # papering over the mismatch; it is parsed by PE_parse_boot_argn("use_contiguous_hint") in arm_vm_init.c,
+  # so it costs one command-line argument and no kernel rebuild.
+  "use_contiguous_hint=0",
+  # Dropped for the 1000-byte command line (DarwinBoot's cap; 984 used, 16 free): io=0x10 is the IOKit
+  # match diagnostic that proved "ArmCpu was never a candidate". Restore it by swapping with the line
+  # above when driver matching is the question again -- the two are 22 and 8 bytes.
+  # "io=0x10",
 ]
 # Fixups of signed text, applied by the kernel after signature validation (patches/xnu/native-text-fixup.patch); they reach it as
 # /chosen/text-fixups, not on the command line. Each is <file name>,<file offset>,<original>,<replacement>, in hex. uke runs the
