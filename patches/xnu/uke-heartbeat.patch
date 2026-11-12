@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
 index 6824ed8..824ba32 100644
 --- a/iokit/Kernel/IOService.cpp
 +++ b/iokit/Kernel/IOService.cpp
-@@ -450,9 +450,61 @@ void userServerAckTimerExpired(void *, void *);
+@@ -450,9 +450,63 @@ void userServerAckTimerExpired(void *, void *);
  
  /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
  
@@ -37,7 +37,9 @@ index 6824ed8..824ba32 100644
 +	 * is force-loaded, so the call exists in the real kernel and not in the pass that has no archives.
 +	 */
 +	{
-+		extern void uke_log_snapshot(const char *);
++		/* C++ translation unit: the definition is C, so the declaration needs extern "C" or the
++ 		 * link sees uke_log_snapshot(char const*) and lto.o only exports _uke_log_snapshot. */
++		extern "C" void uke_log_snapshot(const char *);
 +		uke_log_snapshot("heartbeat");
 +	}
 +#endif /* XNU_LAST_LOG_ARCHIVE */
