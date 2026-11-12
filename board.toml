@@ -447,6 +447,12 @@ kernel_args = [
   # reset goes through gIOPlatform, so a panic taken before an IOPlatformExpert exists still spins
   # (PEHaltRestartInternal returns -1) -- the stall probe and the lock watchdog cover that window.
   "debug=0x14a",
+  # Round b170 (2026-11-13): report the interrupt-controller state and stop before the first
+  # SGI-frame access. The store to GICR_IGROUPR0 (PA 0x17190080) is refused by the bus with a
+  # synchronous external abort, which panics before anything printed above it can be read. In this
+  # mode the distributor/redistributor numbers land on the panel and stay there; the timer is not
+  # armed, so the boot stops at the next wait instead of at a panic.
+  "uke-gic-diag=1",
   # Round B14 diagnostics: fileset-wait-log names every IOService a kext waits on, and
   # fileset-wait-cap-ms turns an unbounded wait into a 5 s one so the caller reports what it wanted
   # instead of hanging silently. Both are inert unless this kernel carries fileset-wait-probe.patch.
@@ -500,7 +506,9 @@ kernel_args = [
   "sheng-gpu-pool=1536",
   # The display refresh tick (upstream display port): 120 Hz vsync messages from the family's own sender, so the render
   # server paces to the panel instead of its 1/60 s heartbeat, and IOMFBDisplayRefresh reports the panel rate.
-  "sheng-vsync=120",
+  # "sheng-vsync=120",   (parked to make room for uke-gic-diag=1 under the 1000-byte command-line
+  # cap: the GPU only reaches a vsync consumer long after the point this round is measuring, and the
+  # token costs 16 bytes. Restore it when the boot gets past the interrupt controller.)
   # stage the owner-built NativeAdrenoMetal bundle (addon blob) into Data so the
   # render server opens a native Metal device; iconservicesagent then keeps
   # CoreImage on that device instead of the null-GL crash loop.

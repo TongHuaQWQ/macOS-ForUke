@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,630 @@
+@@ -1050,3 +1056,680 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -47,6 +47,9 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +#define UKE_GICD_PIDR2             0xFFE8u
 +#define UKE_GICR_TYPER             0x0008u
 +#define UKE_GICR_TYPER_LAST        (1ull << 4)
++/* TYPER.VLPIS: this implementation uses the four-frame (256 KiB) redistributor layout, which the
++ * vendor device tree already declares as redistributor-stride = 0x40000. uke-gic-diag prints it. */
++#define UKE_GICR_TYPER_VLPIS       (1ull << 1)
 +#define UKE_GICR_WAKER             0x0014u
 +/*
 + * GICR_WAKER on this part: bit 1 = ProcessorSleep, bit 2 = ChildrenAsleep. Settled by the two
@@ -144,10 +147,23 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 + * exist yet. Mode 2 arms it at the gate probe, by which point rtclock has a deadline to reprogram.
 + */
 +static int          uke_gic_mode = 2;
++/*
++ * uke-gic-diag=1: report the interrupt-controller state and stop before the first SGI-frame
++ * access. Added after the round that finally reached the kernel: the redistributor reports itself
++ * awake (GAICR_WAKER has neither ProcessorSleep nor ChildrenAsleep set) and the very next store,
++ * GICR_IGROUPR0, is refused by the bus with a synchronous external abort (esr 0x96000010, DFSC
++ * 0x10). A bus abort is a panic before any of this can be printed, so the only way to read the
++ * distributor and redistributor state at that point in a boot is to not take the step that dies.
++ */
++static int          uke_gic_diag;
 +static unsigned int uke_boot_stage;
 +/* -1 = not chosen yet; 0 = group 0 (FIQ, sleh_fiq dispatches); 1 = group 1 (IRQ, sleh_irq does) */
 +static int          uke_gic_group = -1;
 +static vm_offset_t  uke_gic_distributor;
++/* The physical bases uke_gic_map() resolved, for the uke-gic-diag report. */
++static uint64_t     ucke_diag_soc;
++static uint64_t     ucke_diag_gicd;
++static uint64_t     ucke_diag_gicr;
 +static vm_offset_t  uke_gic_redistributors;
 +static uint64_t     uke_gic_redistributor_size;
 +static uint64_t     uke_gic_redistributor_stride;
@@ -201,6 +217,9 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	if (PE_parse_boot_argn("uke-gic", &mode, sizeof(mode))) {
 +		uke_gic_mode = (int)(mode <= 2 ? mode : 1);
 +	}
++	if (PE_parse_boot_argn("uke-gic-diag", &mode, sizeof(mode))) {
++		uke_gic_diag = (mode != 0);
++	}
 +	if (uke_gic_mode == 0) {
 +		printf("uke-gic: disabled by boot-arg\n");
 +		return FALSE;
@@ -242,6 +261,9 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		    (unsigned long long)regions[0]);
 +		return FALSE;
 +	}
++	ucke_diag_soc = soc_base;
++	ucke_diag_gicd = soc_base + regions[0];
++	ucke_diag_gicr = soc_base + regions[2];
 +	uke_gic_distributor = ml_io_map(soc_base + regions[0], regions[1]);
 +	uke_gic_redistributors = ml_io_map(soc_base + regions[2], regions[3]);
 +	uke_gic_redistributor_size = regions[3];
@@ -450,6 +472,34 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	 * refused (esr 0x96000010 has WnR = 0). A store has no such failure mode, and every PPI belongs
 +	 * in group 1 anyway, so ~0 is also the value Linux and this board want -- the timer PPI is bit 27.
 +	 */
++	if (uke_gic_diag != 0) {
++		vm_offset_t walk;
++
++		printf("uke-gic: diag soc=%#llx gicd pa=%#llx gicr pa=%#llx size=%#lx stride=%#llx\n",
++		    (unsigned long long)ucke_diag_soc, (unsigned long long)ucke_diag_gicd,
++		    (unsigned long long)ucke_diag_gicr, (unsigned long)uke_gic_redistributor_size,
++		    (unsigned long long)uke_gic_redistributor_stride);
++		for (walk = 0; (walk + 0x10000) <= uke_gic_redistributor_size;
++		    walk += uke_gic_redistributor_stride) {
++			uint64_t t = uke_gic_read64(uke_gic_redistributors + walk + UKE_GICR_TYPER);
++			printf("uke-gic: diag rd[%#lx] pa=%#llx typer=%#llx aff=%#llx last=%u vlpis=%u\n",
++			    (unsigned long)walk,
++			    (unsigned long long)(ucke_diag_gicr + walk),
++			    (unsigned long long)t, (unsigned long long)(t >> 32),
++			    (t & UKE_GICR_TYPER_LAST) ? 1u : 0u, (t & UKE_GICR_TYPER_VLPIS) ? 1u : 0u);
++			if ((t & UKE_GICR_TYPER_LAST) != 0) {
++				break;
++			}
++		}
++		printf("uke-gic: diag this rd pa=%#llx va=%#llx waker=%#x mpidr=%#llx ctlr=%#x\n",
++		    (unsigned long long)(ucke_diag_gicr + (redistributor - uke_gic_redistributors)),
++		    (unsigned long long)redistributor, waker, (unsigned long long)mpidr,
++		    uke_gic_dist_ctlr);
++		printf("uke-gic: diag stopping before GICR_IGROUPR0 pa=%#llx (uke-gic-diag)\n",
++		    (unsigned long long)(ucke_diag_gicr + (redistributor - uke_gic_redistributors) +
++		    UKE_GICR_IGROUPR0));
++		return;
++	}
 +	UKE_GIC_BEACON(3, 1, 0);
 +	uke_gic_write32(redistributor + UKE_GICR_IGROUPR0, 0xFFFFFFFFu);
 +	igroupr = 0xFFFFFFFFu;
