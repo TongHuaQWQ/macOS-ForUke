@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,550 @@
+@@ -1050,3 +1056,583 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -63,8 +63,19 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +#define UKE_GICR_IGROUPR0          0x10080u
 +#define UKE_GICR_ISENABLER0        0x10100u
 +#define UKE_GICR_ICENABLER0        0x10180u
-+#define UKE_GIC_CTLR_ENABLE_GRP0   (1u << 0)   /* also EnableGrp1NS in the non-secure view */
-+#define UKE_GIC_CTLR_ARE           (1u << 4)   /* ARE_NS in the non-secure view: required with GICRs */
++/*
++ * GICD_CTLR, in the layout that GICD_CTLR.DS selects. This board ends up with DS = 0 (two security
++ * states) -- the loader measures 0x00000012, i.e. EnableGrp1S and ARE_S set, everything else clear --
++ * and in that layout affinity routing has TWO enables: ARE_S at bit 4 for the secure side, already set
++ * by the secure world, and ARE_NS at bit 5 for ours, which is not set. The macro below used to name
++ * bit 4 "ARE_NS", so the guard read ARE_S, saw it already set, skipped the write entirely and went on
++ * to touch the SGI frame -- which is refused until ARE_NS is set. Two rounds of "the ARE fix did not
++ * help" were really one wrong bit, exactly like the GICR_WAKER inversion before it.
++ */
++#define UKE_GIC_CTLR_ENABLE_GRP0   (1u << 0)   /* DS=1: EnableGrp1; DS=0: EnableGrp1NS (ours) */
++#define UKE_GIC_CTLR_ENABLE_GRP1S  (1u << 1)   /* DS=0 only; the secure world's, do not touch */
++#define UKE_GIC_CTLR_ARE_S         (1u << 4)   /* DS=0: secure affinity routing, read-only to us */
++#define UKE_GIC_CTLR_ARE_NS        (1u << 5)   /* DS=0: OURS, and the one the SGI frame needs */
 +#define UKE_GIC_CTLR_DS            (1u << 6)
 +#define UKE_MPIDR_AFF0             0x000000FFull
 +#define UKE_MPIDR_AFF1             0x0000FF00ull
@@ -350,18 +361,39 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	 * hang; touching the SGI frame costs a panic before IOPlatformIO exists.
 +	 */
 +	uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
-+	if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE) == 0) {
-+		uint32_t armed = (uke_gic_dist_ctlr & ~UKE_GIC_CTLR_ENABLE_GRP0) | UKE_GIC_CTLR_ARE;
++	if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_DS) != 0) {
++		/*
++		 * Single security state: bit 4 is ARE and there is no separate NS bit, so the old behaviour is
++		 * right here. This board takes the other path; the branch exists so the code says which world
++		 * it thinks it is in instead of trusting one constant.
++		 */
++		if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_S) == 0) {
++			uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR,
++			    uke_gic_dist_ctlr | UKE_GIC_CTLR_ARE_S);
++			__builtin_arm_isb(ISB_SY);
++			uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
++		}
++	} else if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_NS) == 0) {
++		/*
++		 * ARE_NS may only be changed while the non-secure group 1 is disabled, so it is cleared here
++		 * and restored at the end of this function. EnableGrp1S is the secure world's and is left
++		 * exactly as found.
++		 */
++		uint32_t armed = (uke_gic_dist_ctlr & ~UKE_GIC_CTLR_ENABLE_GRP0) | UKE_GIC_CTLR_ARE_NS;
 +
 +		uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, armed);
 +		__builtin_arm_isb(ISB_SY);
 +		uke_gic_dist_ctlr = uke_gic_read32(uke_gic_distributor + UKE_GICD_CTLR);
-+		if ((uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE) == 0) {
-+			printf("uke-gic: GICD_CTLR.ARE stays 0 (%#x), not touching the SGI frame\n",
-+			    uke_gic_dist_ctlr);
-+			return;
-+		}
 +	}
++	if ((uke_gic_dist_ctlr & (UKE_GIC_CTLR_ARE_NS | UKE_GIC_CTLR_ARE_S)) == 0) {
++		printf("uke-gic: GICD_CTLR affinity routing stays off (%#x), not touching the SGI frame\n",
++		    uke_gic_dist_ctlr);
++		return;
++	}
++	printf("uke-gic: GICD_CTLR %#x (DS %u, ARE_NS %u, ARE_S %u)\n", uke_gic_dist_ctlr,
++	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_DS) ? 1u : 0u,
++	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_NS) ? 1u : 0u,
++	    (uke_gic_dist_ctlr & UKE_GIC_CTLR_ARE_S) ? 1u : 0u);
 +
 +	/*
 +	 * Always group 1 (IRQ), never group 0 (FIQ). The group 0 path is sleh_fiq, and the only EOI in there
@@ -390,7 +422,8 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	uke_gic_storm_gap = 0;
 +	nanoseconds_to_absolutetime(UKE_GIC_STORM_GAP_NS, &uke_gic_storm_gap);
 +	/* Affinity routing is mandatory once redistributors exist, and the group must be forwarded. */
-+	uke_gic_dist_ctlr |= (UKE_GIC_CTLR_ARE | UKE_GIC_CTLR_ENABLE_GRP0);
++	uke_gic_dist_ctlr |= ((uke_gic_dist_ctlr & UKE_GIC_CTLR_DS ? UKE_GIC_CTLR_ARE_S
++	    : UKE_GIC_CTLR_ARE_NS) | UKE_GIC_CTLR_ENABLE_GRP0);
 +	uke_gic_write32(uke_gic_distributor + UKE_GICD_CTLR, uke_gic_dist_ctlr);
 +	if (group0) {
 +		__builtin_arm_wsr64("ICC_BPR0_EL1", 0);
