@@ -1988,7 +1988,15 @@ void qcom_usb_debug_putc(char c) { (void)qcom_usb_debug_write(&c, 1); }
 void qcom_usb_debug_poll(void)
 {
     uint64_t flags;
-    fb_cycle();
+    /* The console card belongs to this component, so qcom-usb-debug=0 has to silence it too. The gate
+     * cannot be inside fb_cycle: the phase only becomes DISABLED at the first real poll, and until then
+     * the card is exactly what this port wants to see. What must not happen is the old behaviour, where
+     * the poll painted the OneSend QR over the kernel console even with the component disabled - the
+     * card repaints every second to stay on top, carries ONESEND_BLOCK = 60 bytes of text per QR and
+     * cycles blocks every ~8 s, so a few KiB of log was dozens of QRs and the plain text was hidden. */
+    if (native.status.phase != QCOM_USB_DEBUG_DISABLED) {
+        fb_cycle();
+    }
     if ((++pram_polls & 255u) == 1u) pram_state();
     if (usb_panic_mode == QCOM_USB_PANIC_POLLS && pram_polls == 64u)
         panic("QCOMUSB poll64 phase=%u err=%u tr=%u last=%u a=%x b=%x",

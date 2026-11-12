@@ -48,14 +48,18 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +#define UKE_GICR_TYPER             0x0008u
 +#define UKE_GICR_TYPER_LAST        (1ull << 4)
 +#define UKE_GICR_WAKER             0x0014u
-+/* GICv3 GICR_WAKER: bit 0 = ProcessorSleep (1 = asleep), bit 1 = ChildrenAsleep (1 = the SGI_base
-+ * frame is not accessible yet), bit 2 reserved. This file used to call 0x2 "sleep" and test 0x4 for
-+ * "asleep", so the whole wake block below was dead: bit 2 never reads set, ProcessorSleep was never
-+ * cleared and ChildrenAsleep was never awaited, which is why GICR_IGROUPR0 aborted even after ARE
-+ * was set. The loader measures GICR_WAKER = 0x00000002 on this board, i.e. ProcessorSleep = 0 with
-+ * ChildrenAsleep = 1, so this is exactly the state that needs waiting on. */
-+#define UKE_GICR_WAKER_PSLEEP      0x1u
-+#define UKE_GICR_WAKER_ASLEEP      0x2u
++/* GICv3 GICR_WAKER, and this file had it upside down. The architecture says bit 0 = ChildrenAsleep
++ * (read-only; 1 = the PE interface is quiescent and the SGI_base frame is not accessible) and
++ * bit 1 = ProcessorSleep (written by software; 1 asks the redistributor to sleep). The previous
++ * version declared bit 0 as ProcessorSleep and bit 1 as ChildrenAsleep, so on this board it read
++ * WAKER = 0x6 -- ProcessorSleep = 1, ChildrenAsleep = 0, bit 2 set -- and then (a) "cleared" bit 0,
++ * which is read-only and stayed 0, (b) waited for bit 1 to fall, which never happens because bit 1
++ * is the request bit it had just failed to clear, and (c) gave up after a second with
++ * "stays asleep (waker 0x6)", leaving ProcessorSleep asserted and the SGI frame inaccessible. XNU's
++ * own pexpert/pexpert/arm64/VMAPPLE.h agrees on ProcessorSleep = 0x2 (it puts Apple's
++ * ChildrenAsleep at bit 2, which is why the wait below only insists on the architectural bit). */
++#define UKE_GICR_WAKER_PSLEEP      0x2u
++#define UKE_GICR_WAKER_ASLEEP      0x1u
 +#define UKE_GICR_IGROUPR0          0x10080u
 +#define UKE_GICR_ISENABLER0        0x10100u
 +#define UKE_GICR_ICENABLER0        0x10180u

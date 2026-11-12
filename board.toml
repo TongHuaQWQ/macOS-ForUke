@@ -557,7 +557,15 @@ kernel_args = [
   # uke_usb=0 alone disables the old probe driver (it returns before touching anything), so sync/hook/
   # panic are dropped rather than carried as zeros - the 1000-byte command line is full.
   "uke_usb=0",
-  "qcom-usb-debug=1",  # the CDC-ACM log console over DWC3 (the control experiment in STATE 81 is read)
+  # OFF for this round. With it on, that component paints its OneSend QR card over the framebuffer and
+  # repaints it every second (QcomXnuUsbDebug.c: fb_cycle, QCOM_USB_FB_TICKS_KEEP) to stay on top of the
+  # console - and the card carries only ONESEND_BLOCK = 60 bytes of text per QR, cycled every 8 s, so a
+  # log of a few KiB is dozens of QRs that no phone can sweep by hand. It hid the plain kernel text that
+  # this round needs to read (b145's panel showed Image4/AMFI lines and was legible; b147's showed the QR
+  # instead). The CDC-ACM log console it also enables was never read on this board - the logs we do read
+  # are the firmware's, exported over USB-MSd, and the kernel's own panic record now goes to pram
+  # (round b147) for the firmware to pick up.
+  "qcom-usb-debug=0",
   # The panel now paints the request and a QR of it without panicking (STATE 82/84), so the diagnostic
   # panic stays off: with it on, the first control request stops the machine and enumeration can never
   # be tested. qcom-usb-panic=0 overrides the compiled-in default of 2.
