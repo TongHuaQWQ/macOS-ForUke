@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,531 @@
+@@ -1050,3 +1056,550 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -279,17 +279,36 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +	 * frame aborts when it is not accessible, and a timer that does not tick is a hang the stall
 +	 * probe reports, while an abort here is a panic before IOPlatformIO exists.
 +	 */
-+	if (uke_gic_read32(redistributor + UKE_GICR_WAKER) & UKE_GICR_WAKER_ASLEEP) {
-+		deadline = 0;
-+		nanoseconds_to_deadline(1000000000ull, &deadline);
-+		while ((waker = uke_gic_read32(redistributor + UKE_GICR_WAKER)) & UKE_GICR_WAKER_ASLEEP) {
-+			if ((deadline != 0) && (mach_absolute_time() > deadline)) {
-+				printf("uke-gic: redistributor %#llx stays asleep (waker %#x), not touching "
-+				    "the SGI frame\n", (unsigned long long)redistributor, waker);
-+				return;
-+			}
++	deadline = 0;
++	nanoseconds_to_deadline(1000000000ull, &deadline);
++	for (;;) {
++		waker = uke_gic_read32(redistributor + UKE_GICR_WAKER);
++		if ((waker & UKE_GICR_WAKER_ASLEEP) == 0) {
++			break;
++		}
++		if ((deadline != 0) && (mach_absolute_time() > deadline)) {
++			break;
 +		}
 +	}
++	/*
++	 * The frame is only touched when the redistributor reports awake, ProcessorSleep clear AND
++	 * ChildrenAsleep clear. Round b158 proved why this matters: with the bit definitions finally
++	 * right, the wake wrote WAKER = 0x4 (ProcessorSleep cleared, bit 2 still set) and ChildrenAsleep
++	 * read 0, so the old guard let the code carry on to the SGI_base frame -- and that access aborted
++	 * exactly as it always had:
++	 *   Unhandled platform error: esr 0x96000010 far 0xfffffff2a1252080
++	 *   pc _uke_gic_arm_cpu+0x310 ec 0x25 cpu 0
++	 * A synchronous external abort here kills the CPU before the console exists, so it is silent.
++	 * Whatever the remaining wake problem is, it now surfaces as one printed line and the timer is
++	 * left unarmed instead of taking the machine down with it.
++	 */
++	if ((waker & (UKE_GICR_WAKER_PSLEEP | UKE_GICR_WAKER_ASLEEP)) != 0) {
++		printf("uke-gic: redistributor %#llx not awake (waker %#x), not touching the SGI frame\n",
++		    (unsigned long long)redistributor, waker);
++		return;
++	}
++	printf("uke-gic: redistributor %#llx awake (waker %#x)\n",
++	    (unsigned long long)redistributor, waker);
 +
 +	/* System register access must be on, or no ICC_* write has any effect. */
 +	sre = __builtin_arm_rsr64("ICC_SRE_EL1");

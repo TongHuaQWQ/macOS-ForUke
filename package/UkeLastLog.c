@@ -705,9 +705,12 @@ uke_last_log_start(void)
 	} else {
 		uke_last_log_beacon("UKELASTLOG-THREAD-FAILED");
 	}
-	// One snapshot here regardless of the thread, so a kernel that dies before the first tick still
-	// leaves its log up to this point in the window.
-	uke_log_snapshot("start");
+	// No snapshot from here any more. This hook is STARTUP(EARLY_BOOT, ...), i.e. before any console
+	// exists, and a fault there is a silent death: round b156 removed the pram node as a bisection and the
+	// kernel came back to life with a panel message, so the early pram write is a prime suspect for it. The
+	// writer thread below and the heartbeat's snapshot still cover everything after this point, and the
+	// panic path covers the rest. If b159 proves the node alone is harmless, this can come back after the
+	// first console text instead of at EARLY_BOOT.
 }
 
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, uke_last_log_start);

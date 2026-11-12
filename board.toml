@@ -632,6 +632,10 @@ text_fixups = [
 #     (native-dt-panic-region.patch returns early otherwise) and it is the ONE place that number may
 #     live now: the [adt.chosen.u32] copy that said 0x380000 is gone, and devicetree.py refuses to
 #     build if a board declares its own again.
+# Round b158 removed this line and the kernel came back to life with a panel message, so something on the
+# pram path killed it silently in b156. Two candidates share this one switch, and b159 separates them: the
+# node is back (so XNU's own check_for_panic_log() maps the region as Apple intends), while the EARLY_BOOT
+# snapshot in package/UkeLastLog.c - our own write, at a point where nothing is even printed yet - is gone.
 panic_region = "0x9FFE00000:0x200000"
 tool = "scripts/make-uke-adt.py"
 chip_id = "207"
