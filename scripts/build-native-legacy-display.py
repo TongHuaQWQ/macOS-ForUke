@@ -8,7 +8,12 @@ import struct
 import subprocess
 import sys
 ROOT=Path(__file__).resolve().parents[1];OUT=ROOT/'build/native-legacy-display';OUT.mkdir(parents=True,exist_ok=True)
-sys.path.insert(0,str(ROOT/'kits/NativePrelink'))
+# The tree materialises kits/<feed name> from feeds.toml, where this board's copy is the
+# `XnuPrelink` entry, so the compatibility alias kits/NativePrelink only exists in the device
+# repository itself - not in an assembled tree. CI run 43410905743 died here with
+# "ModuleNotFoundError: No module named 'native_prelink'". Both spellings are tried now.
+for _kit in ('kits/NativePrelink', 'kits/XnuPrelink'):
+    sys.path.insert(0, str(ROOT / _kit))
 from native_prelink import macho,backed_offset,exports
 def run(cmd,**kw):return subprocess.check_output([str(x) for x in cmd],timeout=90,**kw)
 def require(v,why):

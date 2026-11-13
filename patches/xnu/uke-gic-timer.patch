@@ -14,7 +14,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
  #include <libkern/section_keywords.h>
  #include <os/overflow.h>
  
-@@ -1050,3 +1056,680 @@
+@@ -1050,3 +1056,694 @@
  {
  	return strnstr(gTargetTypeBuffer, "sim", sizeof(gTargetTypeBuffer)) != NULL;
  }
@@ -495,9 +495,23 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 +		    (unsigned long long)(ucke_diag_gicr + (redistributor - uke_gic_redistributors)),
 +		    (unsigned long long)redistributor, waker, (unsigned long long)mpidr,
 +		    uke_gic_dist_ctlr);
-+		printf("uke-gic: diag stopping before GICR_IGROUPR0 pa=%#llx (uke-gic-diag)\n",
++		/*
++		 * The one-bit experiment: read the SGI frame before storing to it. The firmware reads AND writes
++		 * GICR_IGROUPR0 at the same physical address without faulting (UKEGPIO in UkeBootMemoryDxe), and this
++		 * kernel already read the redistributor's control frame (TYPER, WAKER) through this very mapping, so
++		 * the question is whether the failure is "the SGI page is not reachable at all" or "it is reachable
++		 * and only the store is refused". A read that faults here panics with the console already up, which
++		 * is exactly the datum that was missing.
++		 */
++		printf("uke-gic: diag reading GICR_IGROUPR0/ISENABLER0 at pa=%#llx/%#llx\n",
 +		    (unsigned long long)(ucke_diag_gicr + (redistributor - uke_gic_redistributors) +
-+		    UKE_GICR_IGROUPR0));
++		    UKE_GICR_IGROUPR0),
++		    (unsigned long long)(ucke_diag_gicr + (redistributor - uke_gic_redistributors) +
++		    UKE_GICR_ISENABLER0));
++		printf("uke-gic: diag igroupr0=%#x isenabler0=%#x (read ok)\n",
++		    uke_gic_read32(redistributor + UKE_GICR_IGROUPR0),
++		    uke_gic_read32(redistributor + UKE_GICR_ISENABLER0));
++		printf("uke-gic: diag stopping before the IGROUPR0 store (uke-gic-diag)\n");
 +		return;
 +	}
 +	UKE_GIC_BEACON(3, 1, 0);
