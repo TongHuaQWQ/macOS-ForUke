@@ -48,6 +48,9 @@ struct dwc3 {
     uint8_t zlp_pending, running, initialized, full_speed, usb31;
     int failed;
     uint32_t events, commands, last_event, errors, stalled_polls;
+    /* TX FIFO sizing (vendor dwc3_gadget_resize_tx_fifos). eps_total is GHWPARAMS3's endpoint
+     * count, the budget the vendor divides between the IN endpoints still to be sized. */
+    uint32_t eps_total, last_fifo_depth, num_fifo_resized, fifo_resized;
     uint8_t link_state;
     uint64_t dropped;
     uint8_t device_descriptor[18], manufacturer[64], product[64], serial[64];
@@ -168,6 +171,17 @@ static int wait_reset(struct dwc3 *d, uint32_t reg, uint32_t mask, uint32_t want
 {
     return wait_mask_slow(d, reg, mask, want, RESET_POLLS, RESET_PAUSE_US);
 }
+/* DWC_usb31 needs much longer than an endpoint command: CSftRst is cleared only after every clock has
+ * resynchronised, which the vendor paces at 10 tries of 20 ms (ref61/core.c:284-305). Returns 0 when
+ * the core reports itself reset. */
+#define SOFT_RESET_POLLS 10u
+#define SOFT_RESET_PAUSE_US 20000u
+
+static int wait_soft_reset(struct dwc3 *d)
+{
+    return wait_mask_slow(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0u,
+                          SOFT_RESET_POLLS, SOFT_RESET_PAUSE_US);
+}
 /* Remote wakeup before a Start Transfer, straight out of the vendor image.
  *
  * The vendor core is Linux 6.1.75 (dwc3_core_init writes GUID(0xc128)=0x0006014b, see
@@ -246,6 +260,78 @@ static int end_noncontrol(struct dwc3 *d)
     d->zlp_pending = 0;
     return 0;
 }
+/* TX FIFO sizing, straight out of the vendor tree.
+ *
+ * work/re/docs/2026-11-14-usb-core-start-connect-gaps.md (A1) quotes Linux 6.1.75
+ * drivers/usb/dwc3/gadget.c:678 and :758-851 - the same tree the vendor kernel is built from
+ * (dwc3_core_init writes GUID(0xc128)=0x0006014b). The board's own device tree asks for it:
+ * live.dts:16017 has a bare "tx-fifo-resize".
+ *
+ * Without this every IN endpoint runs on whatever FIFO depth the bootloader left, which for the
+ * CDC notify (0x82) and bulk IN (0x81) endpoints is nothing: a STARTTRANSFER then neither
+ * completes nor reports an error. That is the same silent shape the rest of this driver has been
+ * fighting, so the allocation is done before the endpoint commands, in the vendor's order
+ * (__dwc3_gadget_ep_enable calls this first).
+ *
+ * GTXFIFOSIZ(n) = 0xc300 + 4n with n = endpoint_number >> 1; low 16 bits are the depth
+ * (TXFDEP, 0xffff for DWC_usb3 and 0x7fff for DWC_usb31), bits 31:16 are this FIFO's start depth. */
+#define TXFIFO_MAX_PACKET 1024u   /* the vendor sizes against SS on purpose: over-allocation is safe */
+
+static unsigned tx_fifo_mdwidth_bytes(struct dwc3 *d)
+{
+    /* GHWPARAMS0.MDWidth (bits 15:8) is in bits; the formula below wants bytes. */
+    return ((rd(d, DWC3_GHWPARAMS0) >> 8) & 0xffu) >> 3;
+}
+
+static unsigned calc_tx_fifo_size(struct dwc3 *d, unsigned mult)
+{
+    unsigned mdwidth = tx_fifo_mdwidth_bytes(d);
+    if (!mdwidth) return 0;
+    /* DWC_usb31 (this board's 0x33313130) is newer than 2.90a, so the rounded-up form applies. */
+    if (d->usb31)
+        return mult * ((TXFIFO_MAX_PACKET + mdwidth) / mdwidth) + 1u;
+    return mult * (TXFIFO_MAX_PACKET / mdwidth) + 1u;
+}
+
+static unsigned tx_fifo_depth_bits(struct dwc3 *d)
+{
+    return d->usb31 ? 0x7fffu : 0xffffu;
+}
+
+static int resize_tx_fifos(struct dwc3 *d, unsigned number)
+{
+    uint32_t fifo0, value;
+    unsigned ram1, fifo, num_in, min_depth, remaining, size, start_depth, end_depth, mask;
+
+    if (!(number & 1u) || number <= 1u) return 0;          /* IN endpoints only, ep0 pairs excluded */
+    if (d->fifo_resized & (1u << number)) return 0;
+    ram1 = rd(d, DWC3_GHWPARAMS7) & 0xffffu;               /* GHWPARAMS7.RAM1_DEPTH */
+    fifo = calc_tx_fifo_size(d, 1);
+    if (!ram1 || !fifo) return 0;                          /* nothing to divide: leave it alone */
+    num_in = d->eps_total > d->num_fifo_resized ? d->eps_total - d->num_fifo_resized : 0u;
+    min_depth = num_in * (fifo + 1u);
+    remaining = (ram1 > min_depth + d->last_fifo_depth) ? ram1 - min_depth - d->last_fifo_depth : 0u;
+    /* Vendor: fifo_size = (num_fifos - 1) * fifo, then clamp to `remaining`, then += fifo, then ++.
+     * num_fifos is 1 for high-speed bulk without streams, so the clamp is inert here and the depth
+     * is fifo + 1 exactly - the earlier draft added fifo twice, which would have eaten the whole
+     * transmit RAM and made resize_tx_fifos() fail on the second IN endpoint. */
+    size = 0u;                                             /* (num_fifos - 1) * fifo */
+    if (remaining < size) size = remaining;
+    size += fifo;
+    size++;                                                /* the vendor's trailing ++ */
+    mask = tx_fifo_depth_bits(d);
+    fifo0 = rd(d, DWC3_GTXFIFOSIZ(0));
+    start_depth = ((fifo0 & 0xffff0000u) >> 16) + d->last_fifo_depth;
+    end_depth = d->last_fifo_depth + (size & mask);
+    if (end_depth >= ram1) return -1;                      /* budget exhausted: caller fails cleanly */
+    value = (size & mask) | ((start_depth & 0xffffu) << 16);
+    wr(d, DWC3_GTXFIFOSIZ(number >> 1), value);
+    d->last_fifo_depth = end_depth;
+    d->fifo_resized |= (1u << number);
+    d->num_fifo_resized++;
+    return 0;
+}
+
 static int configure_ep(struct dwc3 *d, unsigned ep, unsigned type,
                         unsigned packet, int modify)
 {
@@ -257,6 +343,9 @@ static int configure_ep(struct dwc3 *d, unsigned ep, unsigned type,
     if (type != DWC3_DEPCMD_TYPE_CONTROL) p1 |= DWC3_DEPCFG_XFER_IN_PROGRESS_EN;
     if (type == DWC3_DEPCMD_TYPE_INTR) p1 |= DWC3_DEPCFG_BINTERVAL_M1(9);
     if (modify) p0 |= CONFIG_ACTION_MODIFY;
+    /* The vendor's __dwc3_gadget_ep_enable does this before any endpoint command; the IN data
+     * endpoints get their FIFO before the resource/config pair below. */
+    if (resize_tx_fifos(d, ep)) return -4;
     /* Transfer resources are allocated BEFORE the endpoint is configured, which is the order the
      * vendor's own __dwc3_gadget_ep_enable uses (work/re/docs/2026-11-14-vendor-dwc3-ep0-ground-truth.md
      * §12: "DEPSTARTCFG (cmd 9) ... before SETTRANSFRESOURCE (cmd 2) for all endpoints, then
@@ -674,6 +763,7 @@ int dwc3_init(void *context, size_t context_bytes,
     d->usb31 = (id & 0xffff0000u) == 0x33310000u;
     params = rd(d, DWC3_GHWPARAMS3);
     total_eps = (params >> 12) & 63u;
+    d->eps_total = total_eps;          /* GHWPARAMS3.NUM_EPS: the TX FIFO budget's divisor */
     in_eps = (params >> 18) & 31u;
     if (total_eps < EP_COUNT || in_eps < 3 || in_eps > total_eps || total_eps - in_eps < 3)
         return -2;
@@ -693,12 +783,28 @@ int dwc3_init(void *context, size_t context_bytes,
     wr(d, DWC3_DCTL, ctl & ~(DWC3_DCTL_RUN_STOP |
          (inherited_halted ? DWC3_DCTL_INHERITED_RESIDUE : 0u)));
     if (wait_reset(d, DWC3_DSTS, DWC3_DSTS_DEVCTRLHLT, DWC3_DSTS_DEVCTRLHLT)) return -3;
-    if (inherited_halted) {
-        /* "HALT": inherited halted, so no soft reset; the inherited DCTL is the second argument. */
-        trace(d, DWC3_TRACE_READY, 0x48414C54u, ctl);
+    /* A halted inherited core used to skip the soft reset on the b108 evidence that CSftRst does not
+     * self-clear in that state. b215 shows what skipping costs: every endpoint command after
+     * DEPSTARTCFG is written and then never completes - the card reported CR=-4 with the last trace a
+     * TIMEOUT on DWC3_DEPCMD(0) carrying CMDACT, first for SETEPCONFIG (b212, = 0x401) and then, once
+     * the order was fixed, for SETTRANSFRESOURCE (= 0x402). Which command hangs follows the order, not
+     * the command, so the endpoint-command engine itself is wedged from the previous owner and only a
+     * core soft reset clears it.
+     *
+     * The vendor never skips it: dwc3_core_init_mode() calls dwc3_core_soft_reset() for
+     * DWC3_GCTL_PRTCAP_DEVICE unconditionally (ref61/core.c:212), and that function writes
+     * CSftRst | !RUN_STOP and polls at the usb31 pacing - 10 tries of 20 ms, because for DWC_usb31
+     * 1.90a and later CSftRst only clears once every clock has resynchronised
+     * (ref61/core.c:284-305). Our 100 ms block already clears the inherited DCTL 20:23 residue first,
+     * which is what b108 was missing.
+     *
+     * A reset that still refuses to complete is not fatal: the rest of init rewrites GCTL, DCFG, the
+     * event buffer and every endpoint anyway, so fall through with a trace, exactly as before. */
+    wr(d, DWC3_DCTL, (rd(d, DWC3_DCTL) & ~DWC3_DCTL_RUN_STOP) | DWC3_DCTL_CSFTRST);
+    if (wait_soft_reset(d)) {
+        trace(d, DWC3_TRACE_READY, 0x4E4F5253u, rd(d, DWC3_DCTL));   /* "RSON": reset did not clear */
     } else {
-        wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) | DWC3_DCTL_CSFTRST);
-        if (wait_reset(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0)) return -3;
+        trace(d, DWC3_TRACE_READY, 0x52535421u, ctl);                /* "RST!": core soft reset done */
     }
     wr(d, DWC3_DEVTEN, 0); wr(d, DWC3_DALEPENA, 0);
     /* A previous USB owner may have left other interrupters and unacknowledged

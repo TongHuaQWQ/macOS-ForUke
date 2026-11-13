@@ -374,10 +374,15 @@ int main(void)
     /* The clear is one-way now, so a failed init leaves the suspend controls clear rather than restored. */
     assert((regs[DWC3_GUSB2PHYCFG(0) / 4] & ((1u << 6) | (1u << 8))) == 0);
     puts("PASS: unknown core refuses before writes; stuck command exits within 10000 one-microsecond polls");
-    /* The takeover of the state the firmware now proves it leaves: halted, with the previous stack's
-     * DCTL 20:23 still set (DCTL=0x00F00000, DSTS=0x00420004 in uke-20190100-000038.log:726). This
-     * core never self-clears CSftRst - that is exactly b108's DCTL=0x40f00000 - so issuing the reset
-     * here would spend the whole 100 ms budget and fail. */
+    /* The takeover of the state the firmware proves it leaves: halted, with the previous stack's
+     * DCTL 20:23 still set (DCTL=0x00F00000, DSTS=0x00420004 in uke-20190100-000038.log:726).
+     *
+     * This path used to skip the core soft reset on b108's evidence that CSftRst never self-clears
+     * there. b215 retired that: with the reset skipped, every endpoint command after DEPSTARTCFG is
+     * written and never completes (TIMEOUT trace on DEPCMD(0) carrying CMDACT - 0x401 for SETEPCONFIG
+     * in b212, 0x402 for SETTRANSFRESOURCE once the order was fixed), so the command engine is wedged
+     * from the previous owner. The vendor always resets (ref61/core.c:212). The model here still
+     * never self-clears CSftRst, so init must spend the vendor's usb31 budget and then proceed. */
     timeout_commands = 0;
     stuck_csftrst = 1;
     {
@@ -385,11 +390,13 @@ int main(void)
         regs[DWC3_DCTL / 4] = 0x00F00000u;
         regs[DWC3_DSTS / 4] = 0x00420004u;
         assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
-        assert(csftrst_writes == resets_before);   /* no core soft reset on this path */
-        assert(delays == delays_before);           /* so none of the 100 ms was spent on one */
+        assert(csftrst_writes == resets_before + 1);          /* the reset is always attempted */
+        assert(delays - delays_before == 10u * 20000u);        /* 10 polls of 20 ms: the usb31 pacing */
+        /* The residue and RUN_STOP are cleared before the reset is attempted; CSftRst itself stays
+         * set in this model by construction, which is the "reset refused" case the driver tolerates. */
         assert((regs[DWC3_DCTL / 4] & (DWC3_DCTL_INHERITED_RESIDUE | DWC3_DCTL_RUN_STOP)) == 0);
-        assert(regs[DWC3_DALEPENA / 4] == 3);      /* the takeover itself completed */
-        puts("PASS: a halted inherited core is taken over without the core soft reset");
+        assert(regs[DWC3_DALEPENA / 4] == 3);                 /* the takeover still completed */
+        puts("PASS: a halted inherited core still gets the soft reset, then proceeds when it stalls");
     }
     /* Every other inherited state still gets the full reset, unchanged. */
     stuck_csftrst = 0;
@@ -400,14 +407,16 @@ int main(void)
         assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
         assert(csftrst_writes == resets_before + 1);
     }
-    /* And a reset that cannot complete on that path still fails inside the same budget. */
+    /* A reset that cannot complete is not fatal any more: the vendor ignores dwc3_core_soft_reset()'s
+     * return value (ref61/core.c:212-213) and reprograms everything afterwards anyway, so init spends
+     * the usb31 budget, traces the refusal and continues into the takeover. */
     stuck_csftrst = 1;
     {
         unsigned delays_before = delays;
         regs[DWC3_DCTL / 4] = DWC3_DCTL_RUN_STOP;
         regs[DWC3_DSTS / 4] = 0;
-        assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == -3);
-        assert(delays == delays_before + 10000 * 10);
+        assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
+        assert(delays == delays_before + 10u * 20000u);
     }
     stuck_csftrst = 0;
     puts("PASS: an inherited running core keeps the core soft reset, and a stuck one still fails");
