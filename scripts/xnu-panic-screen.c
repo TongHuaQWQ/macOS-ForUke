@@ -60,11 +60,53 @@ struct ctx {
 #define PANIC_TEXT_BYTES 256
 #define PANIC_SAVE_BYTES 1024
 
-__attribute__((noreturn)) static void park (void)
+/*
+ * uke-panic-reset: the panel is this machine's only console and a panic before an IOPlatformExpert
+ * exists cannot restart the board (PEHaltRestartInternal returns -1 without one), so a panicking kernel
+ * used to sit here until a long press - which cuts DRAM and with it the pram record holding the text
+ * this screen is drawing. Drawing first, then waiting a few seconds and issuing PSCI SYSTEM_RESET
+ * (0x84000009 over SMC, the same sequence patch-xnu-entry-probe.py uses for its checkpoints) leaves the
+ * screen up long enough to photograph and brings the board back by itself; a warm reset keeps DRAM
+ * powered, so the next boot's firmware can also print the panic out of pram.
+ *
+ * 0 disables it; the payload build passes UKE_PANIC_RESET_SECONDS.
+ */
+#ifndef UKE_PANIC_RESET_SECONDS
+#define UKE_PANIC_RESET_SECONDS 3
+#endif
+
+__attribute__((noreturn)) static void uke_psci_reset (void)
 {
+#if UKE_PANIC_RESET_SECONDS > 0
+  unsigned long long deadline, now;
+  __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (now));
+  deadline = now * (unsigned long long)UKE_PANIC_RESET_SECONDS * 3ull;   /* ~3 s at any sane CNTFRQ */
+  __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now));
+  deadline += now;
+  for (;;) {
+    __asm__ volatile ("isb" ::: "memory");
+    __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now));
+    if (now >= deadline) {
+      break;
+    }
+  }
+  __asm__ volatile (
+    "movz w0, #0x0009\n\t"
+    "movk w0, #0x8400, lsl #16\n\t"
+    "mov x1, xzr\n\t"
+    "mov x2, xzr\n\t"
+    "mov x3, xzr\n\t"
+    "smc #0\n\t"
+    ::: "x0", "x1", "x2", "x3", "memory");
+#endif
   for (;;) {
     __asm__ volatile ("wfe");
   }
+}
+
+__attribute__((noreturn)) static void park (void)
+{
+  uke_psci_reset ();
 }
 
 static void put (struct ctx *g, u8 c)
