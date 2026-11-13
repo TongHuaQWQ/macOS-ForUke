@@ -615,6 +615,14 @@ static int fb_card_wanted(void)
 static void fb_paint(void)
 {
     static uint8_t frame[ONESEND_FRAME_SIZE];
+    //
+    // Only with qcom-usb-qr=1. The card used to be reached from fb_report()/fb_remember_request() as
+    // well as from the poll loop, so it was painted even with qcom-usb-debug=0 - and on the round where
+    // the kernel finally reaches its own panic, that card sat exactly on top of the text the panel was
+    // being read for. Everyone who wants the card asks for it explicitly; everyone else gets the
+    // console.
+    //
+    if (!fb_card_wanted()) return;
     struct qr_code qr;
     uint32_t side, x0, card_h, text_y, line_y;
     size_t frame_len;

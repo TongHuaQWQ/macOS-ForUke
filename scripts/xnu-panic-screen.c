@@ -22,8 +22,11 @@ struct vc_info {
   u64 v_baseaddr;
 };
 
-/* 3x cells: at 1x the panic text is unreadable on this panel. The full text does
- * not have to fit on screen -- it is staged to the pram and lands in userdata. */
+/* 6x cells. At 3x (previous value) the panel's 3200-pixel width still fits about 170 characters
+ * per line, which is what made every photo of a panic so far unreadable after the phone downscaled it.
+ * At 6x a line holds ~85 characters and a glyph is 36x84 pixels, so the first lines - the assertion
+ * itself - survive a screenshot. The full text does not have to fit: the staging channel is not
+ * reliable on this board (the pram window does not survive the reset), so the panel is the record. */
 #define SCALE   3
 
 extern const u64 gFont[];
@@ -72,7 +75,7 @@ struct ctx {
  * 0 disables it; the payload build passes UKE_PANIC_RESET_SECONDS.
  */
 #ifndef UKE_PANIC_RESET_SECONDS
-#define UKE_PANIC_RESET_SECONDS 3
+#define UKE_PANIC_RESET_SECONDS 60
 #endif
 
 __attribute__((noreturn)) static void uke_psci_reset (void)
