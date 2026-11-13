@@ -168,6 +168,31 @@ static int wait_reset(struct dwc3 *d, uint32_t reg, uint32_t mask, uint32_t want
 {
     return wait_mask_slow(d, reg, mask, want, RESET_POLLS, RESET_PAUSE_US);
 }
+/* Remote wakeup before a Start Transfer, straight out of the vendor image.
+ *
+ * The vendor core is Linux 6.1.75 (dwc3_core_init writes GUID(0xc128)=0x0006014b, see
+ * work/re/docs/2026-11-14-vendor-dwc3-ep0-ground-truth.md). Its dwc3_send_gadget_ep_cmd() does this
+ * for STARTTRANSFER only: read the link state, and if it is U2 (L1) or U3 (L2/U3) put the link into
+ * recovery and poll DSTS up to 20000 times until it is U0. A Start Transfer issued while the link is
+ * not in U0 is the classic "no completion, no error, no event" case.
+ *
+ * This board is high speed only, so upstream's "U2 is fine at SuperSpeed or above" exemption never
+ * applies here and both states need the wakeup. Failure is traced, not fatal: refusing to arm turns a
+ * slow link into a dead console (STATE 89/90). */
+static void link_wakeup(struct dwc3 *d)
+{
+    uint32_t link = DWC3_DSTS_USBLNKST(rd(d, DWC3_DSTS));
+    uint32_t reg;
+    unsigned retries = 20000;
+    if (link != DWC3_LINK_STATE_U2 && link != DWC3_LINK_STATE_U3) return;
+    wr(d, DWC3_DCTL, (rd(d, DWC3_DCTL) & ~DWC3_DCTL_ULSTCHNGREQ_MASK) | DWC3_DCTL_ULSTCHNG_RECOVERY);
+    do {
+        reg = rd(d, DWC3_DSTS);
+        if (DWC3_DSTS_USBLNKST(reg) == DWC3_LINK_STATE_U0) break;
+    } while (--retries);
+    d->link_state = (uint8_t)DWC3_DSTS_USBLNKST(reg);
+    if (DWC3_DSTS_USBLNKST(reg) != DWC3_LINK_STATE_U0) trace(d, DWC3_TRACE_TIMEOUT, DWC3_DSTS, reg);
+}
 static int ep_command(struct dwc3 *d, unsigned ep, uint32_t cmd,
                       uint32_t p0, uint32_t p1, uint32_t p2)
 {
@@ -176,6 +201,7 @@ static int ep_command(struct dwc3 *d, unsigned ep, uint32_t cmd,
     uint32_t suspend = DWC3_GUSB2PHYCFG_SUSPHY | (1u << 8); /* ENBLSLPM */
     int ret = 0;
     d->commands++;
+    if ((cmd & 15u) == DWC3_DEPCMD_STARTTRANSFER) link_wakeup(d);
     /* DWC_usb31 1.90a guide 3.2.2, also Linux dwc3_send_gadget_ep_cmd:
      * HS/FS endpoint commands require both PHY suspend controls disabled. The clear is permanent now:
      * restoring SUSPHY after each command left the PHY idle-suspended between polls, and both the
@@ -228,10 +254,23 @@ static int configure_ep(struct dwc3 *d, unsigned ep, unsigned type,
                   DWC3_DEPCFG_EP_NUMBER(ep);
     /* FIFO number is the USB IN endpoint number, not physical endpoint index. */
     if (ep & 1u) p0 |= DWC3_DEPCFG_FIFO_NUMBER(ep >> 1);
+    if (type != DWC3_DEPCMD_TYPE_CONTROL) p1 |= DWC3_DEPCFG_XFER_IN_PROGRESS_EN;
     if (type == DWC3_DEPCMD_TYPE_INTR) p1 |= DWC3_DEPCFG_BINTERVAL_M1(9);
     if (modify) p0 |= CONFIG_ACTION_MODIFY;
-    if (ep_command(d, ep, DWC3_DEPCMD_SETEPCONFIG, p0, p1, 0)) return -4;
+    /* Transfer resources are allocated BEFORE the endpoint is configured, which is the order the
+     * vendor's own __dwc3_gadget_ep_enable uses (work/re/docs/2026-11-14-vendor-dwc3-ep0-ground-truth.md
+     * §12: "DEPSTARTCFG (cmd 9) ... before SETTRANSFRESOURCE (cmd 2) for all endpoints, then
+     * SETEPCONFIG (cmd 1)"). Our order used to be the reverse, and the core answered by never
+     * completing the configuration command: b212's card reported PH=15 E=11 CR=-4 with the last trace
+     * DWC3_TRACE_TIMEOUT on DWC3_DEPCMD(0) = 0x00000401, i.e. cmd 1 (SETEPCONFIG) with CMDACT still
+     * set after the whole poll budget - no status field, no refusal, just a command the core never
+     * executed because no transfer resource existed for the endpoint yet.
+     *
+     * XFER_IN_PROGRESS_EN is the vendor's per-type difference (control endpoints omit it) and it is
+     * what makes an IN endpoint report its progress instead of going quiet. Both changes are taken
+     * from the same disassembly, not guessed. */
     if (!modify && ep_command(d, ep, DWC3_DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) return -4;
+    if (ep_command(d, ep, DWC3_DEPCMD_SETEPCONFIG, p0, p1, 0)) return -4;
     return 0;
 }
 static int transfer(struct dwc3 *d, unsigned ep, uint32_t type, unsigned bytes)
@@ -498,6 +537,15 @@ static int device_event(struct dwc3 *d, unsigned event)
             speed != DWC3_DSTS_FULLSPEED2) return -6;
         d->full_speed = speed != DWC3_DSTS_HIGHSPEED;
         d->packet_size = d->full_speed ? 64 : 512;
+        /* HIRD threshold, straight out of the vendor core (Linux 6.1.75 dwc3_gadget_conndone_interrupt
+         * sets it for high speed): DCTL.HIRD_THRES = (hird | (is_utmi_l1_suspend << 4)) << 24. The board
+         * DT gives snps,hird-threshold = 0 and sets snps,is-utmi-l1-suspend, so the value is 0x10.
+         * Without it the L1 behaviour differs from the vendor stack from the very first control
+         * transfer onwards, which is another way for a transfer to go quiet without an error. */
+        if (!d->full_speed) {
+            uint32_t ctl = rd(d, DWC3_DCTL);
+            wr(d, DWC3_DCTL, (ctl & ~DWC3_DCTL_HIRD_THRES_MASK) | DWC3_DCTL_HIRD_THRES(0x10u));
+        }
         /* The bus reset that precedes CONNECTDONE discards the endpoint configuration and with it the
          * transfer resources, so "start a new configuration" has to be issued again here. Without it
          * the first STARTTRANSFER on endpoint 0 is refused with status 1, Invalid Resource - which is
@@ -673,9 +721,15 @@ int dwc3_init(void *context, size_t context_bytes,
     wr(d, DWC3_GEVNTSIZ(0), EVENT_BYTES | (1u << 31));
     wr(d, DWC3_GEVNTCOUNT(0), 0);
     /* No EVNTOVERFLOWEN/ERRTICERREN: enabling them only buys a notification the driver used to turn
-     * into a permanent stop, and a lost event is survivable (STATE 89). */
+     * into a permanent stop, and a lost event is survivable (STATE 89).
+     *
+     * ULSTCNGEN is the exception. The vendor enables 0xe1f here, and this one bit is what makes a
+     * link-state change observable at all: without it the driver only ever sees the state it happened
+     * to sample, which is exactly the blind spot that makes "link left U0 and the Start Transfer never
+     * completed" indistinguishable from "the core never saw the TRB". link_wakeup() below needs that
+     * visibility, and device_event() already ignores unknown device events instead of stopping. */
     wr(d, DWC3_DEVTEN, DWC3_DEVTEN_DISCONNEVTEN | DWC3_DEVTEN_USBRSTEN |
-         DWC3_DEVTEN_CONNECTDONEEN);
+         DWC3_DEVTEN_CONNECTDONEEN | DWC3_DEVTEN_ULSTCNGEN);
     if (ep_command(d, 0, DWC3_DEPCMD_DEPSTARTCFG, 0, 0, 0)) goto fail;
     for (ep = 0; ep < EP_COUNT; ep++) {
         if (ep == 2) continue;
