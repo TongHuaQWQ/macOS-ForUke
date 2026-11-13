@@ -33,7 +33,7 @@ diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 index abb7641..b262c90 100644
 --- a/pexpert/arm/pe_init.c
 +++ b/pexpert/arm/pe_init.c
-@@ -232,6 +232,38 @@ check_for_panic_log(void)
+@@ -232,6 +232,59 @@ check_for_panic_log(void)
  	bzero((void *)gPanicBase, gPanicSize);
  }
  
@@ -55,6 +55,27 @@ index abb7641..b262c90 100644
 +	}
 +	while (text[length] != '\0') {
 +		length++;
++	}
++	length++;
++	/*
++	 * uke-panic-beacon: also drop the first 63 characters into gPanicBase + 0x1100, the slot the
++	 * firmware's UkeUsbLogDxe prints as `pram slot 0x1100: "..."` / `UKEMEM: last log from ... +0x1100`.
++	 * The header below needs the FUNK magic and the flush to agree; this is a plain store of ASCII into
++	 * an already-mapped region, so it survives every way the panic can end (debugger spin, failed
++	 * PEHaltRestart, watchdog reset) and gives the next boot the message line even when the record
++	 * layout is wrong - which is the state the 2026-11-13 rounds ended in: pram came back all zeroes
++	 * with no `panic line from ...` at all.
++	 */
++	{
++		char *beacon = (char *)(gPanicBase + 0x1100);
++		size_t i;
++		for (i = 0; (i < 63) && (text[i] != '\0'); i++) {
++			beacon[i] = text[i];
++		}
++		for (; i < 64; i++) {
++			beacon[i] = '\0';
++		}
++		__asm__ volatile ("dsb sy" ::: "memory");
 +	}
 +	length++;
 +	offset = sizeof(*header);

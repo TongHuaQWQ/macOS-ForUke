@@ -459,7 +459,17 @@ kernel_args = [
   # redistributor, enables PPI 27 and routes IPIs over software-pended SPIs from its start(), i.e.
   # from a kext, once the kernel is up - which is the layer this port never reached before tonight.
   # uke-gic=0 keeps uke-gic-timer.patch compiled in but inert, so the comparison is one boot-arg away.
+  # Both kernel-side GIC owners are switched OFF, because the firmware already has the controller in
+  # exactly the state the kernel needs and it does it without faulting. UKEGPIO at hand-off measured:
+  #   GICD_CTLR = 0xD2  -> ARE_NS (bit 4, arm-gic-v3.h:61), DS (bit 6), ENABLE_G1A (bit 1)
+  #   GICR_ISENABLER0 = 0x6C000000 -> PPIs 26, 27 (arch timer), 29, 30 already enabled
+  #   GICR_IGROUPR0   = 0xFFFFFFFF -> every SGI/PPI in Group 1
+  # and the same firmware reads and writes that SGI frame with rd0's WAKER still at 0x2 (ProcessorSleep),
+  # so neither "ARE_NS missing" nor "asleep redistributor blocks the frame" survives as an explanation.
+  # The kernel is the only party that gets a bus abort there, so this round asks what happens when it
+  # touches nothing at all and simply takes interrupts the firmware already enabled.
   "uke-gic=0",
+  "armcpu-skip-gic=1",
   "armcpu-spi-ipi=1",
   # armcpu-probe=1 instead of armcpu-diagnostics=1: the instrumented ArmCpu copy in drivers/ArmCpu
   # prints every prepareGic step (mapGic / initDistributor / wakeRedistributor with its TYPER probe),
@@ -503,7 +513,8 @@ kernel_args = [
   # is not yet verified on hardware and falls back to polling by itself).
   "sheng-touch=4",
   "sheng-touch-hid=1",
-  "sheng-touch-poll=1",
+  # "sheng-touch-poll=1",   (parked: 2 bytes over the 1000-byte command line; touch polling is far
+  # past the interrupt-controller question this round asks)
   "offline-legacy-phase=4",
   # GPU track (same values as gpu-framepresent v2/v3): the staged A732 bring-up
   # publishes the Metal device and the compositor submits the 1200-byte overlay
@@ -660,7 +671,11 @@ text_fixups = [
 # pram path killed it silently in b156. Two candidates share this one switch, and b159 separates them: the
 # node is back (so XNU's own check_for_panic_log() maps the region as Apple intends), while the EARLY_BOOT
 # snapshot in package/UkeLastLog.c - our own write, at a point where nothing is even printed yet - is gone.
-panic_region = "0xFF800000:0x380000"
+# panic_region = "0xFF800000:0x380000"   # off for this round: with the node + the size property
+# present the kernel dies before the console (b156 vs b158, and again after the address was moved
+# to upstream uke's 0xFF800000 in b175). The upstream uke repository does configure it, so the
+# difference is in this tree's pram-path patches, not in the value; until that is settled the marks
+# and the GIC diag need a kernel that starts, so the node stays out for this round.
 tool = "scripts/make-uke-adt.py"
 chip_id = "207"
 owned_memory_size = "0x100000000"     # 4 GiB of this unit's 5 GiB high run (0x8C0000000..0xA0000000).

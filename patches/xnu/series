@@ -181,8 +181,8 @@ zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch
 # unlike the STARTUP() route the board's own driver uses. Runtime is opt-in: qcom-usb-debug=1.
 zzzzzzzzzzzzzzzzzz-qcom-usb-debug-console.patch
 zzzzzzzzzzzzzzzzzz-qcom-usb-debug-worker.patch
-# uke-boot-marks: last in the series on purpose - its hunks were generated against the tree
-# with every other patch applied. A ladder of fixed-page boot marks (arm_init -> console ->
-# IOKit -> bsd_autoconf in/out -> CPU online), so the next boot can say which stage was reached
-# without a photograph and without depending on the pram window being right.
-uke-boot-marks.patch
+
+# uke-boot-marks.patch is NOT applied: its uke_mark() calls ml_io_map() at _arm_init+0x34,
+# which is before arm_vm_init() at +0x768, so the bootstrap pmap is not up yet. The official entry
+# probe (patch-xnu-entry-probe.py) asked the same questions without touching the kernel source:
+# b185 (pre-marks kernel, checkpoint at _PE_init_platform) self-reset, the marks kernel did not.
