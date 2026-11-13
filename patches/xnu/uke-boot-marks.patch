@@ -1,0 +1,75 @@
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -349,6 +349,11 @@
+ arm_init(
+ 	boot_args       *args)
+ {
++	/* uke boot marks: slot 0 records that arm_init was entered at all (package/UkeLastLog.c). */
++#if XNU_LAST_LOG_ARCHIVE
++	extern void uke_mark(unsigned int slot, const char *text);
++	uke_mark(0, "MARK_ARM_INIT");
++#endif
+ 	unsigned int    maxmem;
+ 	uint32_t        memsize;
+ 	uint64_t        xmaxmem;
+@@ -635,6 +640,10 @@
+ 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
+ 	}
+ 	PE_create_console();
++	/* uke boot marks: slot 1, the first point at which the console exists. */
++#if XNU_LAST_LOG_ARCHIVE
++	uke_mark(1, "MARK_CONSOLE");
++#endif
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
+@@ -837,6 +846,10 @@
+ 	if (should_kprintf) {
+ 		kprintf("arm_cpu_init(): cpu %d online\n", cpu_data_ptr->cpu_number);
+ 	}
++	/* uke boot marks: slot 5, a CPU reached arm_cpu_init (boot CPU first, secondaries after it). */
++#if XNU_LAST_LOG_ARCHIVE
++	uke_mark(5, "MARK_CPU_ONLINE");
++#endif
+ 
+ 	if (cpu_data_ptr == &BootCpuData && ml_is_quiescing()) {
+ 		if (kdebug_enable == 0) {
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -515,6 +515,11 @@
+ void
+ PE_lockdown_iokit(void)
+ {
++	/* uke boot marks: slot 2 brackets IOKit bring-up, the region AppleImage4 used to stop in. */
++#if XNU_LAST_LOG_ARCHIVE
++	extern void uke_mark(unsigned int slot, const char *text);
++	uke_mark(2, "MARK_IOKIT");
++#endif
+ 	/*
+ 	 * On arm/arm64 platforms, and especially those that employ KTRR/CTRR,
+ 	 * machine_lockdown() is treated as a hard security checkpoint, such that
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1536,6 +1536,11 @@
+ kern_return_t
+ bsd_autoconf(void)
+ {
++	/* uke boot marks: slot 3 entered, slot 4 returned; the root filesystem is found in between. */
++#if XNU_LAST_LOG_ARCHIVE
++	extern void uke_mark(unsigned int slot, const char *text);
++	uke_mark(3, "MARK_BSD_IN");
++#endif
+ 	kprintf("bsd_autoconf: calling kminit\n");
+ 	kminit();
+ #if XNU_QCOM_USB_DEBUG
+@@ -1553,6 +1558,10 @@
+ 		}
+ 	}
+ 
++	/* uke boot marks: slot 4, bsd_autoconf reached its hand-off into IOKitBSDInit(). */
++#if XNU_LAST_LOG_ARCHIVE
++	uke_mark(4, "MARK_BSD_OUT");
++#endif
+ 	kern_return_t result = IOKitBSDInit();
+ #if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
+ 	/* The original IOSurface personality requires the genuine IOBSD resource.

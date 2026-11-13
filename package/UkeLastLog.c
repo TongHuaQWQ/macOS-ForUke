@@ -35,6 +35,11 @@ extern uint64_t sane_size;
 extern void uke_crash_log_start(void);
 extern void pe_print_last_panic_again(void);
 
+/* The fixed page the boot marks go to (see uke_mark below); also UkePramLog.h's KERNEL stamp. */
+#define UKE_MARK_BASE   0x9FFDFD000ull
+/* Marks start 0x100 into the page: the firmware stamps bytes 0..0x1F itself every boot. */
+#define UKE_MARK_OFFSET 0x100u
+
 #define UKE_LAST_LOG_INTERVAL_MS 500
 
 // The userdata (UFS) half is built only when the configuration asks for it
@@ -670,6 +675,51 @@ uke_last_log_beacon(const char *text)
 	}
 	while (i < 64) {
 		slot[i++] = 0;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+/*
+ * Boot marks: one 32-byte slot per stage, at a fixed physical page the firmware reads on the next boot.
+ *
+ * The point is a ladder, not a message. Every previous round ended with "the window came back empty",
+ * which cannot distinguish "the kernel died before writing" from "the write landed somewhere the reader
+ * does not look" - and the pram window is currently the wrong place to answer that, because its address
+ * is itself under test. This page is separate: the firmware stamps it every boot (UKEMARK2), so the
+ * reader can tell our first mark (slot 0) from a dead channel by whether slot 0 is there at all, and
+ * each later stage takes its own slot so a boot that dies in Image4 leaves GIC and CONSOLE marks behind.
+ *
+ * Slot layout (0x40 bytes each, zero padded, at UKE_MARK_BASE + UKE_MARK_OFFSET):
+ *   0 arm_init entered      1 console created      2 IOKit lockdown
+ *   3 bsd_autoconf entered  4 bsd_autoconf returned  5 a CPU came online
+ *   6 GIC armed (uke-gic)   7 spare
+ *
+ * Writing is a plain store into an ml_io_map()ed page: no locks, no console, safe from any context,
+ * including before the scheduler exists and from a secondary CPU.
+ */
+void
+uke_mark(unsigned int slot, const char *text)
+{
+	static vm_offset_t base;
+	char *at;
+	unsigned i = 0;
+
+	if (slot >= 8) {
+		return;
+	}
+	if (base == 0) {
+		base = ml_io_map(UKE_MARK_BASE, 0x1000);
+		if (base == 0) {
+			return;
+		}
+	}
+	at = (char *)(base + UKE_MARK_OFFSET + (vm_offset_t)slot * 0x40);
+	while ((i < 31) && (text[i] != '\0')) {
+		at[i] = text[i];
+		i++;
+	}
+	while (i < 32) {
+		at[i++] = 0;
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
