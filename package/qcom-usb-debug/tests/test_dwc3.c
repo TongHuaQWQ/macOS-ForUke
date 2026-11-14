@@ -64,7 +64,15 @@ static void write32(void *c, uint32_t reg, uint32_t value)
             last_in_fifo = (regs[DWC3_DEPCMDPAR0(ep) / 4] >> 17) & 15;
     }
 }
-static void delay(void *c, uint32_t n) { (void)c; delays += n; }
+static void delay(void *c, uint32_t n)
+{
+    (void)c;
+    /* The kernel side refuses anything above 10 ms and flags io_failed instead
+     * (kernel/QcomXnuUsbDebug.c:1088). b216 shipped a 20 ms request and turned a successful init into
+     * CORE_INIT_FAILED; the mock has to enforce the same limit so it can never come back. */
+    assert(n <= 10000u);
+    delays += n;
+}
 static void dma_sync(void *c, void *p, size_t n, enum dwc3_sync_direction dir)
 {
     uint8_t *base = c ? c : dma;
@@ -391,7 +399,7 @@ int main(void)
         regs[DWC3_DSTS / 4] = 0x00420004u;
         assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
         assert(csftrst_writes == resets_before + 1);          /* the reset is always attempted */
-        assert(delays - delays_before == 10u * 20000u);        /* 10 polls of 20 ms: the usb31 pacing */
+        assert(delays - delays_before == 20u * 10000u);        /* the vendor 200 ms, at the platform 10 ms cap */
         /* The residue and RUN_STOP are cleared before the reset is attempted; CSftRst itself stays
          * set in this model by construction, which is the "reset refused" case the driver tolerates. */
         assert((regs[DWC3_DCTL / 4] & (DWC3_DCTL_INHERITED_RESIDUE | DWC3_DCTL_RUN_STOP)) == 0);
@@ -416,7 +424,7 @@ int main(void)
         regs[DWC3_DCTL / 4] = DWC3_DCTL_RUN_STOP;
         regs[DWC3_DSTS / 4] = 0;
         assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
-        assert(delays == delays_before + 10u * 20000u);
+        assert(delays == delays_before + 20u * 10000u);
     }
     stuck_csftrst = 0;
     puts("PASS: an inherited running core keeps the core soft reset, and a stuck one still fails");

@@ -172,10 +172,16 @@ static int wait_reset(struct dwc3 *d, uint32_t reg, uint32_t mask, uint32_t want
     return wait_mask_slow(d, reg, mask, want, RESET_POLLS, RESET_PAUSE_US);
 }
 /* DWC_usb31 needs much longer than an endpoint command: CSftRst is cleared only after every clock has
- * resynchronised, which the vendor paces at 10 tries of 20 ms (ref61/core.c:284-305). Returns 0 when
- * the core reports itself reset. */
-#define SOFT_RESET_POLLS 10u
-#define SOFT_RESET_PAUSE_US 20000u
+ * resynchronised, which the vendor paces at 10 tries of 20 ms (ref61/core.c:284-305), 200 ms in all.
+ *
+ * The pause is 10 ms, not the vendor's 20, because of the platform contract: the delay callback this
+ * component is given refuses anything above 10000 us and answers by setting io_failed
+ * (kernel/QcomXnuUsbDebug.c:1088). b216 spent one 20 ms request, so io_failed was already set before
+ * the endpoint commands ran - they still completed, dwc3_init() returned 0, and the caller reported
+ * CORE_INIT_FAILED with core_result 0, which is what the card showed (E=11 CR=0) while the last trace
+ * said RSON. The total budget stays the vendor's 200 ms: 20 polls of 10 ms. */
+#define SOFT_RESET_POLLS 20u
+#define SOFT_RESET_PAUSE_US 10000u
 
 static int wait_soft_reset(struct dwc3 *d)
 {
