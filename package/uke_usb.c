@@ -2011,22 +2011,40 @@ uke_usb_console_start(void)
  * The window is the one the ADT gives /pram (0xFF800000, 0x380000 in scripts/make-uke-adt.py), and
  * it is mapped write-combining exactly the way pe_init.c maps it for the kernel's own panic log.
  * ------------------------------------------------------------------------------------------- */
+/* Fallback only. 0xFF800000 is the LLCC llcc_lpi_region of the UEFI memory map -- UNCACHEABLE device
+ * space, not DRAM (board.toml:846-851, STATE.md:3110/4234). The ADT moved /pram to 0x9FFE00000 and
+ * UkeLastLog follows it through gPanicBase; this file did not, and b219 died of it: the beacon's
+ * 64-byte record was zero-filled with a vectorised `stp q0,q0,[slot+strlen]` into device memory, which
+ * is an alignment fault the moment the address is not 32-byte aligned (ESR 0x96000061, pc inside
+ * _uke_usb_hook_entry, lr in _bsd_init's "UKEUSB-HOOK-BSDINIT" hook). */
 #define UKEUSB_BEACON_PA  0xFF800000ull
 #define UKEUSB_BEACON_OFF 0x1000u
 
+extern vm_offset_t gPanicBase;
+
 static vm_offset_t uke_usb_beacon_va;
 
+/* Prefer the kernel's own panic region, exactly as UkeLastLog.c does. */
+static vm_offset_t
+uke_usb_beacon_base(void)
+{
+	if (gPanicBase != 0) {
+		return gPanicBase;
+	}
+	return ml_io_map_wcomb(UKEUSB_BEACON_PA, 0x2000);
+}
+
+/* Byte-wise volatile on purpose. The compiler is free to turn the tail of this loop into a 32-byte
+ * `stp q0,q0`, and a wide, non-naturally-aligned store faults on any device-class window this beacon
+ * might be mapped into. One byte at a time costs nothing here and cannot fault. */
 static void
 uke_usb_beacon_slot(char *slot, const char *text)
 {
-	unsigned i = 0;
+	volatile unsigned char *p = (volatile unsigned char *)slot;
+	unsigned i;
 
-	while (i < 63 && text[i] != '\0') {
-		slot[i] = text[i];
-		i++;
-	}
-	while (i < 64) {
-		slot[i++] = 0;
+	for (i = 0; i < 64; i++) {
+		p[i] = (i < 63 && text[i] != '\0') ? (unsigned char)text[i] : 0;
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
@@ -2122,7 +2140,7 @@ uke_usb_hook_entry(const char *who)
 	int hook = 0;
 
 	if (uke_usb_beacon_va == 0) {
-		uke_usb_beacon_va = ml_io_map_wcomb(UKEUSB_BEACON_PA, 0x2000);
+		uke_usb_beacon_va = uke_usb_beacon_base();
 	}
 	uke_usb_beacon(who);
 
@@ -2154,7 +2172,7 @@ uke_usb_startup(void)
 	 * all, and it is readable by the firmware on the next boot even when the console, the threads
 	 * and msgbuf are all unavailable. */
 	if (uke_usb_beacon_va == 0) {
-		uke_usb_beacon_va = ml_io_map_wcomb(UKEUSB_BEACON_PA, 0x2000);
+		uke_usb_beacon_va = uke_usb_beacon_base();
 	}
 	uke_usb_beacon("UKEUSB-STARTUP-ENTERED");
 

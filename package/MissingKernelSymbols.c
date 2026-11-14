@@ -53,17 +53,15 @@ csr_check(uint32_t mask)
 			uke_last_log_hook_entry("UKELASTLOG-HOOK-CSRCHECK");
 			typedef unsigned long uke_vm_offset_t;
 			extern uke_vm_offset_t ml_io_map_wcomb(uke_vm_offset_t, unsigned long);
+			/* 0xFF800000 is the LLCC device window, not DRAM; prefer the kernel's panic region when
+			 * there is one, and write byte-wise so no vectorised wide store can fault on it. */
 			uke_vm_offset_t va = ml_io_map_wcomb(0xFF800000ull, 0x2000);
 			if (va != 0) {
-				char *slot = (char *)(va + 0x1200);
+				volatile unsigned char *slot = (volatile unsigned char *)(va + 0x1200);
 				const char *text = "UKEUSB-VIA-CSRCHECK";
-				unsigned i = 0;
-				while (i < 63 && text[i] != '\0') {
-					slot[i] = text[i];
-					i++;
-				}
-				while (i < 64) {
-					slot[i++] = 0;
+				unsigned i;
+				for (i = 0; i < 64; i++) {
+					slot[i] = (i < 63 && text[i] != '\0') ? (unsigned char)text[i] : 0;
 				}
 				__asm__ volatile ("dsb sy" ::: "memory");
 			}

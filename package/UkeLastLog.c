@@ -668,13 +668,13 @@ uke_last_log_beacon(const char *text)
 			return;
 		}
 	}
-	slot = (char *)(base + 0x1100);
-	while (i < 63 && text[i] != '\0') {
-		slot[i] = text[i];
-		i++;
-	}
-	while (i < 64) {
-		slot[i++] = 0;
+	/* Byte-wise volatile: a vectorised tail store would fault on the legacy device window above. */
+	{
+		volatile unsigned char *p = (volatile unsigned char *)(base + 0x1100);
+
+		for (i = 0; i < 64; i++) {
+			p[i] = (i < 63 && text[i] != '\0') ? (unsigned char)text[i] : 0;
+		}
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
