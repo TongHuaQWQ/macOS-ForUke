@@ -1538,6 +1538,20 @@ int qcom_usb_debug_init(void)
         (void)restore_after_failure(); ret = 0; goto out;
     }
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_CORE_STARTED);
+    /* Read the event ring back while nothing else touches the core: this round's question is whether
+     * the ring the driver programmed is the ring the core writes to. b218 reached PH=19 with no device
+     * event at all, so "ring programmed but silent" and "ring never programmed" look identical on the
+     * panel until these words are printed. */
+    {
+        struct dwc3_snapshot ring;
+        dwc3_snapshot(native.core, &ring);
+        IOLog("QCOMUSB RING adr=%08x:%08x siz=%08x cnt=%u devten=%08x dctl=%08x dsts=%08x\n",
+              ring.event_address_hi, ring.event_address_lo, ring.event_size,
+              ring.event_count, ring.devten, ring.dctl, ring.dsts);
+        /* core_event_bytes is the card's G field, so the ring's readback replaces it here: after this
+         * boot, G shows the count the core had written when the window opened, not the last poll's. */
+        native.status.core_event_bytes = ring.event_count;
+    }
     usb_diag_polling = 1;
     /* Let the host complete EP0 enumeration before early kernel startup can
      * reach a path with no more log output. Once-per-character polling alone

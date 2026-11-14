@@ -98,6 +98,11 @@ struct dwc3_snapshot {
     /* Recoverable errors seen while polling. A non-zero value is not fatal: the driver keeps serving
      * events, so a console that is alive but saw bad handshakes shows up here instead of going silent. */
     uint32_t errors, stalled_polls, link_state;
+    /* The event ring as the core sees it. b218's card showed PH=19 with the last trace still the
+     * soft-reset timeout, i.e. no device event ever arrived while the host was already enumerating;
+     * these three words separate "the ring was never programmed" from "programmed and still silent",
+     * which is what a wrong DMA/IOVA mapping looks like from here. */
+    uint32_t event_address_lo, event_address_hi, event_size, devten;
 };
 /* Read-only diagnostics, for callers that already own powered MMIO access. */
 void dwc3_snapshot(struct dwc3 *dev, struct dwc3_snapshot *snapshot);

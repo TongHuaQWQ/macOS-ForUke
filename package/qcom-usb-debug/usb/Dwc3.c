@@ -890,7 +890,15 @@ int dwc3_start(struct dwc3 *d)
     ctl = rd(d, DWC3_DCTL);
     ctl &= ~DWC3_DCTL_KEEP_CONNECT;
     wr(d, DWC3_DCTL, ctl | DWC3_DCTL_RUN_STOP);
-    d->running = 1; return 0;
+    d->running = 1;
+    /* Arm the first SETUP TRB here instead of waiting for CONNECTDONE. The vendor arms it from
+     * dwc3_gadget_conndone_interrupt(), which is fine only when the event ring is known to work - and
+     * this port's ring has never delivered a single event: b218's card reached PH=19 with the last
+     * trace still the soft-reset timeout, so device_event() never ran, EP0 sat with no TRB, and the
+     * host's device-descriptor request was answered with a STALL (its "error -32" loop). Arming it
+     * here is harmless when CONNECTDONE does arrive later: device_event() re-arms via setup_phase(). */
+    if (setup_phase(d)) return -4;
+    return 0;
 }
 int dwc3_poll(struct dwc3 *d, unsigned budget)
 {
@@ -989,6 +997,8 @@ void dwc3_snapshot(struct dwc3 *d, struct dwc3_snapshot *s)
     s->snpsid = rd(d, DWC3_GSNPSID); s->gctl = rd(d, DWC3_GCTL);
     s->dcfg = rd(d, DWC3_DCFG); s->dctl = rd(d, DWC3_DCTL); s->dsts = rd(d, DWC3_DSTS);
     s->event_count = rd(d, DWC3_GEVNTCOUNT(0)); s->enabled_endpoints = rd(d, DWC3_DALEPENA);
+    s->event_address_lo = rd(d, DWC3_GEVNTADRLO(0)); s->event_address_hi = rd(d, DWC3_GEVNTADRHI(0));
+    s->event_size = rd(d, DWC3_GEVNTSIZ(0)); s->devten = rd(d, DWC3_DEVTEN);
     s->configured = d->configured; s->dtr = d->dtr; s->queued = d->tx_used;
     s->rx_pending = d->rx_used; s->rx_generation = d->rx_generation;
     s->rx_overflow = d->rx_overflow;
