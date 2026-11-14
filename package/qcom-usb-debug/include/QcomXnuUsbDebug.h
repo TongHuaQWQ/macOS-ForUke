@@ -83,6 +83,15 @@ typedef struct qcom_usb_debug_status {
     uint32_t core_event_bytes, core_last_event;
     uint64_t dma_pa, counter_frequency, cache_line, dropped;
     uint32_t domain_result, domain_stage, domain_bank, domain_slot, domain_asid;
+    /* The context bank's own last word on the DMA it translated: CBn_FSR (cb_base+0x58) and CBn_FAR
+     * (cb_base+0x60). A translation this domain refuses is recorded here by the SMMU itself, so a DMA
+     * fault stops being indistinguishable from a core that never wrote anything. FSR 0x400 is the
+     * ordinary AArch64 "no fault" status; anything else carries a fault code (0x21/0x35/... permission
+     * or translation) and FAR names the IOVA that failed. */
+    uint32_t domain_fsr, domain_far;
+    /* The high-water raw GEVNTCOUNT the core posted before this driver consumed it; see
+     * dwc3_event_bytes_raw(). Zero means the core never wrote an event into the ring at all. */
+    uint32_t core_event_bytes_raw;
     uint64_t tables_pa, dma_iova, domain_last_address, domain_last_expected, domain_last_readback;
     uint32_t diag_enabled, diag_checkpoint;
     uint64_t buffer_capacity, buffer_pending, buffer_high_water, buffer_accepted;

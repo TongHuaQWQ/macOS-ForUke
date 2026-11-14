@@ -5,6 +5,24 @@
 
 #define MAGIC 0x51534431U
 #define PA_MASK 0x0000fffffffff000ULL
+/* Stage-1 level-3 page descriptor for the eight DMA pages: valid|page, AttrIndx 0 (normal WBWA via
+ * MAIR0), SH inner-shareable, AF, nG, PXN and UXN (0x0060 << 48), and AP[2:1] = 0b01.
+ *
+ * Read the AP bits the SMMU's way, not the CPU's: in a stage-1 descriptor fetched by the SMMU,
+ * bit 7 is AP[2] (set = read-only) and bit 6 is AP[1] (set = unprivileged access denied). That is
+ * the opposite of the Armv8-A translation-table layout, and it is what Linux's own IOMMU page-table
+ * code says - io-pgtable-arm.c:94-95 defines ARM_LPAE_PTE_AP_UNPRIV as (1 << 6) and
+ * ARM_LPAE_PTE_AP_RDONLY as (2 << 6), and arm_lpae_prot_to_pte() produces exactly "nG | AP_UNPRIV",
+ * i.e. bit 6 set and bit 7 clear, for a device page mapped IOMMU_READ|IOMMU_WRITE without
+ * IOMMU_PRIV. So 0xf43 is read/write for the device (AP[2]=0) with unprivileged access denied, which
+ * is what this domain wants and what the file header claims. It is NOT a read-only mapping.
+ *
+ * This note exists because 0xf43 was "found" to be read-only during the b221 post-mortem (bit 6
+ * misread as AP[2]), and changing it to 0xf03 was queued as the fix for the -32/-110 enumeration
+ * failure. It is not: 0xf03 only clears AP[1] and would hand the device an unprivileged mapping,
+ * which is a loosening, not a correction. What the same round does instead is measure: the context
+ * bank's own FSR/FAR and the raw GEVNTCOUNT are reported in the QCOMUSB record, so "the SMMU refused
+ * a write" and "the core never wrote" can finally be told apart on the panel. */
 #define LEAF_FLAGS 0x0060000000000f43ULL
 #define SCTLR_VALUE 0x27U /* CFRE, AFE, TRE, M; optional ASIDPNE hint remains zero. */
 #define TCR2_CRITICAL 0x38017U /* SEP, ASID width and output address size. */

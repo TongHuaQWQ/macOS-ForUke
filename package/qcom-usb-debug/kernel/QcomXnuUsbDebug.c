@@ -166,6 +166,7 @@ static unsigned int usb_panic_mode = QCOM_USB_PANIC_DEFAULT;
  * unit, so it must not be declared here: an extern declaration is expanded by the macro into syntax
  * errors ("expected identifier or '('"), which is exactly how the round that added this failed. */
 static void pram_state(void);
+static void sample_translation(void);
 static void pram_setup(uint32_t a, uint32_t b);
 static void fb_remember_request(const char *line);
 static void pram_write(unsigned int offset, const char *text, size_t length);
@@ -767,9 +768,15 @@ static void pram_state(void)
      *   TA/TB                          - only a refused endpoint command sets them
      * G, EV, TR, LT and the poll counter stay in the pram record: EV duplicates the T9 event history and
      * the rest change too often to be worth a scan. */
-    char text[128], panel[128];
+    /* 192 for the pram/msgbuf record: it carries every field, and the four this round added (CB, FSR,
+     * FAR, GW) push the worst case past the old 128. The panel line stays at 128 and is clipped to the
+     * card's 60 columns anyway. */
+    char text[192], panel[128];
     char *p = append_text(text, "QCOMUSB PH=");
     char *q = append_text(panel, "PH=");
+    /* Sample the context bank and the core's event count first, so this record and the card line below
+     * both describe the same instant. */
+    sample_translation();
     p = append_decimal(p, native.status.diag_checkpoint);
     q = append_decimal(q, native.status.diag_checkpoint);
     p = append_text(p, " E=");
@@ -804,6 +811,26 @@ static void pram_state(void)
     q = append_text(q, " LS=");
     p = append_decimal(p, native.status.core_link_state);
     q = append_decimal(q, native.status.core_link_state);
+    /* This round's two readings, and they go on the card as well as in the record, because they are
+     * what tells the three remaining explanations apart (see sample_translation):
+     *   FSR 0x00000400 = the SMMU recorded no fault at all, anything else = a fault (0x21/0x35
+     *       permission, 0x25 translation), with FAR naming the IOVA in the record;
+     *   GW the highest raw GEVNTCOUNT the core ever posted. 0 = the core never wrote an event here.
+     * Both are placed ahead of TA/TB deliberately: the card line is clipped at QCOM_USB_FB_WIDTH (60),
+     * so a refused command's pair is the first thing that may be cut, not this round's measurement. */
+    q = append_text(q, " FSR=");
+    q = append_hex32(q, native.status.domain_fsr);
+    p = append_text(p, " FSR=");
+    p = append_hex32(p, native.status.domain_fsr);
+    /* FAR only in the record: it is meaningless while FSR shows no fault, and the card has no room. */
+    p = append_text(p, " FAR=");
+    p = append_hex32(p, native.status.domain_far);
+    p = append_text(p, " CB=");
+    p = append_decimal(p, native.lease.cb);
+    q = append_text(q, " GW=");
+    q = append_decimal(q, native.status.core_event_bytes_raw);
+    p = append_text(p, " GW=");
+    p = append_decimal(p, native.status.core_event_bytes_raw);
     /* Fixed eight-digit fields: a photographed frame has to be unambiguous, and variable-width hex made
      * TA=0 TB=6 versus TA=6 TB=0 impossible to tell apart on the b105 round (STATE 92). */
     /* A refused endpoint command is the one thing TA/TB report, so an all-zero pair is omitted rather
@@ -980,6 +1007,41 @@ static volatile uint32_t *mmio(uint64_t physical)
     }
     return (volatile uint32_t *)(uintptr_t)(base + offset);
 }
+/* One word out of the context bank this domain owns, read without the physical_read() callback: that
+ * callback latches io_failed and rewrites status.error, and this sample has to stay usable from the
+ * refusal paths that report exactly that bookkeeping. CBn_FSR and CBn_FAR are read-only status
+ * registers, so a plain read is all that is needed here. */
+static uint32_t bank_word(uint32_t offset)
+{
+    uint64_t address;
+    volatile uint32_t *p;
+    if (!native.lease.active || !native.smmu_va) return 0;
+    address = native.lease.cb_base + offset;
+    if (!in_range(address, QUSB_SMMU_BASE, QUSB_SMMU_BYTES)) return 0;
+    p = (volatile uint32_t *)(uintptr_t)(native.smmu_va + (address - QUSB_SMMU_BASE));
+    return *p;
+}
+/* The SMMU's own record of the DMA it refused (CBn_FSR/CBn_FAR), and the highest raw GEVNTCOUNT the
+ * core ever posted. Until this existed the two remaining explanations for a host that is answered with
+ * a STALL and never gets an event looked identical on the panel:
+ *   - the core wrote its event and the SMMU refused the write  -> FSR carries a fault code, FAR names
+ *     the IOVA, and GW (raw count) stays 0 because the write never landed;
+ *   - the core never wrote at all                               -> FSR stays 0x400 (no fault) and GW
+ *     stays 0 too;
+ *   - the core wrote and the driver consumed it                  -> GW is 4 or more, EV/ER say the rest.
+ * The fault registers were only ever read during install and restore, i.e. before any DMA had happened
+ * (b221's dead end: "cnt=0" was really "already drained"). */
+static void sample_translation(void)
+{
+    if (native.lease.active) {
+        native.status.domain_fsr = bank_word(0x58u);
+        native.status.domain_far = bank_word(0x60u);
+    }
+    if (native.core_initialized)
+        native.status.core_event_bytes_raw = dwc3_event_bytes_raw(native.core);
+}
+/* Called from pram_state, which qcom_usb_debug_poll() reaches before it takes usb_busy: both registers
+ * read here are read-only status on an existing mapping, so the sample needs no guard. */
 static int physical_read(void *cookie, QUSB_U64 address, QUSB_U32 *value)
 {
     volatile uint32_t *p;

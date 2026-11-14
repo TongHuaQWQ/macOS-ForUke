@@ -70,7 +70,11 @@ static QUSB_U64 walk(struct model*m,QUSB_U64 iova)
     if(!(entry&1U))return 0;
     assert((entry&3U)==3U);
     if(level<2){table=entry&0x0000fffffffff000ULL;continue;}
-    assert((entry&0x0060000000000fc0ULL)==0x0060000000000f40ULL); /* XN,nG,AF,SH_IS,AP=RW. */
+    /* XN, nG, AF, SH_IS, then the SMMU's own AP bit order: bit 6 is AP[1] (set = unprivileged access
+     * denied) and bit 7 is AP[2] (set = read-only), so 0xf40 is read/write for the device. Read as CPU
+     * page tables (bit 6 = AP[2]) the same word looks read-only, and that misreading once queued a
+     * "fix" that would only have widened this mapping to unprivileged writes. */
+    assert((entry&0x0060000000000fc0ULL)==0x0060000000000f40ULL);
     return (entry&0x0000fffffffff000ULL)|(iova&4095U);
   }
   assert(0);return 0;

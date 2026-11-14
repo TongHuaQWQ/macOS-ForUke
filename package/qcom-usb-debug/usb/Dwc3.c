@@ -48,6 +48,12 @@ struct dwc3 {
     uint8_t zlp_pending, running, initialized, full_speed, usb31;
     int failed;
     uint32_t events, commands, last_event, errors, stalled_polls;
+    /* High-water mark of the raw GEVNTCOUNT word seen at the top of a poll, before this driver writes
+     * its own consumption back into that register. GEVNTCOUNT is self-clearing - every consumed event
+     * subtracts its four bytes - so a read of it later always looks like zero and cannot answer "did
+     * the core ever write an event here". This can: a core that never wrote leaves it 0, and a core
+     * that wrote and was then drained leaves the value it had. */
+    uint32_t event_bytes_raw;
     /* TX FIFO sizing (vendor dwc3_gadget_resize_tx_fifos). eps_total is GHWPARAMS3's endpoint
      * count, the budget the vendor divides between the IN endpoints still to be sized. */
     uint32_t eps_total, last_fifo_depth, num_fifo_resized, fifo_resized;
@@ -902,12 +908,16 @@ int dwc3_start(struct dwc3 *d)
 }
 int dwc3_poll(struct dwc3 *d, unsigned budget)
 {
-    uint32_t bytes, event;
+    uint32_t bytes, event, raw;
     unsigned done = 0;
     int ret = 0;
     if (!d || !d->running || d->failed) return -1;
     if (budget > 256) budget = 256;
-    bytes = rd(d, DWC3_GEVNTCOUNT(0)) & DWC3_GEVNTCOUNT_MASK;
+    /* Sample the register before the write-back below subtracts from it: this is the only moment the
+     * core's own count is visible (see event_bytes_raw in struct dwc3). */
+    raw = rd(d, DWC3_GEVNTCOUNT(0));
+    if (raw > d->event_bytes_raw) d->event_bytes_raw = raw;
+    bytes = raw & DWC3_GEVNTCOUNT_MASK;
     if (bytes > EVENT_BYTES) {
         /* More bytes are pending than the ring holds: drain what is there and continue rather than
          * latching a failure that no later event could ever clear (STATE 89). */
@@ -978,6 +988,13 @@ uint32_t dwc3_last_event(const struct dwc3 *d)
 {
     return d ? d->last_event : 0;
 }
+uint32_t dwc3_event_bytes_raw(const struct dwc3 *d)
+{
+    /* Not a register read: GEVNTCOUNT is self-clearing, so this is the high-water mark this driver saw
+     * before consuming. Zero means the core never posted an event to the ring, which is a different
+     * failure from "events arrived and were rejected" (dwc3_errors/dwc3_last_event cover that one). */
+    return d ? d->event_bytes_raw : 0;
+}
 uint32_t dwc3_control_state(const struct dwc3 *d) { return d ? d->control_state : 0; }
 uint32_t dwc3_link_state(const struct dwc3 *d) { return d ? d->link_state : 0; }
 uint32_t dwc3_errors(const struct dwc3 *d) { return d ? d->errors : 0; }
@@ -997,6 +1014,7 @@ void dwc3_snapshot(struct dwc3 *d, struct dwc3_snapshot *s)
     s->snpsid = rd(d, DWC3_GSNPSID); s->gctl = rd(d, DWC3_GCTL);
     s->dcfg = rd(d, DWC3_DCFG); s->dctl = rd(d, DWC3_DCTL); s->dsts = rd(d, DWC3_DSTS);
     s->event_count = rd(d, DWC3_GEVNTCOUNT(0)); s->enabled_endpoints = rd(d, DWC3_DALEPENA);
+    s->event_count_raw = d->event_bytes_raw;
     s->event_address_lo = rd(d, DWC3_GEVNTADRLO(0)); s->event_address_hi = rd(d, DWC3_GEVNTADRHI(0));
     s->event_size = rd(d, DWC3_GEVNTSIZ(0)); s->devten = rd(d, DWC3_DEVTEN);
     s->configured = d->configured; s->dtr = d->dtr; s->queued = d->tx_used;

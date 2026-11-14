@@ -543,8 +543,20 @@ kernel_args = [
   # copy sit past root mount, and the kernel command line is capped at 1000 bytes (it was 987 before
   # the two fileset-wait args below). Restore both once the kext stage is passed.
   # "sheng-iconservices=1",
+  # OFF for this round, and it is the one variable that changed: it decides whether bsd_init loads
+  # com.apple.iokit.IOMobileGraphicsFamily at all (bsd/kern/bsd_init.c, native_mobile_graphics_load_probe).
+  # The b221 run stopped with "IOGPUInterruptController: not registry member at registerService()", a
+  # message whose only possible source is that family (IOGPUFamily is a prelink root, board.toml:348),
+  # and this board publishes no display provider at all - make-uke-adt.py emits no display/framebuffer
+  # node and the graphics components are off in uke-macos_defconfig. So the family is being loaded into
+  # a system that cannot host it. Two answers are worth the same boot:
+  #   the line disappears  -> it came from IOMobileGraphicsFamily, i.e. the boot is now blocked
+  #                           somewhere else and the graphics track owns this failure (docs/GPU-PORT.md);
+  #   the line stays       -> it does not come from that family and the b221 reading was wrong.
+  # The client probe is nested inside the load branch, so "offline-mobile-graphics-client=1" below is
+  # inert while this is 0 and costs nothing.
   "offline-mobile-graphics-client=1",
-  "offline-mobile-graphics-load=1",
+  "offline-mobile-graphics-load=0",
   "offline-apfs-load=1",
   "boot-progress=2",
   "-apfs_shared_datavolume",
@@ -591,15 +603,32 @@ kernel_args = [
   # uke_usb=0 alone disables the old probe driver (it returns before touching anything), so sync/hook/
   # panic are dropped rather than carried as zeros - the 1000-byte command line is full.
   "uke_usb=0",
-  # OFF for this round. With it on, that component paints its OneSend QR card over the framebuffer and
-  # repaints it every second (QcomXnuUsbDebug.c: fb_cycle, QCOM_USB_FB_TICKS_KEEP) to stay on top of the
-  # console - and the card carries only ONESEND_BLOCK = 60 bytes of text per QR, cycled every 8 s, so a
-  # log of a few KiB is dozens of QRs that no phone can sweep by hand. It hid the plain kernel text that
-  # this round needs to read (b145's panel showed Image4/AMFI lines and was legible; b147's showed the QR
-  # instead). The CDC-ACM log console it also enables was never read on this board - the logs we do read
-  # are the firmware's, exported over USB-MSd, and the kernel's own panic record now goes to pram
-  # (round b147) for the firmware to pick up.
-  "qcom-usb-debug=0",
+  # ON again for the b204 channel round, and this time the firmware fills the hole that made every
+  # earlier attempt impossible: UkeUsbLogDxe powers the USB30 GDSC, releases the block reset and ungates
+  # the three high-speed branches before hand-off (PcdUkeUsbPowerOn), because nothing else in this boot
+  # can - the vendor ClockDxe that owns gcc_usb30_prim_gdsc black-screens this tablet, and the kernel's
+  # own QcomUsbQualify may only change CBCR ENABLE bits (QcomUsbQualify.h:103-105). A power-gated DWC3
+  # ignores every register write, which is what killed the CDC-ACM before GET_DESCRIPTOR.
+  # The OneSend card stays off (it now needs qcom-usb-qr=1), so the panel keeps the plain kernel text.
+  # If the kernel hangs in USB init instead of reaching kext loading, set this back to 0: that is one
+  # payload rebuild, not a CI round, and it restores the previous boot exactly.
+  "qcom-usb-debug=1",
+  # b206's firmware log (Advanced Logger export, 2026-11-14 01:45) settled the hand-off question the
+  # other way round from what b204 suggested: the USB30 GDSC was powered all along (UkeProgressDxe at
+  # 00:00:07.443 already printed gdsc_powered=1 usb_clocks_running=3/3, and the DWC3 answers with
+  # gsnpsid=33313130). What b204's probe saw as pwr=0 clocks=1/3 was that version's own bad write
+  # (CFG_GDSCR.POWER_UP_COMPLETE is a read-only status bit) collapsing the domain. UkeUsbPowerOn now
+  # follows Qualcomm's gdsc.c and leaves the block in exactly the state QcomUsbQualify demands:
+  # pwr_on=1 up_complete=1 collapse=0, clocks=3/3, DWC3 halted=1.
+  # ON, because this round's read-out is the component's own card and not the kernel console. The card
+  # is painted with direct framebuffer writes by QcomXnuUsbDebug (fb_paint), so it cannot be affected by
+  # where kprintf is routed - and after a successful qcom_usb_debug_init the console sink is the USB
+  # backend, i.e. exactly the channel that does not work yet. The card carries the state line
+  # "PH E CR S ER LS FSR GW" as text under the symbol (60 columns), and FSR/GW are this round's two
+  # numbers: FSR 00000400 = the SMMU recorded no fault, GW 0 = the core never posted an event.
+  # What the card costs is console lines (it repaints every second to stay on top), which is why it
+  # stayed off in the rounds that were reading kernel text instead. Set to 0 for those.
+  "qcom-usb-qr=1",
   # The panel now paints the request and a QR of it without panicking (STATE 82/84), so the diagnostic
   # panic stays off: with it on, the first control request stops the machine and enumeration can never
   # be tested. qcom-usb-panic=0 overrides the compiled-in default of 2.

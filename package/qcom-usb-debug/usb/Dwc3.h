@@ -75,6 +75,11 @@ int dwc3_ready(const struct dwc3 *dev);
  * dword the core last decoded. A count larger than the ring means the ring or its address is wrong;
  * an unrecognised dword means the ring holds something other than events. */
 uint32_t dwc3_event_count(const struct dwc3 *dev);
+/* The high-water mark of the raw GEVNTCOUNT word this driver saw at the top of a poll, sampled before
+ * it writes its own consumption back. dwc3_event_count() cannot answer "did the core ever post an
+ * event": that register is self-clearing, so it reads 0 both before the first event and after the
+ * last one was consumed. Zero here means the core never wrote to the ring at all. */
+uint32_t dwc3_event_bytes_raw(const struct dwc3 *dev);
 uint32_t dwc3_last_event(const struct dwc3 *dev);
 /* Which control stage the core is waiting on (the CTRL_* enum in Dwc3.c), and how many recoverable
  * errors polling has absorbed. A wedged control transfer shows up as a state that never returns to 0
@@ -103,6 +108,8 @@ struct dwc3_snapshot {
      * these three words separate "the ring was never programmed" from "programmed and still silent",
      * which is what a wrong DMA/IOVA mapping looks like from here. */
     uint32_t event_address_lo, event_address_hi, event_size, devten;
+    /* The high-water raw GEVNTCOUNT seen by polling (see dwc3_event_bytes_raw). */
+    uint32_t event_count_raw;
 };
 /* Read-only diagnostics, for callers that already own powered MMIO access. */
 void dwc3_snapshot(struct dwc3 *dev, struct dwc3_snapshot *snapshot);
