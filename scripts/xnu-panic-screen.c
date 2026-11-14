@@ -29,6 +29,19 @@ struct vc_info {
  * reliable on this board (the pram window does not survive the reset), so the panel is the record. */
 #define SCALE   3
 
+#ifndef PANIC_FB_BASE
+#define PANIC_FB_BASE    0xE3940000UL
+#endif
+#ifndef PANIC_FB_ROWBYTES
+#define PANIC_FB_ROWBYTES 12800UL
+#endif
+#ifndef PANIC_FB_WIDTH
+#define PANIC_FB_WIDTH   3200UL
+#endif
+#ifndef PANIC_FB_HEIGHT
+#define PANIC_FB_HEIGHT  2136UL
+#endif
+
 extern const u64 gFont[];
 
 /* All state lives on the stack: this code sits in the kernel's read-only text,
@@ -75,15 +88,22 @@ struct ctx {
  * 0 disables it; the payload build passes UKE_PANIC_RESET_SECONDS.
  */
 #ifndef UKE_PANIC_RESET_SECONDS
-#define UKE_PANIC_RESET_SECONDS 60
+#define UKE_PANIC_RESET_SECONDS 20
 #endif
 
 __attribute__((noreturn)) static void uke_psci_reset (void)
 {
 #if UKE_PANIC_RESET_SECONDS > 0
-  unsigned long long deadline, now;
-  __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (now));
-  deadline = now * (unsigned long long)UKE_PANIC_RESET_SECONDS * 3ull;   /* ~3 s at any sane CNTFRQ */
+  unsigned long long deadline, now, frequency;
+  /* CNTFRQ_EL0 is the counter frequency in Hz: ticks for N seconds are frequency * N. The first version
+   * multiplied by an extra 3 ("~3 s at any sane CNTFRQ"), which silently tripled the hold - the round with
+   * UKE_PANIC_RESET_SECONDS 60 therefore parked for three minutes, and a board that looks frozen for three
+   * minutes reads exactly like a kernel that never started. */
+  __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (frequency));
+  if (frequency == 0) {
+    frequency = 19200000ull;
+  }
+  deadline = frequency * (unsigned long long)UKE_PANIC_RESET_SECONDS;
   __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now));
   deadline += now;
   for (;;) {
@@ -312,16 +332,27 @@ __attribute__((noreturn, used, section(".text.b_main"))) void panic_screen_main 
   g.rb   = v->v_rowbytes;
   g.w    = v->v_width;
   g.h    = v->v_height;
-  if (g.base == 0 || v->v_depth != 32 || fmt == 0) {
+  /* Fallback geometry, used when _vinfo has not been filled: on this board it is empty at panic time,
+   * which is why every panic screen so far parked without drawing a pixel. The values are the ones
+   * DarwinBoot prints at hand-off ("video base 0xE3940000 3200x2136 row 12800 bytes 32 bpp"). */
+  if ((g.base == 0) || (v->v_depth != 32) || (g.rb == 0) || (g.w == 0) || (g.h == 0)) {
+    g.base = (u8 *)PANIC_FB_BASE;
+    g.rb   = PANIC_FB_ROWBYTES;
+    g.w    = PANIC_FB_WIDTH;
+    g.h    = PANIC_FB_HEIGHT;
+  }
+  if (g.base == 0 || fmt == 0) {
     park ();
   }
 
-  /* First panic wins: a marker in the last row's first two pixels means a panic already drew
-   * the screen; a later panic (another thread or exception) must not overwrite it. */
+  /* The marker in the last row's first two pixels records that a panic screen was already drawn.
+   * It used to make a later panic park without drawing, so a second panic in the same boot could not
+   * overwrite the first - but the marker lives in VRAM, and VRAM survives the reset (that is why a panic
+   * image stays frozen on the panel). So after the very first panic ever drawn on this board, every
+   * later boot found the marker and drew nothing at all: rounds b198/b200/b201 all reported "the kernel
+   * never gets in, no panic text" for that reason. Draw regardless and only record the marker: a panic
+   * that overwrites an older panic's text is a smaller problem than a panic that shows nothing. */
   volatile u32 *mark = (volatile u32 *)(g.base + (u64)(g.h - 1) * g.rb);
-  if (mark[0] == 0xC0FFEE11u && mark[1] == 0x5CEEDA7Au) {
-    park ();
-  }
   g.x = 0;
   g.y = g.h / 8;
   g.log = 0;
