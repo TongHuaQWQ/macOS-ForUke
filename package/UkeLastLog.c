@@ -651,8 +651,7 @@ uke_last_log_beacon(const char *text)
 {
 	static vm_offset_t va;
 	vm_offset_t base;
-	char *slot;
-	unsigned i = 0;
+	unsigned i;
 
 	/*
 	 * gPanicBase is re-read on every call rather than cached: the early callers (the GIC arming code, the
