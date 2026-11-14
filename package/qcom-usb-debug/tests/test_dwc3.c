@@ -378,7 +378,8 @@ int main(void)
     timeout_commands = 1;
     unsigned before_timeout = delays;
     assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == -4);
-    assert(delays == before_timeout + 10000 && regs[DWC3_DEVTEN / 4] == 0 && regs[DWC3_DALEPENA / 4] == 0);
+    /* 10000 one-microsecond command polls, plus the USB2 PHY soft reset's 86 us pulse. */
+    assert(delays == before_timeout + 10000 + 86 && regs[DWC3_DEVTEN / 4] == 0 && regs[DWC3_DALEPENA / 4] == 0);
     /* The clear is one-way now, so a failed init leaves the suspend controls clear rather than restored. */
     assert((regs[DWC3_GUSB2PHYCFG(0) / 4] & ((1u << 6) | (1u << 8))) == 0);
     puts("PASS: unknown core refuses before writes; stuck command exits within 10000 one-microsecond polls");
@@ -399,7 +400,7 @@ int main(void)
         regs[DWC3_DSTS / 4] = 0x00420004u;
         assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
         assert(csftrst_writes == resets_before + 1);          /* the reset is always attempted */
-        assert(delays - delays_before == 20u * 10000u);        /* the vendor 200 ms, at the platform 10 ms cap */
+        assert(delays - delays_before == 20u * 10000u + 86u);   /* the vendor 200 ms at the platform 10 ms cap, plus the PHY pulse */
         /* The residue and RUN_STOP are cleared before the reset is attempted; CSftRst itself stays
          * set in this model by construction, which is the "reset refused" case the driver tolerates. */
         assert((regs[DWC3_DCTL / 4] & (DWC3_DCTL_INHERITED_RESIDUE | DWC3_DCTL_RUN_STOP)) == 0);
@@ -424,7 +425,7 @@ int main(void)
         regs[DWC3_DCTL / 4] = DWC3_DCTL_RUN_STOP;
         regs[DWC3_DSTS / 4] = 0;
         assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
-        assert(delays == delays_before + 20u * 10000u);
+        assert(delays == delays_before + 20u * 10000u + 86u);
     }
     stuck_csftrst = 0;
     puts("PASS: an inherited running core keeps the core soft reset, and a stuck one still fails");

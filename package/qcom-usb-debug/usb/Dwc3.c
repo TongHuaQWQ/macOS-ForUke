@@ -183,6 +183,22 @@ static int wait_reset(struct dwc3 *d, uint32_t reg, uint32_t mask, uint32_t want
 #define SOFT_RESET_POLLS 20u
 #define SOFT_RESET_PAUSE_US 10000u
 
+/* The vendor's mdwc3_usb2_phy_soft_reset (dwc3-msm.ko +0x3170): pulse GUSB2PHYCFG(0).PHYSOFTRST for
+ * about 86 us (__const_udelay(0x14f8c)). Linux's dwc3_core_soft_reset() documents itself as "core soft
+ * reset and PHY reset" but only does the core half; the Qualcomm glue does the PHY half from
+ * dwc3_msm_init()/resume, so on this board nothing has ever reset the USB2 PHY before the kernel took
+ * the core. The firmware's read-only snapshot shows a PHY that is powered but not in the vendor's
+ * post-init steady state (common0.SIDDQ_SEL=0 while the vendor sequence's step 25 leaves it 1,
+ * CFG_CTRL_1=0x02 while the sequence leaves the whole word 0), which is what "never reset / never
+ * re-initialised" looks like from the core's side. */
+static void usb2_phy_soft_reset(struct dwc3 *d)
+{
+    uint32_t value = rd(d, DWC3_GUSB2PHYCFG(0));
+    wr(d, DWC3_GUSB2PHYCFG(0), value | DWC3_GUSB2PHYCFG_PHYSOFTRST);
+    d->io.delay_us(d->io.cookie, 86);          /* the vendor's 0x14f8c cycle delay */
+    wr(d, DWC3_GUSB2PHYCFG(0), value & ~DWC3_GUSB2PHYCFG_PHYSOFTRST);
+}
+
 static int wait_soft_reset(struct dwc3 *d)
 {
     return wait_mask_slow(d, DWC3_DCTL, DWC3_DCTL_CSFTRST, 0u,
@@ -812,6 +828,8 @@ int dwc3_init(void *context, size_t context_bytes,
     } else {
         trace(d, DWC3_TRACE_READY, 0x52535421u, ctl);                /* "RST!": core soft reset done */
     }
+    /* The PHY goes back to its reset state before the core is reprogrammed, in the vendor's order. */
+    usb2_phy_soft_reset(d);
     wr(d, DWC3_DEVTEN, 0); wr(d, DWC3_DALEPENA, 0);
     /* A previous USB owner may have left other interrupters and unacknowledged
      * event counts. Halt precedes replacing any event-DMA mapping. */
@@ -823,8 +841,14 @@ int dwc3_init(void *context, size_t context_bytes,
     }
     zero(dma_cpu, DWC3_DMA_BYTES);
     sync(d, dma_cpu, DWC3_DMA_BYTES, DWC3_TO_DEVICE);
-    wr(d, DWC3_GCTL, (rd(d, DWC3_GCTL) & ~(DWC3_GCTL_PRTCAPDIR(3) |
-         DWC3_GCTL_GBLHIBERNATIONEN)) | DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_DEVICE));
+    /* Device role, with the two global-control bits the vendor clears for a gadget:
+     * DSBLCLKGTNG (bit0) and SCALEDOWN (bits 5:4). dwc3_core_setup_global_control() only *sets*
+     * DSBLCLKGTNG for host/OTG on 2.10a-2.50a cores and clears it otherwise (ref61/core.c:885-905); the
+     * DT property "snps,disable-clk-gating" is not parsed anywhere in 6.1.75, so it does not apply.
+     * work/re/docs/2026-11-14-usb-core-start-connect-gaps.md (A5) has the disassembly. */
+    wr(d, DWC3_GCTL, (rd(d, DWC3_GCTL) & ~(DWC3_GCTL_PRTCAPDIR(3) | DWC3_GCTL_GBLHIBERNATIONEN |
+         DWC3_GCTL_DSBLCLKGTNG | DWC3_GCTL_SCALEDOWN_MASK)) |
+         DWC3_GCTL_PRTCAPDIR(DWC3_GCTL_PRTCAP_DEVICE));
     wr(d, DWC3_DCFG, (rd(d, DWC3_DCFG) & ~(DWC3_DCFG_SPEED_MASK | DWC3_DCFG_DEVADDR_MASK |
          DWC3_DCFG_LPM_CAP)) | DWC3_DCFG_HIGHSPEED);
     wr(d, DWC3_GEVNTADRLO(0), (uint32_t)dma_device);
@@ -858,8 +882,14 @@ fail:
 }
 int dwc3_start(struct dwc3 *d)
 {
+    uint32_t ctl;
     if (!d || !d->initialized || d->failed) return -1;
-    wr(d, DWC3_DCTL, rd(d, DWC3_DCTL) | DWC3_DCTL_RUN_STOP);
+    /* The vendor's dwc3_gadget_run_stop() clears KEEP_CONNECT before setting RUN_STOP for every core
+     * after 1.94a (ref61/gadget.c:2487-2491): a leftover KEEP_CONNECT tells the core to keep the
+     * previous connection instead of re-connecting, which is a device the host never sees. */
+    ctl = rd(d, DWC3_DCTL);
+    ctl &= ~DWC3_DCTL_KEEP_CONNECT;
+    wr(d, DWC3_DCTL, ctl | DWC3_DCTL_RUN_STOP);
     d->running = 1; return 0;
 }
 int dwc3_poll(struct dwc3 *d, unsigned budget)
