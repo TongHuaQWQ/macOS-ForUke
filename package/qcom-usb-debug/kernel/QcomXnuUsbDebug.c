@@ -911,6 +911,7 @@ static void pram_state(void)
      * run bit in DCTL actually took. PLL/MIS follow, to prove core init did not undo the PHY sequence. */
     {
         char *k = fb_key_line;
+        static char key_prev[sizeof(fb_key_line)];
         k = append_text(k, "DS=");
         k = append_hex32(k, native.status.ring_dsts);
         k = append_text(k, " DT=");
@@ -922,6 +923,16 @@ static void pram_state(void)
         k = append_text(k, " MIS=");
         k = append_hex32n(k, native.status.phy_after_valid ? native.status.phy_after_misc : 0xdeadbeefu, 6u);
         *k = 0;
+        /* Also as a console line, once per change: with -uketextconsole on, the panel's text is the one
+         * record of a boot that stops, and the six numbers have to be inside it or a hang is blind. */
+        if (!fb_same(key_prev, fb_key_line)) {
+            unsigned n;
+            for (n = 0; n < sizeof(key_prev) - 1u && fb_key_line[n] != 0; ++n) key_prev[n] = fb_key_line[n];
+            key_prev[n] = 0;
+            IOLog("QCOMUSB KEY %s S=%u EV=%u TR=%u LT=%u\n", fb_key_line,
+                  native.status.core_control_state, native.status.core_event_bytes_raw,
+                  native.status.traces, native.status.last_trace);
+        }
     }
     if (native.status.command_a != 0 || native.status.command_b != 0) {
         p = append_text(p, " TA=");
