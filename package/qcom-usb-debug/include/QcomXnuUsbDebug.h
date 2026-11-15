@@ -82,6 +82,11 @@ typedef struct qcom_usb_debug_status {
      * many regulator/clock/reset/PMIC-repeater steps this kernel could not do. */
     uint32_t phy_writes, phy_checks, phy_check_failures, phy_skipped_platform;
     uint32_t phy_first_failed_offset, phy_first_failed_mask;
+    /* The same PHY bytes read back AFTER dwc3_init/dwc3_start, packed: PLL = 0x5c<<8 | 0x60
+     * (vendor 0x9001), MISC = 0xb8<<16 | 0x64<<8 | 0x54 (vendor 0x01170b). If core init (which
+     * issues GUSB2PHYCFG.PHYSOFT) or anything else undid the sequence, these differ from the
+     * values the replay verified while it ran. */
+    uint32_t phy_after_pll, phy_after_misc, phy_after_valid;
     uint32_t dma_address_width, hwparams0;
     uint32_t last_trace, trace_a, trace_b, traces;
     uint32_t poll_calls, last_poll_events, io_failed;

@@ -848,6 +848,16 @@ static void pram_state(void)
         q = append_text(q, " P1=");
         q = append_hex32(q, native.status.phy_first_failed_offset);
     }
+    /* Re-read after core init: PLL = 0x5c/0x60 (vendor 0x9001), MISC = 0xb8/0x64/0x54 (vendor
+     * 0x011 70b). Zero valid means the read failed, not that the PHY is empty. */
+    if (native.status.phy_after_valid) {
+        q = append_text(q, " PLL=");
+        q = append_hex32(q, native.status.phy_after_pll);
+        q = append_text(q, " MIS=");
+        q = append_hex32(q, native.status.phy_after_misc);
+    } else {
+        q = append_text(q, " PLL=---- MIS=------");
+    }
     /* Fixed eight-digit fields: a photographed frame has to be unambiguous, and variable-width hex made
      * TA=0 TB=6 versus TA=6 TB=0 impossible to tell apart on the b105 round (STATE 92). */
     /* A refused endpoint command is the one thing TA/TB report, so an all-zero pair is omitted rather
@@ -1352,6 +1362,31 @@ static int restore_vbus(void)
  * Read-back mismatches are counted, not fatal: the vendor driver only pr_err()s them. A store or
  * load that fails is a transport fault and does refuse the round.
  */
+/*
+ * Read the five PHY bytes that decide whether high speed is possible, and pack them for the record.
+ *
+ * The replay verifies each op as it goes, but it runs BEFORE dwc3_init(), and core init is allowed to
+ * touch the UTMI interface (dwc3_core_soft_reset writes GUSB2PHYCFG, and this driver's own
+ * usb2_phy_soft_reset() raises that register's PHYSOFT bit). A PHY that verified clean inside the
+ * replay and lost its PLL divider afterwards looks exactly like a PHY that never got programmed, so
+ * b229 measures it again here instead of assuming.
+ */
+static void sample_phy_after_init(void)
+{
+    QUSB_U32 div_lo, div_hi, fsel, ctrl2, common0;
+    if (!physical_read(0, QUD_EUSB2_PHY_BASE + 0x5cu, &div_lo) ||
+        !physical_read(0, QUD_EUSB2_PHY_BASE + 0x60u, &div_hi) ||
+        !physical_read(0, QUD_EUSB2_PHY_BASE + 0xb8u, &fsel) ||
+        !physical_read(0, QUD_EUSB2_PHY_BASE + 0x64u, &ctrl2) ||
+        !physical_read(0, QUD_EUSB2_PHY_BASE + 0x54u, &common0)) {
+        native.status.phy_after_valid = 0;
+        return;
+    }
+    native.status.phy_after_pll = ((div_lo & 0xffu) << 8) | (div_hi & 0xffu);
+    native.status.phy_after_misc = ((fsel & 0xffu) << 16) | ((ctrl2 & 0xffu) << 8) | (common0 & 0xffu);
+    native.status.phy_after_valid = 1;
+}
+
 static int program_eusb2_phy(void)
 {
     QPHY_IO io;
@@ -1677,6 +1712,9 @@ int qcom_usb_debug_init(void)
         (void)restore_after_failure(); ret = 0; goto out;
     }
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_CORE_STARTED);
+    sample_phy_after_init();
+    IOLog("QCOMUSB PHY2 pll=%04x misc=%06x valid=%u (vendor pll=9001 misc=01170b)\n",
+          native.status.phy_after_pll, native.status.phy_after_misc, native.status.phy_after_valid);
     /* Read the event ring back while nothing else touches the core: this round's question is whether
      * the ring the driver programmed is the ring the core writes to. b218 reached PH=19 with no device
      * event at all, so "ring programmed but silent" and "ring never programmed" look identical on the
