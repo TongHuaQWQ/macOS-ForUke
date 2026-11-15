@@ -796,7 +796,12 @@ static void pram_state(void)
     /* 192 for the pram/msgbuf record: it carries every field, and the four this round added (CB, FSR,
      * FAR, GW) push the worst case past the old 128. The panel line stays at 128 and is clipped to the
      * card's 60 columns anyway. */
-    char text[192], panel[128];
+    /* These appends are unbounded (append_text/append_decimal/append_hex32 simply advance the
+     * pointer), so the sizes are a budget, not a guard. The record now carries PH/E/CR/S/ER/LS/
+     * FSR/GW/PW/PC/PF/PS/P1 + RA/RS/DT/DC/DS + PLL/MIS and an optional TA/TB pair: about 200
+     * characters. 128 was the b226 size and the b233 read-back wrote past it into the stack,
+     * which is the kind of bug that shows up as a boot that stops after the first card paint. */
+    char text[384], panel[320];
     char *p = append_text(text, "QCOMUSB PH=");
     char *q = append_text(panel, "PH=");
     /* Sample the context bank and the core's event count first, so this record and the card line below
@@ -1739,11 +1744,6 @@ int qcom_usb_debug_init(void)
     if (!acquire_vbus()) {
         fail(QCOM_USB_DEBUG_VBUS_FAILED, 0); (void)restore_after_failure(); goto out;
     }
-    diag_checkpoint(QCOM_USB_DEBUG_DIAG_PHY_PROGRAM);
-    if (!program_eusb2_phy()) {
-        fail(QCOM_USB_DEBUG_PHY_PROGRAM_FAILED, (int)native.status.phy_writes);
-        (void)restore_after_failure(); goto out;
-    }
     bytes_zero(&platform, sizeof(platform));
     platform.read32 = core_read; platform.write32 = core_write;
     platform.delay_us = delay_us; platform.dma_sync = dma_sync;
@@ -1756,6 +1756,21 @@ int qcom_usb_debug_init(void)
         fail(QCOM_USB_DEBUG_CORE_INIT_FAILED, ret); (void)restore_after_failure(); ret = 0; goto out;
     }
     native.core_initialized = 1;
+    /* The vendor eUSB2 sequence has to run AFTER dwc3_init(), not before it.
+     *
+     * dwc3_init() ends its takeover with usb2_phy_soft_reset(), which pulses GUSB2PHYCFG(0).PHYSOFTRST -
+     * a PHY block reset that returns the register file to its defaults. Running the sequence before it
+     * therefore programs the PHY and then wipes it: the b235 card showed PLL=C800 and MIS=000709 after
+     * core init, which are the hand-off values from the b223 dump (0x5c=0xc8, 0x60=0x00, 0xb8=0x00,
+     * 0x64=0x07, 0x54=0x09), not the 9001/01170b the replay had just verified. The vendor orders it the
+     * other way round because its PHY driver is not called from inside the core's own soft reset.
+     * Placed before dwc3_start(), which arms endpoint 0 and starts the device, so the core sees a
+     * programmed PHY the first time it connects. */
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_PHY_PROGRAM);
+    if (!program_eusb2_phy()) {
+        fail(QCOM_USB_DEBUG_PHY_PROGRAM_FAILED, (int)native.status.phy_writes);
+        (void)restore_after_failure(); goto out;
+    }
     {
         static const char banner[] = "QCOM XNU USB CDC ACM v1\n";
         (void)backlog_write(banner, sizeof(banner) - 1);
