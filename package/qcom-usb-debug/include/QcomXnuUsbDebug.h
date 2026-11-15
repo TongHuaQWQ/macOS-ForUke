@@ -87,6 +87,9 @@ typedef struct qcom_usb_debug_status {
      * issues GUSB2PHYCFG.PHYSOFT) or anything else undid the sequence, these differ from the
      * values the replay verified while it ran. */
     uint32_t phy_after_pll, phy_after_misc, phy_after_valid;
+    /* The event-ring programming read back once, before the poll window, so the record carries the
+     * numbers that used to exist only in an IOLog line nobody can read without the serial port. */
+    uint32_t ring_address_lo, ring_size, ring_devten, ring_dctl, ring_dsts;
     uint32_t dma_address_width, hwparams0;
     uint32_t last_trace, trace_a, trace_b, traces;
     uint32_t poll_calls, last_poll_events, io_failed;

@@ -850,6 +850,19 @@ static void pram_state(void)
     }
     /* Re-read after core init: PLL = 0x5c/0x60 (vendor 0x9001), MISC = 0xb8/0x64/0x54 (vendor
      * 0x011 70b). Zero valid means the read failed, not that the PHY is empty. */
+    /* Event-ring programming and the two control registers, in the record: GW 0 with a full-speed
+     * device on the bus has two very different meanings depending on whether DEVTEN ever had
+     * CONNECTDONEEN set and whether DSTS says the core thinks it is connected at all. */
+    q = append_text(q, " RA=");
+    q = append_hex32(q, native.status.ring_address_lo);
+    q = append_text(q, " RS=");
+    q = append_hex32(q, native.status.ring_size);
+    q = append_text(q, " DT=");
+    q = append_hex32(q, native.status.ring_devten);
+    q = append_text(q, " DC=");
+    q = append_hex32(q, native.status.ring_dctl);
+    q = append_text(q, " DS=");
+    q = append_hex32(q, native.status.ring_dsts);
     if (native.status.phy_after_valid) {
         q = append_text(q, " PLL=");
         q = append_hex32(q, native.status.phy_after_pll);
@@ -1728,6 +1741,13 @@ int qcom_usb_debug_init(void)
         /* core_event_bytes is the card's G field, so the ring's readback replaces it here: after this
          * boot, G shows the count the core had written when the window opened, not the last poll's. */
         native.status.core_event_bytes = ring.event_count;
+        /* Same words into the record. The IOLog line above is unreadable without the CDC port (which is
+         * the thing being debugged), so a round that only logged them cost a photograph each time. */
+        native.status.ring_address_lo = ring.event_address_lo;
+        native.status.ring_size = ring.event_size;
+        native.status.ring_devten = ring.devten;
+        native.status.ring_dctl = ring.dctl;
+        native.status.ring_dsts = ring.dsts;
     }
     usb_diag_polling = 1;
     /* Let the host complete EP0 enumeration before early kernel startup can
