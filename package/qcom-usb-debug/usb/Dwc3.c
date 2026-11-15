@@ -654,6 +654,19 @@ static int device_event(struct dwc3 *d, unsigned event)
             speed != DWC3_DSTS_FULLSPEED2) return -6;
         d->full_speed = speed != DWC3_DSTS_HIGHSPEED;
         d->packet_size = d->full_speed ? 64 : 512;
+        /* DCFG.DevSpd has to match the speed the PHY actually trained at. dwc3_start() writes
+         * HIGHSPEED once, and this handler used to keep it: the vendor core re-writes it from
+         * DSTS.CONNECTSPD in __dwc3_gadget_set_speed(), and without that a full-speed link is spoken
+         * with high-speed framing. b228 is the measurement that points here - the component completed
+         * its whole sequence (PH 19, E 0, PW 30, PC 29, PF 0, so the PHY held the vendor's values)
+         * yet the event ring stayed empty (GW 0) through a five-second window while the host reported
+         * EPROTO: the host's SETUP never reached endpoint 0. Ordered before the endpoint
+         * re-configuration below, because reconfigure uses packet_size, which follows this speed. */
+        {
+            uint32_t wanted = (speed == DWC3_DSTS_HIGHSPEED) ? DWC3_DCFG_HIGHSPEED
+                : (speed == DWC3_DSTS_FULLSPEED1) ? DWC3_DCFG_FULLSPEED1 : DWC3_DCFG_FULLSPEED2;
+            wr(d, DWC3_DCFG, (rd(d, DWC3_DCFG) & ~DWC3_DCFG_SPEED_MASK) | wanted);
+        }
         /* HIRD threshold, straight out of the vendor core (Linux 6.1.75 dwc3_gadget_conndone_interrupt
          * sets it for high speed): DCTL.HIRD_THRES = (hird | (is_utmi_l1_suspend << 4)) << 24. The board
          * DT gives snps,hird-threshold = 0 and sets snps,is-utmi-l1-suspend, so the value is 0x10.

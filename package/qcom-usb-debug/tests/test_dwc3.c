@@ -429,5 +429,44 @@ int main(void)
     }
     stuck_csftrst = 0;
     puts("PASS: an inherited running core keeps the core soft reset, and a stuck one still fails");
+    /* DCFG.DevSpd has to follow the speed the PHY trained at. dwc3_start() writes HIGHSPEED, and
+     * CONNECTDONE used to leave it there: on a full-speed link the core then speaks high-speed framing,
+     * the host's SETUP never reaches endpoint 0 (b228: GW 0 through a whole five-second window while
+     * the host reported EPROTO) and the panel shows a run that completed with nothing to show for it.
+     * The vendor core re-writes DevSpd from DSTS.CONNECTSPD in __dwc3_gadget_set_speed(). */
+    {
+        unsigned i;
+        for (i = 0; i < 2u; i++) {
+            uint32_t connect = i == 0 ? DWC3_DSTS_FULLSPEED1 : DWC3_DSTS_FULLSPEED2;
+            uint32_t wanted = i == 0 ? DWC3_DCFG_FULLSPEED1 : DWC3_DCFG_FULLSPEED2;
+            regs[DWC3_DCTL / 4] = 0;
+            regs[DWC3_DSTS / 4] = connect;          /* running, and the PHY trained at full speed */
+            assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
+            assert((regs[DWC3_DCFG / 4] & DWC3_DCFG_SPEED_MASK) == DWC3_DCFG_HIGHSPEED);
+            assert(dwc3_start(dev) == 0);
+            event(1u | (DWC3_DEVT_USBRST << 8));
+            assert(dwc3_poll(dev, 1) == 1);
+            regs[DWC3_DSTS / 4] = connect;          /* the bus reset leaves the link speed alone */
+            event(1u | (DWC3_DEVT_CONNECTDONE << 8));
+            assert(dwc3_poll(dev, 32) == 1);
+            assert((regs[DWC3_DCFG / 4] & DWC3_DCFG_SPEED_MASK) == wanted);
+            /* The endpoint reconfiguration that CONNECTDONE issues must use the full-speed packet size. */
+            assert(eptrb(0)->size == 8 && !dwc3_ready(dev));
+            setup(0x80, 6, 0x0100, 0, 18);
+            assert(eptrb(1)->size == 18 && dma[8192 + 4096] == 18);
+        }
+        /* And a high-speed link keeps DevSpd at HIGHSPEED, so the fix cannot regress the working case. */
+        regs[DWC3_DCTL / 4] = 0;
+        regs[DWC3_DSTS / 4] = DWC3_DSTS_HIGHSPEED;
+        assert(dwc3_init(context, sizeof(context), &platform, &identity, dma, dma_bus, sizeof(dma)) == 0);
+        assert(dwc3_start(dev) == 0);
+        event(1u | (DWC3_DEVT_USBRST << 8));
+        assert(dwc3_poll(dev, 1) == 1);
+        regs[DWC3_DSTS / 4] = DWC3_DSTS_HIGHSPEED;
+        event(1u | (DWC3_DEVT_CONNECTDONE << 8));
+        assert(dwc3_poll(dev, 32) == 1);
+        assert((regs[DWC3_DCFG / 4] & DWC3_DCFG_SPEED_MASK) == DWC3_DCFG_HIGHSPEED);
+        puts("PASS: CONNECTDONE writes DCFG.DevSpd from the detected speed (FS1/FS2/HS)");
+    }
     return 0;
 }
