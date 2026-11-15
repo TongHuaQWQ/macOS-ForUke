@@ -38,7 +38,8 @@ enum qcom_usb_debug_error {
     QCOM_USB_DEBUG_TABLES_NOT_CONTIGUOUS,
     QCOM_USB_DEBUG_DOMAIN_STATE_INVALID,
     QCOM_USB_DEBUG_ACQUIRE_REFUSED,
-    QCOM_USB_DEBUG_PHY_LEASE_FAILED
+    QCOM_USB_DEBUG_PHY_LEASE_FAILED,
+    QCOM_USB_DEBUG_PHY_PROGRAM_FAILED
 };
 
 /* Opt-in preparing-panic delay is 100 + 2*checkpoint seconds. */
@@ -62,7 +63,8 @@ enum qcom_usb_debug_diag_checkpoint {
     QCOM_USB_DEBUG_DIAG_CORE_START,
     QCOM_USB_DEBUG_DIAG_CORE_STARTED,
     QCOM_USB_DEBUG_DIAG_FIRST_POLL,
-    QCOM_USB_DEBUG_DIAG_ENUM_DONE
+    QCOM_USB_DEBUG_DIAG_ENUM_DONE,
+    QCOM_USB_DEBUG_DIAG_PHY_PROGRAM
 };
 
 enum qcom_usb_debug_dma_mode {
@@ -76,6 +78,10 @@ typedef struct qcom_usb_debug_status {
     uint32_t qcom_result, restore_result, dma_mode, dma_lease_active;
     uint32_t vbus_owned, vbus_saved;
     uint32_t phy_owned, phy_saved, phy_applied, phy_restoring, stop_failed;
+    /* soc/QcomUsbPhy.c replay: stores issued, read-back checks, how many disagreed, and how
+     * many regulator/clock/reset/PMIC-repeater steps this kernel could not do. */
+    uint32_t phy_writes, phy_checks, phy_check_failures, phy_skipped_platform;
+    uint32_t phy_first_failed_offset, phy_first_failed_mask;
     uint32_t dma_address_width, hwparams0;
     uint32_t last_trace, trace_a, trace_b, traces;
     uint32_t poll_calls, last_poll_events, io_failed;

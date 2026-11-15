@@ -576,6 +576,12 @@ kernel_args = [
   # gated, that first access is a bus timeout -- a synchronous external abort, which is exactly the
   # shape of the panic this round is chasing. uke-serror-detail.patch reports esr/far/pc either way, so
   # this costs one boot and settles whether our own log channel is what stops the kernel.
+  # PARKED again after b224 was prepared and NOT shipped: it works, but the window is the last
+  # 32 MiB of the userdata partition, and on this unit /data is f2fs over a dm device that covers
+  # exactly the same 58,988,539 4K blocks (measured 2026-11-15 with df/blockdev on the live Android
+  # install). Turning this on therefore raw-writes 32 MiB over live f2fs data. Move the window to a
+  # partition nothing else uses (slot B's boot_b is the obvious candidate) before enabling it again.
+  # The pram half of package/UkeLastLog.c runs unconditionally and does not need this switch.
   # "sheng-log=1",
   # The userdata copy of the message buffer (package/UkeLastLog.c, UKE_LOG_USERDATA): an absolute
   # first/last LBA of userdata on LUN 0, so the writer can open the last 32 MiB of it and append one

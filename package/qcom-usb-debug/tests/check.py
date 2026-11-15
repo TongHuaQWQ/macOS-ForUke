@@ -61,6 +61,7 @@ def main():
         flag = '-DQUD_SOC_HEADER="' + str(profile) + '"'
         for label, units in {
             'domain': ['tests/test_domain.c', 'soc/QcomUsbDmaDomain.c'],
+            'phy': ['tests/test_phy.c', 'soc/QcomUsbPhy.c'],
             'buffer': ['tests/test_usb_buffer.c'],
             'control': ['tests/test_usb_control.c'],
             'screenshot': ['tests/test_usb_screenshot.c', 'kernel/QcomUsbScreenshot.c'],
@@ -78,7 +79,7 @@ def main():
         run([exe])
         checks[name + '-inspect'] = 'pass'
         for triple in ('aarch64-none-elf', 'aarch64-unknown-windows-msvc'):
-            for unit in ('soc/QcomUsbQualify.c', 'soc/QcomUsbDmaDomain.c'):
+            for unit in ('soc/QcomUsbQualify.c', 'soc/QcomUsbDmaDomain.c', 'soc/QcomUsbPhy.c'):
                 obj = out / (name + '-' + triple + '-' + Path(unit).stem + '.o')
                 run([target, '--target=' + triple, '-ffreestanding', '-fno-builtin',
                      '-mgeneral-regs-only', '-mstrict-align', '-Oz', '-Wall', '-Wextra',

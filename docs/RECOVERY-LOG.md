@@ -1,10 +1,13 @@
 # 从 recovery 读取 XNU 日志（userdata 窗口）
 
-适用于 uke（Xiaomi Pad 7）。XNU 里没有 adb/fastboot，测试结束后必须由人按键进 fastboot；日志由 `UkeLastLog` 每 2 s 写到 userdata 最后 32 MiB 的环形窗口，在 TWRP 下用 dd 读出。
+适用于 uke（Xiaomi Pad 7）。XNU 里没有 adb/fastboot，测试结束后必须由人按键进 fastboot；日志由 `UkeLastLog` 每 2 s 写到 userdata 最后 32 MiB 的环形窗口，在 recovery（TWRP / OrangeFox）下用 `dd` 读出。
 
 ## 前提
 
-- 内核带 `sheng-log=1`（board.toml 已含）**并且**用 `CONFIG_XNU_LOG_USERDATA=y` 的配置构建（`configs/uke-macos_defconfig` 已开）：前者拉起写者线程，后者才把 userdata 那半个写者编进去。启动日志里应依次出现：
+- 内核带 `sheng-log=1` **并且**用 `CONFIG_XNU_LOG_USERDATA=y` 的配置构建（`configs/uke-macos_defconfig:165` 已开，`libUkeUfsLog.a` 由 `board.toml:207-211` 的 `build-ufs-log.py` 产出并 `-force_load`）：前者拉起 userdata 那半个写者线程，后者才把它编进去。
+  **本文写作时 `board.toml:568-579` 把 `sheng-log=1` 注释掉了**（当时的理由是那次 panic 可能来自我们自己过早碰 UFS；该理由已被 b221 的根因推翻——panic 是 `0xFF800000` 上的向量化 wide store，`756da95` 修掉）。要读 userdata 窗口，先把它放回命令行，并注意 1000 字节上限：目前 52 个参数共 997 字节，`sheng-log=1` 需要 12 字节，得先 park 掉一个 ≥9 字节的参数。
+- pram 那半个写者（`package/UkeLastLog.c:779-789`）**无条件运行**，不受 `sheng-log` 控制：它每 500 ms 把 msgbuf 尾部快照进 pram，下一次启动由固件 `UkeUsbLogDxe` 的 `DumpPreviousBootLog()` 打进固件日志，走 OneSend 扫码导出即可。它的问题是**长按断电就丢**，userdata 这条才是断电后仍在的。
+- 启动日志里应依次出现：
 
   ```
   UkeLastLog: userdata log transport attached
@@ -13,20 +16,23 @@
 
   第一行表示控制器接管成功（映射 0x1d84000 与 apps SMMU、停掉固件请求队列、给 stream 0x60 配 SMMU、NOP OUT 通过），第二行的 lba 是**绝对** LBA，必须等于下面第 3 步 `dd` 读的那个窗口（`skip` 加上分区首块）。窗口几何来自 `board.toml [payload] kernel_args` 的 `uke-log-first=2961408` / `uke-log-last=61949946`（userdata 绝对首/末块），不是内核自己找的。
 - 两行缺哪一行就打印了拒绝原因：`userdata log transport unavailable: <原因>`（`controller map` / `dma buffer` / `lock` / `NOP OUT` / `transport quarantined`）或 `userdata log window unavailable: <原因>`（`no geometry` / `partition too small` / `window refused`）。这些都不需要再等下一 tick，写者只会自己关掉。
-- 读日志必须进 TWRP：先刷回原厂 boot/vendor_boot（XNU 镜像起不了 recovery）。
+- 读日志必须进 recovery（TWRP 或 OrangeFox）：先刷回原厂 boot/vendor_boot（XNU 镜像起不了 recovery），再把 recovery 镜像刷到活动 slot 的 `boot`。
 
 ## 步骤
 
 1. 设备在 fastboot：
 
    ```bash
-   fastboot flash boot_a /home/allenwdk/UniXNU/uke-images/boot.img
-   fastboot flash vendor_boot_a /home/allenwdk/UniXNU/uke-images/vendor_boot.img
+   # 原厂 OS4 备份（本仓库内，各 100 MiB）
+   fastboot flash boot_a        device/uke-backup/os4/on-device-os4-partitions/boot_a.img
+   fastboot flash vendor_boot_a device/uke-backup/os4/on-device-os4-partitions/vendor_boot_a.img
+   # 再把 OrangeFox 刷进**活动 slot 的 boot**（它不是 fastboot boot 镜像）
+   fastboot flash boot_a        work/tmp/orangefox-r12-uke-modded-v003.img
    fastboot reboot recovery
    ```
 
    > 读完日志后 `boot_a` 已经是原厂 Android 镜像。回到 UniXNU 时**必须连 boot 一起刷**
-   > `fastboot flash boot_a /home/allenwdk/UniXNU/uke-port/data/boot_uke_usbdal2.img`；
+   > `fastboot flash boot_a work/flash/boot-round-<本轮>.img` **和** `fastboot flash vendor_boot_a work/flash/vendor_boot_round-<本轮>.img`；
    > 只换 vendor_boot 会直接起 Android（addon8q 首轮就踩了这个）。
 
 2. 最多等 10 s，然后重启 adb server（TWRP 的 adb 经常这时才枚举）：
@@ -46,7 +52,7 @@
               skip=$((size/8-8192)); \
               echo size=$size skip=$skip; \
               dd if=/dev/block/by-name/userdata bs=4096 skip=$skip count=8192 of=/tmp/ukelog.bin'
-   adb pull /tmp/ukelog.bin /home/allenwdk/UniXNU/ukelog-new.bin
+   adb pull /tmp/ukelog.bin /home/tonghua/Code/mcOS/work/tmp/ukelog-new.bin
    ```
 
    本机当前值：`size=471908312`（512 B 扇区）→ `skip=58980347`，窗口绝对 LBA 61941755。
@@ -54,9 +60,11 @@
 4. 解码（在 `UniXNU-uke` 仓库）：
 
    ```bash
-   cd /home/allenwdk/UniXNU/UniXNU-uke
-   python3 tools/decode-ukelog.py /home/allenwdk/UniXNU/ukelog-new.bin -o /home/allenwdk/UniXNU/boot-new.log
-   awk '!seen[$0]++' /home/allenwdk/UniXNU/boot-new.log > /home/allenwdk/UniXNU/boot-new.unique.log
+   cd /home/tonghua/Code/mcOS/work/push/uke-main-merge
+   python3 tools/decode-ukelog.py /home/tonghua/Code/mcOS/work/tmp/ukelog-new.bin \
+       -o /home/tonghua/Code/mcOS/work/tmp/boot-new.log
+   awk '!seen[$0]++' /home/tonghua/Code/mcOS/work/tmp/boot-new.log \
+       > /home/tonghua/Code/mcOS/work/tmp/boot-new.unique.log
    ```
 
    解码器校验 magic/CRC、按 seq 排序，输出 `N valid records, sequence 0..N-1`。
@@ -64,7 +72,7 @@
    GPU addon 镜像启动后，用同一个日志跑一次自动核对：
 
    ```bash
-   python3 scripts/check-gpu-addon-boot.py /home/allenwdk/UniXNU/boot-new.log
+   python3 scripts/check-gpu-addon-boot.py /home/tonghua/Code/mcOS/work/tmp/boot-new.log
    ```
 
    它取最后一次出现的 `UKE GPU addon:`/`UKE GPU3: M`/`UKE GPU4: K`/`UKE GPU7/8` 行，逐项判
@@ -84,7 +92,7 @@
 进入 userdata。取法：panic 后**再启动一次 UniXNU**（不用进桌面），然后按上面的步骤 dump 窗口：
 
 ```bash
-grep -a "UKE PANIC:" /home/allenwdk/UniXNU/boot-new.log
+grep -a "UKE PANIC:" /home/tonghua/Code/mcOS/work/tmp/boot-new.log
 ```
 
 如果第二次启动在写者线程跑起来之前又 panic，文本仍留在 pram，等再下一次启动取；pram 只在
@@ -109,8 +117,8 @@ grep -a "UKE PANIC:" /home/allenwdk/UniXNU/boot-new.log
 写指针每次启动都从 slot 0、seq 0 开始。如果本次写的条数少于上次，slot N 之后仍是上次的记录，magic/CRC/seq 都连续，解码器会把两次启动拼在一起。只取本次启动：
 
 ```python
-a = open('/home/allenwdk/UniXNU/ukelog-new.bin', 'rb').read()
-b = open('/home/allenwdk/UniXNU/ukelog-old.bin', 'rb').read()   # 上一次的 dump，保留一份
+a = open('/home/tonghua/Code/mcOS/work/tmp/ukelog-new.bin', 'rb').read()
+b = open('/home/tonghua/Code/mcOS/work/tmp/ukelog-old.bin', 'rb').read()   # 上一次的 dump，保留一份
 for i in range(len(a) // 16384):
     if a[i*16384:(i+1)*16384] == b[i*16384:(i+1)*16384]:
         print('current boot records:', i)
@@ -125,7 +133,8 @@ for i in range(len(a) // 16384):
 - `fastboot reboot recovery` 后 `adb wait-for-device` 常超时；按第 2 步重启 server。必要时重新插拔 USB。
 - 在 XNU 里没有 adb；测试后长按电源关机，再按住电源 + 音量减进 fastboot。
 - 窗口是 userdata 最后 8192 个 4K 块；`blockdev --getsz` 的单位是 512 B 扇区，所以要 `/8`。
-- 原厂 `boot.img` / `vendor_boot.img` 在 `/home/allenwdk/UniXNU/uke-images/`。刷过 XNU 镜像后必须换回，否则 TWRP 起不来。
+- 原厂镜像在 `device/uke-backup/os4/on-device-os4-partitions/{boot_a.img,vendor_boot_a.img}`（本仓库内，OS4 那次设备侧转储）。刷过 XNU 镜像后必须换回，否则 recovery 起不来。
+- recovery 用 `MCC45TR/orangefox_device_xiaomi_uke` 的 `R12.0-uke-modded-v003`：`orangefox-r12-uke-modded-v003.img`（100 MB，sha256 `c6e89dde926a29c80d8003c3686092a03559b60b0e815eb8acdaebad52435374`），下载页说明写了「刷到活动 slot 的 boot，不是 fastboot boot 镜像」。
 - 读不到记录时，先 grep 内核日志里的 `UkeLastLog:`：写入端会打印拒绝原因（`transport unavailable: …` / `window unavailable: …`，见上文）。一条都没有，说明镜像里根本没有 userdata 那半个写者——检查配置是否带 `CONFIG_XNU_LOG_USERDATA=y` 且 `libUkeUfsLog.a` 被 `-force_load`（`build/uke-ufs-log/build-report.json` 的 `exports`）。
 
 ## 崩溃探针（sheng-crashlog=1）

@@ -63,10 +63,14 @@
  * interconnect path the firmware already established. */
 #define QUD_GCC_CBCR_OFFSETS {0x39018u, 0x39024u, 0x39028u, 0x39060u, 0x39064u}
 
-/* This board's usb_phy nodes describe an eUSB2 repeater (qcom,use-eusb2-phy,
- * live.dts:15983) and no SuperSpeed PHY, so the two PHY auxiliary branches may legitimately read
- * halted while the controller runs at high speed. The first three are what a high-speed gadget
- * needs and stay required. Same reasoning as the SM8250 profile. */
+/* This board has BOTH PHYs: the dwc3 child names usb-phy = <&eusb2_phy0 &usb_qmp_dp_phy> and
+ * maximum-speed = "super-speed" (live.dts:16006,16019), the glue sets qcom,use-eusb2-phy
+ * (live.dts:15983), and the QMP combo PHY node is status = "okay" (live.dts:16054-16072).
+ * An earlier revision of this comment claimed "no SuperSpeed PHY": that was wrong, and it is why
+ * the two PHY auxiliary branches below are downgraded to optional rather than required -- this
+ * backend only drives the USB2 side, so it never powers the QMP PHY and those two branches may
+ * legitimately read halted while the controller runs at high speed. The first three are what a
+ * high-speed gadget needs and stay required. Same reasoning as the SM8250 profile. */
 #define QUD_GCC_CBCR_REQUIRED 3u
 
 /* Block reset for the primary USB3 wrapper. Not visible in the live DT (it names only the reset
@@ -82,6 +86,18 @@
  * power state is CFG_GDSCR.POWER_UP_COMPLETE BIT(16) rather than the legacy GDSCR.PWR_ON. That is
  * why QUD_GDSC_POWER_BIT_LEGACY stays undefined here. */
 #define QUD_GCC_CFG_GDSCR_OFFSET 0x39008u
+
+/* The eUSB2 PHY register window. live.dts:16037-16040 names it as
+ *   eusb2_phy0: hsphy@88e3000 { compatible = "qcom,usb-snps-eusb2-phy";
+ *                               reg = <0x88e3000 0x154 0x88e2000 0x04 0xc278000 0x04>; }
+ * so the window is 0x154 bytes at 0x088e3000; soc/QcomUsbPhy.c replays the vendor's
+ * msm_eusb2_phy_init() sequence into it (see QcomUsbPhy.h for why). The other two reg
+ * entries are the EUD enable/detect words, which this kernel reads but never writes. */
+#define QUD_EUSB2_PHY_BASE   0x088e3000u
+#define QUD_EUSB2_PHY_BYTES  0x154u
+/* ml_io_map maps pages, so the kernel glue maps one 4 KiB page from the window base. */
+#define QUD_EUSB2_PHY_MAPPED 0x1000u
+#define QUD_EUSB2_PHY_EUD_ENABLE_REG 0x088e2000u
 
 /* QSCRATCH inside the wrapper window: wrapper base 0xa6f8800 (live.dts:15967 window + 0xf8800)
  * plus QSCRATCH_HS_PHY_CTRL 0x10 (dwc3-qcom.c) = 0xa6f8810, i.e. 0xf8810 relative to

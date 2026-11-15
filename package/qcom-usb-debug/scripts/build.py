@@ -13,7 +13,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 UNITS = ('kernel/QcomXnuUsbDebug.c', 'kernel/QcomUsbScreenshot.c',
          'usb/Dwc3.c', 'soc/QcomUsbQualify.c',
-         'soc/QcomUsbDmaDomain.c')
+         'soc/QcomUsbDmaDomain.c', 'soc/QcomUsbPhy.c')
 
 
 def compile_flags(record):

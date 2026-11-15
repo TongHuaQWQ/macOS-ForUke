@@ -9,6 +9,7 @@
 #include "../usb/Dwc3.h"
 #include "../soc/QcomUsbQualify.h"
 #include "../soc/QcomUsbDmaDomain.h"
+#include "../soc/QcomUsbPhy.h"
 #include "QcomUsbQr.h"
 #include <machine/machine_routines.h>
 #include <kern/cpu_number.h>
@@ -66,6 +67,7 @@ static uint64_t usb_log_replayed, usb_log_loss_reported;
 static struct {
     struct qcom_usb_debug_status status;
     vm_offset_t gcc_va, usb_va, smmu_va;
+    vm_offset_t phy_va; /* eUSB2 PHY register window, QUD_EUSB2_PHY_BASE */
     struct dwc3 *core;
     QUSB_DOMAIN_LEASE lease;
     QUSB_DOMAIN_PLATFORM domain_platform;
@@ -831,6 +833,21 @@ static void pram_state(void)
     q = append_decimal(q, native.status.core_event_bytes_raw);
     p = append_text(p, " GW=");
     p = append_decimal(p, native.status.core_event_bytes_raw);
+    /* The eUSB2 PHY replay, record only: writes / read-back checks / how many disagreed, and the
+     * first offset that disagreed. The card line is clipped at 60 columns and this round's two
+     * readings (FSR/GW) must survive on it, so this detail lives here and in IOLog. */
+    q = append_text(q, " PW=");
+    q = append_decimal(q, native.status.phy_writes);
+    q = append_text(q, " PC=");
+    q = append_decimal(q, native.status.phy_checks);
+    q = append_text(q, " PF=");
+    q = append_decimal(q, native.status.phy_check_failures);
+    q = append_text(q, " PS=");
+    q = append_decimal(q, native.status.phy_skipped_platform);
+    if (native.status.phy_check_failures != 0u) {
+        q = append_text(q, " P1=");
+        q = append_hex32(q, native.status.phy_first_failed_offset);
+    }
     /* Fixed eight-digit fields: a photographed frame has to be unambiguous, and variable-width hex made
      * TA=0 TB=6 versus TA=6 TB=0 impossible to tell apart on the b105 round (STATE 92). */
     /* A refused endpoint command is the one thing TA/TB report, so an all-zero pair is omitted rather
@@ -999,6 +1016,8 @@ static volatile uint32_t *mmio(uint64_t physical)
         base = native.usb_va; offset = physical - QUSB_DWC3_BASE;
     } else if (in_range(physical, QUSB_SMMU_BASE, QUSB_SMMU_BYTES)) {
         base = native.smmu_va; offset = physical - QUSB_SMMU_BASE;
+    } else if (in_range(physical, QUD_EUSB2_PHY_BASE, QUD_EUSB2_PHY_MAPPED)) {
+        base = native.phy_va; offset = physical - QUD_EUSB2_PHY_BASE;
     }
     if (!base) {
         native.status.io_failed = 1;
@@ -1309,6 +1328,46 @@ static int restore_vbus(void)
     native.status.vbus_owned = 0;
     return 1;
 }
+/*
+ * Replay the vendor eUSB2 PHY sequence.
+ *
+ * The b223 firmware dump (2026-11-15) read the whole PHY window at hand-off and compared it
+ * with the vendor's 19.2 MHz table: PLL feedback dividers 0x5c/0x60 held 0xc8/0x00 instead of
+ * 0x90/0x01, FSEL_SEL (0xb8) was clear and USB2_SUSPEND/VBUS_DET_EXT (0x64) were in the wrong
+ * state. That is a high-speed PLL fed the wrong multiplier, and it matches the only symptom the
+ * host ever reported: the device enumerates as full-speed and every control transfer then ends
+ * in an EPIPE (-32). Everything else the qualifier checks (GDSC, the five USB branches, the
+ * block reset, EUD clear, a halted core in U0) was already what the vendor stack leaves behind,
+ * so this sequence is the one missing step rather than a guess.
+ *
+ * Read-back mismatches are counted, not fatal: the vendor driver only pr_err()s them. A store or
+ * load that fails is a transport fault and does refuse the round.
+ */
+static int program_eusb2_phy(void)
+{
+    QPHY_IO io;
+    QPHY_RESULT result;
+    QPHY_RESULT_CODE rc;
+    bytes_zero(&io, sizeof(io));
+    bytes_zero(&result, sizeof(result));
+    io.base = (QUSB_U64)QUD_EUSB2_PHY_BASE;
+    io.read32 = physical_read;
+    io.write32 = physical_write;
+    io.delay_us = delay_us;
+    io.cookie = 0;
+    rc = QcomUsbPhyProgram(&io, &result);
+    native.status.phy_writes = result.writes;
+    native.status.phy_checks = result.checks;
+    native.status.phy_check_failures = result.check_failures;
+    native.status.phy_skipped_platform = result.skipped_platform;
+    native.status.phy_first_failed_offset = result.first_failed_offset;
+    native.status.phy_first_failed_mask = result.first_failed_mask;
+    IOLog("QCOMUSB PHY w=%u c=%u f=%u skip=%u first=%03x/%02x rc=%d\n",
+          result.writes, result.checks, result.check_failures, result.skipped_platform,
+          result.first_failed_offset, result.first_failed_mask, (int)rc);
+    return rc == QphyOkay;
+}
+
 static int phy_core_halted(void)
 {
     QUSB_U32 control, status;
@@ -1494,6 +1553,10 @@ int qcom_usb_debug_init(void)
     native.usb_va = ml_io_map((vm_offset_t)QUSB_DWC3_BASE, USB_BYTES);
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_MAP_SMMU);
     native.smmu_va = ml_io_map((vm_offset_t)QUSB_SMMU_BASE, QUSB_SMMU_BYTES);
+    /* The eUSB2 PHY window: the vendor sequence in soc/QcomUsbPhy.c writes inside it, and the
+     * b223 firmware dump shows it holds a mis-programmed PLL at hand-off. Mapped one page wide
+     * because ml_io_map takes pages; the node's own reg is 0x154 bytes. */
+    native.phy_va = ml_io_map((vm_offset_t)QUD_EUSB2_PHY_BASE, QUD_EUSB2_PHY_MAPPED);
     if (!native.gcc_va || !native.usb_va || !native.smmu_va) {
         fail(QCOM_USB_DEBUG_MAP_FAILED, 0); goto out;
     }
@@ -1576,6 +1639,11 @@ int qcom_usb_debug_init(void)
     }
     if (!acquire_vbus()) {
         fail(QCOM_USB_DEBUG_VBUS_FAILED, 0); (void)restore_after_failure(); goto out;
+    }
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_PHY_PROGRAM);
+    if (!program_eusb2_phy()) {
+        fail(QCOM_USB_DEBUG_PHY_PROGRAM_FAILED, (int)native.status.phy_writes);
+        (void)restore_after_failure(); goto out;
     }
     bytes_zero(&platform, sizeof(platform));
     platform.read32 = core_read; platform.write32 = core_write;

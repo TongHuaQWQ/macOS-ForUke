@@ -72,7 +72,7 @@ fi
 # One command per (compiler, unit). These are the units that end up inside the kernel, plus the two SoC
 # backends, so a typo, an unused variable or an implicit declaration is caught here rather than there.
 PROFILE="$HERE/soc/Sm8550.h"
-units=("usb/Dwc3.c" "soc/QcomUsbQualify.c" "soc/QcomUsbDmaDomain.c")
+units=("usb/Dwc3.c" "soc/QcomUsbQualify.c" "soc/QcomUsbDmaDomain.c" "soc/QcomUsbPhy.c")
 compilers=()
 for cc in gcc clang; do
   if command -v "$cc" >/dev/null 2>&1; then compilers+=("$cc"); fi

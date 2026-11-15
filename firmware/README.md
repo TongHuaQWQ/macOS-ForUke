@@ -101,3 +101,33 @@ git apply --check ../macOS-ForUke/firmware/uke-firmware.patch          # 干净�
 `iOSNJBrepo/macOS-uke` 的 `patches/uefi/worktree.diff`（该仓库 UEFI 衍生的源码标
 `BSD-2-Clause-Patent`），提交信息 `fd4ef909` 里写明了来源。上游 Mu-Silicium 部分沿用 EDK2
 的 BSD-2-Clause-Patent（见上游 `LICENSE`）。
+
+## 2026-11-15：b223 的只读 PHY 转储（现场说明，未并进上面两份补丁）
+
+> 上面两份补丁是 **11-12 的快照**，之后的 b208–b223 改动（`UkeUsbLogDxe` 里那一批 `UKE-*`
+> 探针、`UkeBootMemoryDxe` 的 fence、`uke.dec`/`uke.dsc` 的 PCD 行）都还只在
+> `workspace/uefi-uke` 的工作树里，没有回写。这是已知欠账，别当成"固件没改过"。
+
+b223 在 `UkeUsbLogDxe` 里加了一段只读转储（新 PCD `PcdUkeUsbPhyDump`，`uke.dec` 0x21、
+`uke.dsc` =1、`.inf` 里声明）。它一个问题都不猜，只打印四组事实：
+
+| 日志前缀 | 读的是什么 | 出处 |
+|---|---|---|
+| `UKE-PHYD:` | eUSB2 PHY `0x088e3000..+0x154` 全窗口（85 字），10 行 × 8 + 尾行 5 | 节点 reg `live.dts:16039`；期望值 `work/re/data/eusb2-phy-init-19mhz.json` |
+| `UKE-QSCFG:` | QSCRATCH `GENERAL_CFG` = `0xa6f8808` 及三个命名位 | `drivers/usb/dwc3/dwc3-qcom.c:33-36`（`PIPE_UTMI_CLK_SEL` bit0 / `PIPE3_PHYSTATUS_SW` bit3 / `PIPE_UTMI_CLK_DIS` bit8） |
+| `UKE-PIPE:` | `gcc_usb3_prim_phy_pipe_clk`(0x39068) 的 enable/halt，以及 pipe/aux/两位 mock_utmi 源字 | `work/re/data/gcc-cliffs-register-map.json` |
+| `UKE-QMP:` | `0x088e8000` 上 `qcom,qmp-phy-reg-offset` 列出的 13 个偏移（0xffff 跳过的那个照实写 absent），按索引打印、不给名字 | `live.dts:16069`；索引→名字的映射**未定**，不下结论 |
+
+判读用 `python3 work/analysis/check-eusb2-phy-dump.py <日志文件>`：它把 `UKE-PHYD` 的字与厂商
+29 条无条件 `rmw` 逐条比对，并单独报 EUD/`GENERAL_CFG`/pipe clock/QMP 四个结论。
+注意 EUD：`eud_enable` bit0 = 1 时厂商 PHY 驱动**一个 PHY 寄存器都不写**，那种情况下表比对无效。
+
+构建（本机，venv 在 `work/tmp/uefi-venv`）：
+
+```bash
+cd workspace/uefi-uke
+work/tmp/uefi-venv/bin/python build_uefi.py -d uke -r DEBUG   # 增量约 7 s，产出 Mu-uke.img
+```
+
+依赖没装时先 `python3 -m venv work/tmp/uefi-venv && work/tmp/uefi-venv/bin/pip install -r workspace/uefi-uke/pip-requirements.txt`
+（本机没有 `gcc-aarch64-linux-gnu`，`CLANGPDB` 工具链只用 clang+lld，够用）。

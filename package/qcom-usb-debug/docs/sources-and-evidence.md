@@ -72,3 +72,15 @@ DWC3 控制序列和控制传输参考 AsahiLinux/m1n1 `v1.4.17`，提交 `6b83e
 | `soc/QcomUsbDmaDomain.h` | `UniXNU-socrates/usb-platform/QcomUsbDmaDomain.h` | `b8cfbdadd3144cef187cc4488596f5b878b358252d5fa38a4587caea35ede229` |
 | 历史记录原件 | `UniXNU-socrates/usb-platform/qualification-source.json` | `3307925ae0fedf31532a76ec81874f4011ae47e2ca9809dc9b2b019c7373b6ff` |
 | 历史记录原件 | `UniXNU-socrates/usb-platform/translated-domain-source.json` | `424eaa22c631595425c3f640aa13ba2776d7a547c880aa0d71741e7cf8a92f46` |
+
+## 2026-11-15：eUSB2 PHY 序列表的来源（`soc/QcomUsbPhyInit.h`）
+
+| 内容 | 来源 |
+| --- | --- |
+| 表格本体（29 条无条件 `rmw` + 34 条读回校验 + 1 条 150 µs 延时 + DT override 存储） | 厂商 `phy-msm-snps-eusb2.ko` 的 `msm_eusb2_phy_init()` 19.2 MHz 分支逐条反汇编；机器可读版 `work/re/data/eusb2-phy-init-19mhz.json`，逐条证据 `work/re/docs/2026-11-14-eusb2-phy-vendor-sequence.md` |
+| 生成物 | `work/re/tools/gen_eusb2_header.py` 产出 `work/re/include/eusb2-phy-init-uke.h`；本仓库的 `soc/QcomUsbPhyInit.h` 是它的副本（只加了来源注释），**不要手改**，改 JSON 再重新生成 |
+| PHY 窗口地址 | 厂商 DT `live.dts:16037-16040`：`hsphy@88e3000 { reg = <0x88e3000 0x154 0x88e2000 0x04 0xc278000 0x04> }`；本仓库 `soc/Uke.h` 的 `QUD_EUSB2_PHY_BASE/BYTES` |
+| 为什么需要它（实机证据） | b223 实机固件转储（2026-11-15，`work/analysis/uke-fw-log/uke-20190100-000045-b223-phydump.txt`）：PLL 分频器 `0x5c/0x60` 读到 `0xc8/0x00`（厂商要求 `0x90/0x01`）、`FSEL_SEL`(0xb8)=0、`0x64`=0x07（要求 0x17）；同期主机侧只把设备当 full-speed 收下、控制传输一律 `-32`(EPIPE) |
+| 字节通道特性 | 同上转储：32 位读返回同字节四份（85 字里 29 个），表内数值全部 ≤0xFF ⇒ `soc/QcomUsbPhy.c` 按低字节读、按四份写 |
+| 本序列**不覆盖**的部分 | 表里的 regulator / ref clk / PHY 块复位、以及三个 PMIC eUSB2 repeater 调用（SPMI）。这里由固件与 SPMI 负责，运行时只计数不假装执行（`skipped_platform` / `platform_mask`） |
+| 主机侧验证 | `tests/test_phy.c`（三种 profile × 两种交叉目标编译；含 b223 状态修复、幂等重放、写失败/读失败/缺 delay 三类传输错误、窗口与字节不变量） |
