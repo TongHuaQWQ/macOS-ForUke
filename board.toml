@@ -89,11 +89,17 @@ chip_id = 24656                      # 0x6050 — the identity upstream's 27.3 p
 board_id = 4
 
 [ipsw.sha256]
-# Empty on purpose: the two 044-*.dmg pins that were here belong to the iPadOS image and name members
-# this port's restore image does not contain, so they could never match. The member names change with the
-# image as well: 094-56453-094.dmg.aea (OS), 094-56679-096.dmg.aea (Cryptex1,SystemOS) and
-# 022-21678-099.dmg.aea (BaseSystem) are the 25F84 ones, the 26C5035r manifest names its own. Pinning
-# them means hashing the multi-GiB members once, which happens with the userdata step rather than here.
+# Pinned 2026-11-15 from the 26C5035r members actually fetched into
+# work/push/UniXNU/out/ipsw/26C5035r/ - every value below is copied programmatically from that member's
+# own recording .json, not retyped. They are checked at fetch time (unixnu/ipsw.py: `pin =
+# config['sha256'][Path(name).name]`), so re-fetching a different member now fails loudly instead of
+# silently building against another image.
+"141-22233-021.dmg.aea" = "b7dbb5c6c3ee18ba43fcccb2e865aee008e4388f634bcfbd611b93bf9907d434"  # OS, 11408506880 B
+"141-22145-021.dmg.aea" = "00f80636bede8b709d0f6342ebefef3ec25ac43b3db03e544f4ccf692ada736d"  # Cryptex1,SystemOS, 2483027968 B
+"141-22106-021.dmg" = "797bb1e07e354e80e75d3be2658d8f586b343dbdc05cb93cb880e772ab0d23d1"  # Cryptex1,AppOS, 54525952 B
+"141-22233-021.dmg.aea.trustcache" = "6bc49e0dffade1c61401fd3e087636627f1ae7eca26df9b8890b1cb78ffb2963"  # StaticTrustCache, 445681 B
+"141-22145-021.dmg.aea.trustcache" = "613d7972025f35c9b22993032fb4643fc7d9df9253778d6cd0734af9a19dff99"  # Cryptex1,SystemTrustCache, 3503 B
+"141-22106-021.dmg.trustcache" = "ec5028bf90a6341a267f37356573a007fdbb9b5a2574eb9eae019715b589523c"  # Cryptex1,AppTrustCache, 2135 B
 
 # The raw image for the userdata partition: the OS and SystemOS disk images of the IPSW behind a manifest.
 # first_lba and last_lba are the GPT entry "userdata" of LUN 0, read from the tablet.
@@ -104,7 +110,44 @@ lba_bytes = 4096
 windows = [
   { name = "OS", component = "OS" },
   { name = "SystemOS", component = "Cryptex1,SystemOS" },
+  # App cryptex added 2026-11-15: the macOS boot checkpoints require the OS *and* App cryptex views under
+  # /System/Volumes/Preboot/Cryptexes, and the 26C5035r image does carry the member - verified in
+  # work/push/UniXNU/out/ipsw/26C5035r/141-22106-021.dmg.json ("component": "Cryptex1,AppOS", 54,525,952 B,
+  # sha256 797bb1e0...23d1), with its trust cache 141-22106-021.dmg.trustcache (Cryptex1,AppTrustCache).
+  # unixnu/userdata.py skips a window whose component is missing from the image, so this is safe on an
+  # image that lacks it; on this image it is present and will be included.
+  { name = "App", component = "Cryptex1,AppOS" },
 ]
+
+[payload.runtime]
+# SHAPE copied from the reference sheng board (work/ref-sheng/board.toml [payload.runtime]).
+#
+# Everything this block needs now EXISTS and has been exercised on this host (2026-11-15):
+#   * first-install Data seed: out/uke/macos-27.3-uke/uke-macos/runtime/data.dbr
+#       22,614,176 B packed, 210 GiB container, encoded_sha256 a43d3ee0...80924,
+#       volume UUID BB2462E2-040E-4F82-9C69-CACB7A872551
+#       (made on an x86 Hackintosh from the decrypted OS image: sudo python3
+#        scripts/make-macos-data-seed.py <OS dmg> data.dbr --gib 210)
+#   * owner trust bundle: runtime/owner-trust.bundle (451,264 B), built HERE on Linux from the three
+#       trust-cache components - build-boot-runtime.py needs no macOS for that.
+#
+# enabled = false on purpose, for exactly one reason: runtime.py:110 compares the seed's volume UUID with
+# CONFIG_XNU_OWNER_DATA_VOLUME_UUID of the *compiled* kernel, and this kernel predates the owner-Data path
+# (configs/uke-macos_defconfig keeps CONFIG_XNU_OWNER_DATA_MOUNT / _OWNER_ROOT_TRUST / _VERIFIED_ROOT_PROBE
+# / _OWNER_UNION_SYSTEMOS off). With enabled=true, every `unixnu payload`/`bootimg` stops with
+# "Data seed UUID differs from the compiled configuration" - which would block the device-side loop.
+#
+# To flip it: put CONFIG_XNU_OWNER_DATA_VOLUME_UUID="BB2462E2-040E-4F82-9C69-CACB7A872551" in the defconfig
+# (exactly once - runtime.py:118 demands one match), enable the owner-root configs, rebuild the kernel in
+# CI, then set enabled = true here.
+tool = "scripts/build-boot-runtime.py"
+target = "macos27"
+build = "26C5035r"
+data_gib = 210
+skip_setup = false
+gpu_addon = false
+trust_components = ["StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
+enabled = false
 
 [kernel]
 defconfig = "uke_defconfig"
@@ -304,11 +347,11 @@ kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.u
 # the single 0x0100000c slice).
 #
 # INHERITED, NOT MEASURED HERE: this digest is upstream's for exactly this member of exactly this
-# identity (profiles/os/macos-27.3-26C5035r, [kernel.prelink] kernelcache_sha256), and no 26C5035r image
-# exists in this tree to confirm it against. That is the same class of value the comment below warns
-# about, so treat it as a fetch-time check rather than a measurement; kernel.prelink() compares it and
-# stops with "does not match the kernelcache this board was qualified against" if it differs. To settle it:
-# fetch the KernelCache member of that image, run it through the driver's decode, and hash the Mach-O.
+# identity (profiles/os/macos-27.3-26C5035r, [kernel.prelink] kernelcache_sha256).
+# CONFIRMED 2026-11-15: the 26C5035r image is now in the tree, and the sha256 of its decoded kernelcache
+# (work/push/UniXNU/out/ipsw/26C5035r/kernelcache.decompressed, 124,518,400 B) is exactly the pinned value
+# below, so this is a measured match and not a guess. kernel.prelink() compares it and stops with "does not
+# match the kernelcache this board was qualified against" if a future image differs.
 #
 # The values it replaces: 697e01d6… was kernelcache.release.mac17g of the 25F84 image (the identity this
 # board declared until the OS profile moved to 27.3, and still the cache the uke prelink round was
@@ -471,12 +514,14 @@ kernel_args = [
   "uke-gic=0",
   "armcpu-skip-gic=1",
   "armcpu-spi-ipi=1",
-  # armcpu-probe=1 instead of armcpu-diagnostics=1: the instrumented ArmCpu copy in drivers/ArmCpu
-  # prints every prepareGic step (mapGic / initDistributor / wakeRedistributor with its TYPER probe),
-  # the IGROUPR0 and ISENABLER0 it read back, then DAIF/SRE/PMR/IGRPEN1/GICD_CTLR and the arch-timer
-  # state, holds 15 s so the panel can be photographed, and panics on purpose so nothing scrolls it
-  # away. 20 bytes against armcpu-diagnostics' 21, so the command line stays under the cap.
-  "armcpu-probe=1",
+  # armcpu-probe DROPPED 2026-11-15: the 2026-11-15 11:51 photo shows that boot ending in
+  #   panic(cpu 0): "ArmCpu: uke interrupt-path diagnostics -- read the lines above"  @ArmCpu.cpp:546
+  # which is this switch, i.e. our own diagnostic, not a fault (ArmCpu.cpp:535-546: probe==1 ->
+  # dumpIrqState twice, hold 15 s, panic on purpose, and it deliberately never reaches
+  # registerService()). Dropping the arg restores the default (probe==0 -> kprintf
+  # "armcpu-probe=0, continuing to registerService" and the boot continues).
+  # It also frees 15 bytes of the 1000-byte command line (payload.py:38): 997 -> 982.
+  # "armcpu-probe=1",
   # Round B14 diagnostics: fileset-wait-log names every IOService a kext waits on, and
   # fileset-wait-cap-ms turns an unbounded wait into a 5 s one so the caller reports what it wanted
   # instead of hanging silently. Both are inert unless this kernel carries fileset-wait-probe.patch.
@@ -489,7 +534,14 @@ kernel_args = [
   # so kprintf then falls back to the framebuffer video console. Graphics boot
   # suppresses text until -uketextconsole switches the console to text mode.
   "-enable_kprintf_spam",
-  "-uketextconsole",
+  # PARKED for the b226-card round, and it is the one variable changed. -uketextconsole puts the
+  # console into text mode, and with kprintf spam on, that text repaints faster than the diagnostic
+  # card's once-a-second fb_paint -> the b225 photos came back as a full screen of console text with
+  # no card on it, which left the round without its readout (PW/PC/PF/PS, the numbers that say
+  # whether the vendor eUSB2 sequence actually took effect). Without this arg the graphics console
+  # stays as it is and the card owns the panel. Cost: kernel text is no longer drawn, so a panic is
+  # only readable through the panic screen itself. Restore this line when text is what is being read.
+  # "-uketextconsole",
   "kt_fixed_zones=120",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",

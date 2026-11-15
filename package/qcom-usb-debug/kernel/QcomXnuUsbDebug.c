@@ -1079,11 +1079,20 @@ static int physical_write(void *cookie, QUSB_U64 address, QUSB_U32 value)
     volatile uint32_t *p;
     (void)cookie;
     if (deadline_expired()) { native.status.io_failed = 1; return 0; }
-    /* Only USB registers or shared-policy-approved selected-domain registers
-     * can be written. Private CB, local TLB and exact SID40 SMR/S2CR writes
-     * must match the recorded phase/value. Global SMMU/GCC writes are denied. */
+    /* Only USB registers, the eUSB2 PHY window, or shared-policy-approved selected-domain
+     * registers can be written. Private CB, local TLB and exact SID40 SMR/S2CR writes
+     * must match the recorded phase/value. Global SMMU/GCC writes are denied.
+     *
+     * The PHY window is the one addition (2026-11-15, b227): the vendor eUSB2 sequence in
+     * soc/QcomUsbPhy.c can only work if the twenty-nine read-modify-writes it replays are
+     * allowed to land, and before this the whitelist refused them - the b226 card showed
+     * E=23 (PHY_PROGRAM_FAILED) with PW=0 PC=0, i.e. the very first store was rejected, not
+     * a bad read. The range is the node's own reg (QUD_EUSB2_PHY_BYTES = 0x154 at
+     * 0x088e3000, live.dts:16037-16040); nothing else in this driver writes there, and the
+     * values still come only from the generated vendor table. */
     if (!in_range(address, QUSB_DWC3_BASE, USB_BYTES) &&
-        !in_range(address, QUSB_SMMU_BASE, QUSB_SMMU_BYTES)) {
+        !in_range(address, QUSB_SMMU_BASE, QUSB_SMMU_BYTES) &&
+        !in_range(address, QUD_EUSB2_PHY_BASE, QUD_EUSB2_PHY_BYTES)) {
         native.status.io_failed = 1;
         native.status.error = QCOM_USB_DEBUG_CALLBACK_RANGE_FAILED;
         return 0;
