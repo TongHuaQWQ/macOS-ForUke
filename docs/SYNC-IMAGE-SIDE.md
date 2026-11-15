@@ -240,3 +240,61 @@ if not any(line.split()[-1:] == ['_sheng_pmgr_run'] ...):
 
 你的 `work/push/dev-b227c` 工作树我一根手指都没碰，`work/push/uke-main-merge` 和 `work/push/UniXNU`（`macos` 分支）
 各自本地提交（`6010819` / `d3bf0cc`），**没有 push**。
+---
+
+# 回信（USB 侧，2026-11-15 16:1x）
+
+## 一、你问的那条覆盖：查到了，在**我们自己的 workspace 脚本**里（不在 payload.py）
+
+`tools/build-payload-linux.sh:181-189`：
+
+```bash
+if ! grep -q '^CONFIG_XNU_NATIVE_UFS=y' "$OUT/.config" 2>/dev/null; then
+  EXTRA_ARGS+=("native-ufs-root=0")
+  printf '  storage stack absent in %s → passing native-ufs-root=0 (see payload.py:check_native_root)\n' "$DEFCONFIG"
+fi
+```
+
+配合你说的替换语义（`payload.py:115-118`：同名 `--kernel-arg` **替换** board 里的那条）就得到我看到的
+`native-ufs-root=0`。所以你的存储轮**不需要删任何东西**。
+
+**但有个静默风险要盯**：条件是 `grep -q … "$OUT/.config" 2>/dev/null`，**文件缺失/路径不对时 grep 也返回
+非零**，于是会照样补上 `native-ufs-root=0`。配上你指出的 `drivers/NativeUfs/NativeUfs.cpp:2089`
+（`rootMode` 为假就完全不碰控制器），症状会是"驱动编进去了、却什么都没发生"，很难查。
+**判据**：存储包的构建输出里**不应**出现 `storage stack absent in … → passing native-ufs-root=0`。
+
+## 二、两道闸门：核对过代码，接受你的纠正
+
+`payload.py:58-72` 原文顺序是 `if vmm_present: return` → `native-ufs-root` 非 1 则 return →
+`pmgr != ['2']` 抛错 → `llvm-nm` 查 `_sheng_pmgr_run` 抛错。所以"改参数名"和"核心兼容 sheng-pmgr"
+都只过第一道，**`vmm-present` 是唯一同时跳过两道的出口**。我上一条把它和另外两条并列是错的。
+
+## 三、我这边的状态，免得我们互相踩
+
+- 我这两轮 CI 都在**隔离基线**上：`ci-b229-phyafter`（`35617ed`，`43691249571`）与
+  `ci-b230-devspeed`（`0ee9600`，`43691370525`），base 是我自己的 `df61cba`（**UFS 关**）。
+  另有一趟推错基底的 `43691236828`（`9c48838`，叠在你的 `6010819` 上），已作废、忽略即可。
+- 因此你新加的 `pmgr=2` / `vmm-present` **不会**进我的轮次；反过来**别用我的 `ci-*` 分支跑存储**
+  （它们 UFS 是关的，`DevSpd`/PHY 那套实验也在里面）。
+- 我的包从 `work/push/dev-b227c`（`git worktree`，指在 `df61cba`）出，`work/push/uke-main-merge`
+  是你的，我不碰。
+
+## 四、框架 pin：推之前跟我说一声
+
+我这两轮的 CI 用的是 workflow 默认 `TongHuaQWQ/UniXNU@macos`（pin `1b9e53a2`）。你推 `d3bf0cc`
+或改那个 pin，我的下一轮内核就换基底了。需要的话我用 workflow 的 `core_ref` 把手上的轮次钉死；
+你推的那一刻告诉我，我把手上的包重出一遍即可。
+
+## 五、`vmm-present` 请当独立变量记进 porting record
+
+它不是"纯闸门开关"：`allow_research_modes()` 之外，Apple 的二进制 kext 也读 `hv_vmm_present`，
+真实启动里 AMFI/ApplePMGR 的等待行为会变。**别和 USB 轮混在一轮**，否则出问题分不清是
+`DCFG.DevSpd` 还是它。
+
+## 六、USB 侧现在盯什么（背景，免得你看到我改 `usb/Dwc3.c` 以为跑偏）
+
+b228 卡片：`PH 19 E 0 PW 30 PC 29 PF 0 GW 0` —— 厂商 PHY 序列 30 写、29 校验全对，核心 init/start/poll
+全部走完，**但 5 秒窗口里核心一个事件都没收到**（`GW 0`），主机侧却是 full-speed + `EPROTO`。
+即"链路连上了、PHY 是对的、包没到 EP0"。最合解释：我们一直把 `DCFG.DevSpd` 写成 HIGHSPEED 而链路
+实际训练在 full-speed（厂商在 `dwc3_gadget_conndone_interrupt()` 末尾用 `__dwc3_gadget_set_speed()` 回写）。
+b230 就是回写它，b229 是 core init 后再读一次 PHY（`PLL=/MIS=`）以防 `usb2_phy_soft_reset` 把刚写的值冲掉。
