@@ -523,6 +523,16 @@ static char fb_key_line[QCOM_USB_FB_WIDTH + 1u];
 static char fb_ufs_line[QCOM_USB_FB_WIDTH + 1u];
 static uint32_t fb_ufs_run_mask, fb_ufs_en_mask, fb_ufs_gd_mask, fb_ufs_hcs, fb_ufs_ver, fb_ufs_hce;
 static unsigned fb_ufs_sampled;
+/* What the controller and the SMMU say *after* the log writer has had its chance, one shot. The init
+ * sample above answers "is the block alive"; this one answers "did the writer get anywhere", and the
+ * three numbers are chosen so that the answers do not overlap:
+ *   UTRLDBR  a request is submitted and not retired - the NOP OUT never completed
+ *   UTRLBA   the request list address the last submitter built, zero if nothing was ever submitted
+ *   SMR      the stream-matching entry for stream 0x60, which UfsLog.cpp installs itself; "none" means
+ *            the writer never reached the SMMU half of attach
+ * IS/HCS/S2CR and the SMMU's stream count go to the log, where the text console can show them. */
+static char fb_ufw_line[QCOM_USB_FB_WIDTH + 1u];
+static unsigned fb_ufw_sampled;
 static unsigned fb_setup_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
@@ -655,6 +665,11 @@ static void fb_build_payload(void)
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
         if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
     }
+    if (fb_ufw_line[0] != 0) {
+        const char *line = fb_ufw_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
     used += log_snapshot(payload + used, capacity - used - 1u);
     if (used == fb_payload_len && mem_equal(payload, fb_payload, used)) {
         fb_payload_dirty = 0;
@@ -702,6 +717,7 @@ static void fb_paint(void)
     /* One extra row for the UFS line: the card is the only place these numbers are painted, and the
      * band it maps is 640 rows tall, so asking for it explicitly is cheaper than losing it to the clamp. */
     if (fb_ufs_line[0] != 0) card_h += 26u;
+    if (fb_ufw_line[0] != 0) card_h += 26u;
     if (card_h > qcom_usb_fb_rows) card_h = qcom_usb_fb_rows;
     x0 = qcom_usb_fb_width > side + 24u ? (qcom_usb_fb_width - side) / 2u : 4u;
     fb_blank(0u, card_h, 0xffffffffu);
@@ -724,6 +740,10 @@ static void fb_paint(void)
     }
     if (fb_ufs_line[0] != 0) {
         fb_text(x0, line_y, 4u, fb_ufs_line, 0x00000000u);
+        line_y += 26u;
+    }
+    if (fb_ufw_line[0] != 0) {
+        fb_text(x0, line_y, 4u, fb_ufw_line, 0x00000000u);
         line_y += 26u;
     }
     {
@@ -1569,6 +1589,54 @@ static void sample_ufs_state(void)
     *p = 0;
     fb_ufs_sampled = 1;
     IOLog("QCOMUSB UFS %s\n", fb_ufs_line);
+}
+
+/* Second UFS sample, one shot, taken from the poll loop rather than from init: the userdata log writer
+ * installs its own SMMU entry and submits its own NOP OUT from its startup thread, so nothing about
+ * those is visible before it has run. Read only, and only when the required AXI/AHB branches reported
+ * running in the first sample - a gated UFS block can abort a read instead of returning one.
+ */
+static void sample_ufs_writer(void)
+{
+    const uint32_t required = (1u << QUD_UFS_CBCR_REQUIRED) - 1u;
+    char *p = fb_ufw_line;
+    uint32_t id0, is = 0, hcs = 0, ba = 0, dbr = 0, smr = 0, s2cr = 0, value;
+    unsigned index, count;
+    if (fb_ufw_sampled) return;
+    if ((fb_ufs_run_mask & required) != required || native.ufs_va == 0 || native.smmu_va == 0) return;
+    fb_ufw_sampled = 1;
+    {
+        volatile uint32_t *hc = (volatile uint32_t *)(uintptr_t)native.ufs_va;
+        is  = hc[QUD_UFS_HC_IS / 4u];
+        hcs = hc[QUD_UFS_HC_HCS / 4u];
+        ba  = hc[QUD_UFS_HC_UTRLBA / 4u];
+        dbr = hc[QUD_UFS_HC_UTRLDBR / 4u];
+    }
+    /* Stream matching, exactly the layout QcomUsbQualify.c uses for the USB stream: QUAD_ID0 carries the
+     * count in bits 7:0, SMR[i] is at 0x800 + 4i with validity in bit 31, S2CR[i] at 0xc00 + 4i. */
+    id0 = *(volatile uint32_t *)(uintptr_t)(native.smmu_va + 0x20u);
+    count = id0 & 0xffu;
+    if (count > 128u) count = 128u;
+    for (index = 0; index < count; ++index) {
+        value = *(volatile uint32_t *)(uintptr_t)(native.smmu_va + 0x800u + 4u * index);
+        if (!(value & 0x80000000u) || (value & 0x7fffu) != QUD_UFS_LOG_STREAM) continue;
+        smr = value;
+        s2cr = *(volatile uint32_t *)(uintptr_t)(native.smmu_va + 0xc00u + 4u * index);
+        break;
+    }
+    p = append_text(p, "UFW is=");
+    p = append_hex32(p, is);
+    p = append_text(p, " dbr=");
+    p = append_hex32(p, dbr);
+    p = append_text(p, " ba=");
+    p = append_hex32(p, ba);
+    p = append_text(p, " smr=");
+    if (smr != 0) p = append_hex32(p, smr); else p = append_text(p, "none");
+    *p = 0;
+    IOLog("QCOMUSB %s hcs=%08x s2cr=%08x id0=%08x\n", fb_ufw_line, hcs, s2cr, id0);
+    fb_payload_dirty = 1;
+    fb_build_payload();
+    fb_paint();
 }
 
 static int program_eusb2_phy(void)
@@ -2447,6 +2515,9 @@ void qcom_usb_debug_poll(void)
         fb_cycle();
     }
     if ((++pram_polls & 255u) == 1u) pram_state();
+    /* Late enough that the writer's own thread has tried, early enough to be on the card a photo catches:
+     * poll 512 is a few seconds in, and the card keeps cycling after that. */
+    if (pram_polls == 512u) sample_ufs_writer();
     if (usb_panic_mode == QCOM_USB_PANIC_POLLS && pram_polls == 64u)
         panic("QCOMUSB poll64 phase=%u err=%u tr=%u last=%u a=%x b=%x",
               native.status.diag_checkpoint, native.status.error, native.status.traces,

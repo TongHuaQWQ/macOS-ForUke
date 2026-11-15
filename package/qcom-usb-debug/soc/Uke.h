@@ -114,7 +114,13 @@
 #define QUD_UFS_HC_BYTES  0x3000u
 #define QUD_UFS_HC_VER    0x0008u
 #define QUD_UFS_HC_HCS    0x0030u
+#define QUD_UFS_HC_IS     0x0020u   /* UTP transfer-request completion + UTP/UIC error status */
 #define QUD_UFS_HC_HCE    0x0034u
+#define QUD_UFS_HC_UTRLBA 0x0050u   /* base address of the request list the last submitter built */
+#define QUD_UFS_HC_UTRLDBR 0x0058u  /* doorbell: a bit stays set while a request is still outstanding */
+/* The apps SMMU stream the userdata log writer installs for itself (work/re/data/ufs-cliffs.json
+ * host.smmu.stream). Reported, never written: the writer owns it. */
+#define QUD_UFS_LOG_STREAM 0x60u
 /* The two UFS GDSCs, from the same live.dts node set as the USB one above:
  *   gcc_ufs_phy_gdsc      qcom,gdsc@177004  reg <0x177004 0x04>  -> GCC-relative 0x77004
  *   gcc_ufs_mem_phy_gdsc  qcom,gdsc@19e000  reg <0x19e000 0x04>  -> GCC-relative 0x9e000
