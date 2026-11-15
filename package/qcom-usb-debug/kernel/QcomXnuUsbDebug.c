@@ -43,6 +43,7 @@ extern void IOLog(const char *format, ...);
 #define USB_GUSB2PHYCFG 0xc200u
 #define USB_PHY_KEEP_AWAKE_MASK ((1u << 6) | (1u << 8))
 #define USB_RUN_STOP (1u << 31)
+#define USB_CSFTRST (1u << 30)
 #define USB_HALTED (1u << 22)
 #define USB_HS_PHY_CTRL QUD_QSCRATCH_HS_PHY_CTRL_OFFSET
 #define USB_SW_VBUS_MASK QUD_QSCRATCH_VBUS_MASK
@@ -192,6 +193,7 @@ static unsigned int usb_panic_mode = QCOM_USB_PANIC_DEFAULT;
  * unit, so it must not be declared here: an extern declaration is expanded by the macro into syntax
  * errors ("expected identifier or '('"), which is exactly how the round that added this failed. */
 static void pram_state(void);
+static int physical_read(void *cookie, QUSB_U64 address, QUSB_U32 *value);
 static void sample_translation(void);
 static void pram_setup(uint32_t a, uint32_t b);
 static void fb_remember_request(const char *line);
@@ -533,6 +535,12 @@ static unsigned fb_ufs_sampled;
  * IS/HCS/S2CR and the SMMU's stream count go to the log, where the text console can show them. */
 static char fb_ufw_line[QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_ufw_sampled;
+/* DCTL/DSTS read *now*, next to the stored ring sample. DC in the key line is whatever the ring sample
+ * caught, which on b250 read C0000000 - RUN_STOP set together with CSftRst, a combination the core only
+ * presents while a soft reset is still in flight. Whether that is the steady state or a stale early
+ * sample decides whether USB is being refused by an un-armed ep0 (hardware STALL, host sees -32) or by
+ * something further on, and one live read separates the two without another instrumented build. */
+static char fb_now_line[QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_setup_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
@@ -670,6 +678,11 @@ static void fb_build_payload(void)
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
         if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
     }
+    if (fb_now_line[0] != 0) {
+        const char *line = fb_now_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
     used += log_snapshot(payload + used, capacity - used - 1u);
     if (used == fb_payload_len && mem_equal(payload, fb_payload, used)) {
         fb_payload_dirty = 0;
@@ -718,6 +731,7 @@ static void fb_paint(void)
      * band it maps is 640 rows tall, so asking for it explicitly is cheaper than losing it to the clamp. */
     if (fb_ufs_line[0] != 0) card_h += 26u;
     if (fb_ufw_line[0] != 0) card_h += 26u;
+    if (fb_now_line[0] != 0) card_h += 26u;
     if (card_h > qcom_usb_fb_rows) card_h = qcom_usb_fb_rows;
     x0 = qcom_usb_fb_width > side + 24u ? (qcom_usb_fb_width - side) / 2u : 4u;
     fb_blank(0u, card_h, 0xffffffffu);
@@ -744,6 +758,10 @@ static void fb_paint(void)
     }
     if (fb_ufw_line[0] != 0) {
         fb_text(x0, line_y, 4u, fb_ufw_line, 0x00000000u);
+        line_y += 26u;
+    }
+    if (fb_now_line[0] != 0) {
+        fb_text(x0, line_y, 4u, fb_now_line, 0x00000000u);
         line_y += 26u;
     }
     {
@@ -996,6 +1014,21 @@ static void pram_state(void)
             unsigned n;
             for (n = 0; n < sizeof(key_prev) - 1u && fb_key_line[n] != 0; ++n) key_prev[n] = fb_key_line[n];
             key_prev[n] = 0;
+            {
+                QUSB_U32 ctl = 0, sts = 0;
+                char *k = fb_now_line;
+                if (!physical_read(0, QUSB_DWC3_BASE + USB_DCTL, &ctl)) ctl = 0xdeadbeefu;
+                if (!physical_read(0, QUSB_DWC3_BASE + USB_DSTS, &sts)) sts = 0xdeadbeefu;
+                k = append_text(k, "NOW ctl=");
+                k = append_hex32(k, ctl);
+                k = append_text(k, " sts=");
+                k = append_hex32(k, sts);
+                k = append_text(k, " run=");
+                k = append_decimal(k, (ctl & USB_RUN_STOP) ? 1u : 0u);
+                k = append_text(k, " csf=");
+                k = append_decimal(k, (ctl & USB_CSFTRST) ? 1u : 0u);
+                *k = 0;
+            }
             IOLog("QCOMUSB KEY %s S=%u EV=%u TR=%u LT=%u\n", fb_key_line,
                   native.status.core_control_state, native.status.core_event_bytes_raw,
                   native.status.traces, native.status.last_trace);
