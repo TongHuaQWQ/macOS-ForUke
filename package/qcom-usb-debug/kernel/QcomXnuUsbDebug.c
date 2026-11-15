@@ -1618,6 +1618,15 @@ int qcom_usb_debug_init(void)
     if (native.status.phase != QCOM_USB_DEBUG_NOT_INITIALIZED) {
         ret = native.status.phase == QCOM_USB_DEBUG_ACTIVE; goto out;
     }
+    {
+        /* -uketextconsole means the panel is meant to show kernel text. Taking PE_kputc away from it
+         * then leaves a boot that stops with no evidence, which b235..b239 paid for four rounds in a
+         * row. The bytes still reach USB through the console patch's _cnputs tee. */
+        boolean_t text_console = FALSE;
+        if (PE_parse_boot_argn("-uketextconsole", &text_console, sizeof(text_console)) && text_console) {
+            qcom_usb_debug_console_hijack = 0;
+        }
+    }
     if (!PE_parse_boot_argn("qcom-usb-debug", &enabled, sizeof(enabled)) || enabled != 1) {
         native.status.phase = QCOM_USB_DEBUG_DISABLED; goto out;
     }
@@ -2281,6 +2290,7 @@ size_t qcom_usb_debug_write(const void *bytes, size_t count)
     }
     release(flags); return accepted;
 }
+int qcom_usb_debug_console_hijack = 1;
 void qcom_usb_debug_putc(char c) { (void)qcom_usb_debug_write(&c, 1); }
 void qcom_usb_debug_poll(void)
 {
