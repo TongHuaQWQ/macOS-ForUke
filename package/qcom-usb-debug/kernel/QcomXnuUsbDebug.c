@@ -108,6 +108,29 @@ static uint64_t counter(void)
     __asm__ volatile("isb\nmrs %0, cntvct_el0" : "=r"(value) :: "memory");
     return value;
 }
+/*
+ * Why this exists. The log channel this port needs is a pram window in DRAM, and DRAM only survives a
+ * *warm* reset: the Gunyah virtual watchdog the firmware arms (UkeBootMemoryDxe.c:1488, 65 s) is meant
+ * to provide exactly that, and on 2026-11-15 it did not recycle a hung kernel - the tablet sat at the
+ * card for minutes. A long press would have rebooted it, but that drops DRAM and with it the record.
+ *
+ * So the kernel asks for the reset itself, through the platform's own conduit: PSCI SYSTEM_RESET
+ * (SMC 0x84000009). QUD_PSCI_SMC_RESET stays 0 - this board's profile has never observed that SMC
+ * reboot it, so the port does not claim the capability - and the call below is only ever made when a
+ * boot argument asks for it, which makes every use an explicit qualification attempt rather than an
+ * assumption.
+ */
+static unsigned int qcom_usb_reboot_seconds;
+
+static void uke_psci_system_reset(void)
+{
+    __asm__ volatile("movz w0, #9\nmovk w0, #0x8400, lsl #16\n"
+                     "mov x1, xzr\nmov x2, xzr\nmov x3, xzr\ndsb sy\nsmc #0"
+                     ::: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+                         "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                         "x16", "x17", "memory");
+}
+
 static void diag_reset(unsigned int seconds);
 static void platform_smc_reset(void)
 {
@@ -1627,6 +1650,12 @@ int qcom_usb_debug_init(void)
             qcom_usb_debug_console_hijack = 0;
         }
     }
+    {
+        unsigned int reboot_seconds = 0;
+        if (PE_parse_boot_argn("usb-reboot", &reboot_seconds, sizeof(reboot_seconds))) {
+            qcom_usb_reboot_seconds = reboot_seconds;
+        }
+    }
     if (!PE_parse_boot_argn("qcom-usb-debug", &enabled, sizeof(enabled)) || enabled != 1) {
         native.status.phase = QCOM_USB_DEBUG_DISABLED; goto out;
     }
@@ -1855,6 +1884,20 @@ int qcom_usb_debug_init(void)
     usb_diag_polling = 0;
     if (usb_diag_mode >= 201u && usb_diag_mode <= 203u) diag_reset(12);
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_ENUM_DONE);
+    if (qcom_usb_reboot_seconds != 0u) {
+        /* The pram record the firmware reads next boot is written by UkeLastLog every second, so all
+         * this has to do is give it a few seconds and then reset warmly. Counted on the virtual
+         * counter, the same one the rest of this file uses. */
+        uint64_t frequency, start;
+        __asm__ volatile("isb\nmrs %0, cntfrq_el0" : "=r"(frequency) :: "memory");
+        __asm__ volatile("isb\nmrs %0, cntvct_el0" : "=r"(start) :: "memory");
+        IOLog("QCOMUSB REBOOT in %u s (PSCI SYSTEM_RESET, boot-arg gated)\n", qcom_usb_reboot_seconds);
+        while (frequency != 0u &&
+               (counter() - start) < (uint64_t)qcom_usb_reboot_seconds * frequency) {
+            delay_us(0, 10000u);
+        }
+        uke_psci_system_reset();
+    }
     native.status.phase = QCOM_USB_DEBUG_ACTIVE;
     /* The success counterpart of fail()'s persistent row. Without it a working controller and a
      * controller that never ran both leave the row empty, which is the ambiguity this whole
