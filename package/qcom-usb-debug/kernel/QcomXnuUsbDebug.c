@@ -301,6 +301,15 @@ static char *append_hex32(char *to, uint32_t value)
     for (shift = 28; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
     return to;
 }
+/* Fixed-width hex with a chosen digit count: PLL is a 4-digit pair of bytes and MIS a 6-digit triple,
+ * and padding them makes the card line a fixed 55 characters, which is what lets it fit one block. */
+static char *append_hex32n(char *to, uint32_t value, unsigned digits)
+{
+    static const char hexdigits[] = "0123456789abcdef";
+    int shift = (int)(digits * 4u) - 4;
+    for (; shift >= 0; shift -= 4) *to++ = hexdigits[(value >> (unsigned)shift) & 0xfu];
+    return to;
+}
 static char *append_hex(char *to, uint64_t value)
 {
     static const char digits[] = "0123456789abcdef";
@@ -477,6 +486,10 @@ static unsigned fb_trace_count;
  * SET_ADDRESS on sight, plus how many the host has sent. The full request history and the traces keep
  * their place further down, where a longer capture still reaches them. */
 static char fb_setup_line[32];
+/* The six numbers this round exists for, in priority order and short enough to survive both a
+ * 60-column card line and the first 60-byte OneSend block: a generic scanner that only ever reads
+ * block 1 still gets DS/DT/DC, which is what decides whether the core is even running. */
+static char fb_key_line[QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_setup_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
@@ -576,6 +589,11 @@ static void fb_build_payload(void)
     uint8_t *payload = fb_payload;
     size_t capacity = sizeof(fb_payload);
     used = 0;
+    if (fb_key_line[0] != 0) {
+        const char *line = fb_key_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
     {
         const char *line = fb_state_line;
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
@@ -654,8 +672,13 @@ static void fb_paint(void)
     p = append_decimal(p, (uint64_t)fb_payload_len);
     *p = 0;
     fb_text(x0, text_y, 5u, label, 0x00000000u);
-    /* The text carried by this block, so a photo that cannot be scanned still reads. */
+    /* The key numbers before the block text: a photo of the card has to be enough to read DS/DT/DC,
+     * because a generic scanner only ever sees one 60-byte block and the block boundaries move. */
     line_y = text_y + 32u;
+    if (fb_key_line[0] != 0) {
+        fb_text(x0, line_y, 4u, fb_key_line, 0x00000000u);
+        line_y += 26u;
+    }
     {
         size_t at = (size_t)fb_block_show * ONESEND_BLOCK;
         char line[QCOM_USB_FB_WIDTH + 1u];
@@ -876,6 +899,25 @@ static void pram_state(void)
     /* A refused endpoint command is the one thing TA/TB report, so an all-zero pair is omitted rather
      * than printed: 23 characters of every frame spent saying nothing, in the one line that has to fit
      * block 0 (measured on b107; see fb_setup_line). */
+    /* The same numbers as a standalone 55-character line, ordered by how much they decide. This is what
+     * the card paints and what the QR payload starts with, so a generic scanner reading only its first
+     * 60-byte block still gets DS/DT/DC - the three registers that say whether the device controller is
+     * running at all (DSTS.DEVCTRLHLT), whether it was ever told to interrupt (DEVTEN), and whether the
+     * run bit in DCTL actually took. PLL/MIS follow, to prove core init did not undo the PHY sequence. */
+    {
+        char *k = fb_key_line;
+        k = append_text(k, "DS=");
+        k = append_hex32(k, native.status.ring_dsts);
+        k = append_text(k, " DT=");
+        k = append_hex32(k, native.status.ring_devten);
+        k = append_text(k, " DC=");
+        k = append_hex32(k, native.status.ring_dctl);
+        k = append_text(k, " PLL=");
+        k = append_hex32n(k, native.status.phy_after_valid ? native.status.phy_after_pll : 0xdeadbeefu, 4u);
+        k = append_text(k, " MIS=");
+        k = append_hex32n(k, native.status.phy_after_valid ? native.status.phy_after_misc : 0xdeadbeefu, 6u);
+        *k = 0;
+    }
     if (native.status.command_a != 0 || native.status.command_b != 0) {
         p = append_text(p, " TA=");
         q = append_text(q, " TA=");
