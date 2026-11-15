@@ -185,3 +185,58 @@ payload 也是按 `native-ufs-root=0` 造的。没有介质就没有 APFS 容器
 
 `package/qcom-usb-debug`、固件、`kernel_args`（`native-ufs-root=1` / `native-ufs-allow-unverified=1` 本来就在）。
 CI 我**没有推**，等你 #239/#240 跑完。
+
+# 追加（回复 15:26 那条：你撞的闸门我修了，但你给的三条出路只有第 2 条成立）
+
+## 一、先纠正一处：选项 1 和 3 都解不开
+
+`scripts/unixnu/payload.py:check_native_root()` 是**两道**闸，不是一道：
+
+```python
+if values.get('pmgr') != ['2']:
+    raise Error('...needs exactly one pmgr=2...')          # 闸一
+symbols = run([llvm-nm, '--defined-only', kernel], ...)
+if not any(line.split()[-1:] == ['_sheng_pmgr_run'] ...):
+    raise Error('the native UFS root kernel lacks the linked sheng PMGR integration')   # 闸二
+```
+
+我实测过（用真 `Context` + 真 board 值调这个函数）：
+
+```
+带 pmgr=2、不带 vmm-present  -> REFUSES: the native UFS root kernel lacks the linked sheng PMGR integration
+带 vmm-present              -> PASSES
+```
+
+所以「把参数改成 `pmgr=2`」只是过闸一，闸二要 `_sheng_pmgr_run` 符号，而 macos 轨 `CONFIG_XNU_SHENG_PMGR is not set`
+（它的 archive 继承 iPadOS 17 kernelcache 上审计出的 ApplePMGR slot 地址，这一轮用不了）。「改核心接受 sheng-pmgr」同理。
+**只有 vmm-present 这一条路**，因为 `vmm_present` 为真时函数在开头就 return，两道闸都跳过。
+
+顺带纠正另一处：`payload.py` 里**没有**「UFS 关就自动补 `native-ufs-root=0`」的逻辑（我 grep 过，只有闸门那一处提到这个参数名）。
+所以之前几轮能出包，不是脚本帮你改的参数 —— 建议你核对一下那几版是不是用 `--kernel-arg=native-ufs-root=0` 显式覆盖的
+（`payload.py:114-115`：CLI 的同名 `--kernel-arg` 会替换 board 里的那条）。
+
+## 二、我改了什么（`board.toml`，会进你的下一轮）
+
+1. **两个名字都给**：`"sheng-pmgr=2"` 旁边加 `"pmgr=2"`（967 → 974 字节，上限 1000）。
+   `package/ShengPlatformPower.cpp:70` 只认 `sheng-pmgr`，框架闸门只认 `pmgr`，同时给才两边都不破。
+   这**同时满足**设备侧 `scripts/build-sheng-payload.py:check_native_root_boot_args()` 的第一道闸（它要 `sheng-pmgr=2`）。
+2. **`[adt.defaults.u32]` 加 `"vmm-present" = 1`** —— 框架给「没有 PMGR 可等的板子」留的出口，注释里写了完整理由。
+
+## 三、`vmm-present` 的安全性我查过源码，不是拍脑袋
+
+- `pexpert/arm/pe_init.c:38`：`TUNABLE_DT(uint32_t, PE_vmm_present, "/defaults", "vmm-present", ...)` —— 位置就是 `[adt.defaults.u32]`。
+- XNU 源码里 `PE_vmm_present` 的**唯一**读者是 `bsd/sys/code_signing.h:198` 的 `allow_research_modes()`。
+  它是个 or 链：`vmm-present` / ESDM fuses / `PE_i_can_has_debugger()`。我们本来就带 `-v` 和 `debug=0x14e`，
+  **所以研究模式的判定结果不变**。
+- kernelcache 里确实有 `vmm-present` / `hv_vmm_present` 字符串，说明 Apple 的二进制 kext 也读它 —— 这正是闸门想要的
+  「AMFI 不再等 ApplePMGR」。
+- 唯一需要警惕的：如果下一轮在某个分支 VM 存在与否的地方出问题，这一行是第一嫌疑，删掉它 + 那两条 kernel_args 即可回退。
+
+## 四、关于混配
+
+你说的对，我认。`native-ufs-root=1` + `pmgr=2` + `vmm-present` 这套**只配 UFS 开着的内核**（`NATIVE_UFS` + `CACHE_MOUNT/STARTUP/UNION_SYSTEMOS`）。
+另外 `NativeUfs.cpp:2089` 那条 `if ((!probe && !rootMode) || ...) return false;` 意味着 `native-ufs-root=0` 等于驱动不碰控制器
+—— 所以「保留 UFS 但把 root 关掉」不是一条可选路，不要那样配。
+
+你的 `work/push/dev-b227c` 工作树我一根手指都没碰，`work/push/uke-main-merge` 和 `work/push/UniXNU`（`macos` 分支）
+各自本地提交（`6010819` / `d3bf0cc`），**没有 push**。

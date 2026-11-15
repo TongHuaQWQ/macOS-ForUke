@@ -751,7 +751,14 @@ kernel_args = [
   # panic stays off: with it on, the first control request stops the machine and enumeration can never
   # be tested. qcom-usb-panic=0 overrides the compiled-in default of 2.
   "qcom-usb-panic=0",
+  # Both spellings, on purpose. package/ShengPlatformPower.cpp:70 reads "sheng-pmgr" (this port's name),
+  # while scripts/unixnu/payload.py:check_native_root() demands "pmgr=2" (upstream's name) before it lets a
+  # payload carry native-ufs-root=1, and it does not know the sheng- prefix. Passing both costs 8 bytes of
+  # the 1000-byte command line (967 -> 975) and keeps the gate satisfiable for the round that turns
+  # SHENG_PMGR on. The gate's second condition is the _sheng_pmgr_run symbol, which the macOS train does
+  # not link, so this round also declares vmm-present in [adt.defaults.u32] — see the note there.
   "sheng-pmgr=2",
+  "pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",
   # Documented diagnostic switch (unixnu.com/zh/xnu/boot-arguments): the security stage was the next
@@ -946,6 +953,22 @@ sched-preemption-disable-mode = 0
 
 [adt.defaults.u32]
 sleep-disabled = 1
+# vmm-present tells Apple's code — the binary kexts read /defaults/vmm-present, the string is in
+# kernelcache.release, and pe_init.c:38 binds it as TUNABLE_DT(PE_vmm_present, "/defaults", "vmm-present")
+# — that this machine runs under a hypervisor, so AMFI does not wait for an ApplePMGR service it can never
+# find. That is exactly the condition scripts/unixnu/payload.py:check_native_root() exists to prevent, and
+# declaring it here is the framework's own documented escape for such a board ("A board whose device tree
+# declares vmm-present has no PMGR for AMFI to wait for; it needs no PMGR stand-in"). Why this board needs
+# the escape now: CONFIG_XNU_NATIVE_UFS is on, and NativeUfs.cpp:2089 returns false without
+# native-ufs-root=1, so storage exists only if that gate is passed — while the gate's other exit, the
+# _sheng_pmgr_run symbol from SHENG_PMGR, is unbuildable on this train (its archive inherits ApplePMGR slot
+# addresses audited on the iPadOS 17 kernelcache).
+# What it does NOT change, checked in the source before setting it: the only PE_vmm_present consumer in XNU
+# is allow_research_modes() (bsd/sys/code_signing.h:198), which is an or-chain whose other arms are the ESDM
+# fuses and PE_i_can_has_debugger — and this board already boots with -v, debug=0x14e, so research modes are
+# already allowed. kern.hv_vmm_present is informational. If a future round regresses in a place that branches
+# on VM presence, this single line is the suspect and can be dropped together with its two kernel_args.
+"vmm-present" = 1
 # AppleImage4 matches on /defaults, not /chosen (see the evb10 device record), so the security state it
 # consults before reading a nonce slot has to be here. Values as in the community's working QEMU reference.
 certificate-production-status = 0
