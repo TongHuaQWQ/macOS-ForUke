@@ -68,6 +68,7 @@ static struct {
     struct qcom_usb_debug_status status;
     vm_offset_t gcc_va, usb_va, smmu_va;
     vm_offset_t phy_va; /* eUSB2 PHY register window, QUD_EUSB2_PHY_BASE */
+    vm_offset_t ufs_va; /* UFS host controller, read only: see the UFS sample below */
     struct dwc3 *core;
     QUSB_DOMAIN_LEASE lease;
     QUSB_DOMAIN_PLATFORM domain_platform;
@@ -513,6 +514,15 @@ static char fb_setup_line[32];
  * 60-column card line and the first 60-byte OneSend block: a generic scanner that only ever reads
  * block 1 still gets DS/DT/DC, which is what decides whether the core is even running. */
 static char fb_key_line[QCOM_USB_FB_WIDTH + 1u];
+/* UFS, sampled once at hand-off. The userdata log writer maps 0x01d84000 itself and sends a NOP OUT
+ * through the apps SMMU, and nothing in this port's firmware powers the block before that, so the first
+ * question a silent log asks is whether UFS is clocked at all. Two masks answer it without writing
+ * anything: one bit per branch in QUD_UFS_CBCR_OFFSETS, set when the branch is running (CLK_OFF clear)
+ * and when its own ENABLE bit is set. Everything after "HCS=" is read only when the required branches
+ * are running, because a read of a gated UFS block can abort rather than return. */
+static char fb_ufs_line[QCOM_USB_FB_WIDTH + 1u];
+static uint32_t fb_ufs_run_mask, fb_ufs_en_mask, fb_ufs_hcs, fb_ufs_ver, fb_ufs_hce;
+static unsigned fb_ufs_sampled;
 static unsigned fb_setup_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
@@ -638,6 +648,13 @@ static void fb_build_payload(void)
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
         if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
     }
+    /* Last of the fixed lines: the panel paints it on its own, so nothing that already fits block 0 or
+     * block 1 moves because UFS was added. */
+    if (fb_ufs_line[0] != 0) {
+        const char *line = fb_ufs_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
     used += log_snapshot(payload + used, capacity - used - 1u);
     if (used == fb_payload_len && mem_equal(payload, fb_payload, used)) {
         fb_payload_dirty = 0;
@@ -682,6 +699,9 @@ static void fb_paint(void)
     side = 0;
     if (qr_encode_bytes(frame, frame_len, &qr)) side = (uint32_t)qr.size * QCOM_USB_QR_SCALE;
     card_h = (side != 0 ? side : 160u) + 120u;
+    /* One extra row for the UFS line: the card is the only place these numbers are painted, and the
+     * band it maps is 640 rows tall, so asking for it explicitly is cheaper than losing it to the clamp. */
+    if (fb_ufs_line[0] != 0) card_h += 26u;
     if (card_h > qcom_usb_fb_rows) card_h = qcom_usb_fb_rows;
     x0 = qcom_usb_fb_width > side + 24u ? (qcom_usb_fb_width - side) / 2u : 4u;
     fb_blank(0u, card_h, 0xffffffffu);
@@ -700,6 +720,10 @@ static void fb_paint(void)
     line_y = text_y + 32u;
     if (fb_key_line[0] != 0) {
         fb_text(x0, line_y, 4u, fb_key_line, 0x00000000u);
+        line_y += 26u;
+    }
+    if (fb_ufs_line[0] != 0) {
+        fb_text(x0, line_y, 4u, fb_ufs_line, 0x00000000u);
         line_y += 26u;
     }
     {
@@ -1122,6 +1146,8 @@ static volatile uint32_t *mmio(uint64_t physical)
         base = native.smmu_va; offset = physical - QUSB_SMMU_BASE;
     } else if (in_range(physical, QUD_EUSB2_PHY_BASE, QUD_EUSB2_PHY_MAPPED)) {
         base = native.phy_va; offset = physical - QUD_EUSB2_PHY_BASE;
+    } else if (in_range(physical, QUD_UFS_HC_BASE, QUD_UFS_HC_BYTES)) {
+        base = native.ufs_va; offset = physical - QUD_UFS_HC_BASE;
     }
     if (!base) {
         native.status.io_failed = 1;
@@ -1481,6 +1507,59 @@ static void sample_phy_after_init(void)
     native.status.phy_after_valid = 1;
 }
 
+/* UFS at hand-off, read only.
+ *
+ * The userdata log window this board persists kernel text to is served by package/UfsLogKernel.c, which
+ * maps 0x01d84000 and the apps SMMU itself and sends one SCSI NOP OUT. Nothing in this port's firmware
+ * powers UFS - there is no UFSDxe, ClockDxe, RpmhDxe or SPMIDxe in the boot - so the block arrives in
+ * whatever state XBL left it, and if its branch clocks are gated the first controller access cannot
+ * answer. That is the first thing to rule out when the window stays empty, and it is answerable without
+ * writing a single register.
+ *
+ * Two masks, one bit per branch in QUD_UFS_CBCR_OFFSETS: run = CLK_OFF (bit31) clear, en = ENABLE
+ * (bit0) set. The controller words are only read when the branches QUD_UFS_CBCR_REQUIRED names are
+ * running, because a read of a clock-gated AXI slave can abort instead of returning - and an abort here
+ * would turn a readable "clocks are off" into a panic that says nothing about UFS.
+ */
+static void sample_ufs_state(void)
+{
+    static const uint32_t cbcr[QUD_UFS_CBCR_COUNT] = QUD_UFS_CBCR_OFFSETS;
+    const uint32_t required = (1u << QUD_UFS_CBCR_REQUIRED) - 1u;
+    char *p = fb_ufs_line;
+    unsigned index;
+    uint32_t value;
+    if (fb_ufs_sampled || native.gcc_va == 0) return;
+    fb_ufs_run_mask = fb_ufs_en_mask = 0;
+    for (index = 0; index < QUD_UFS_CBCR_COUNT; ++index) {
+        value = *(volatile uint32_t *)(uintptr_t)(native.gcc_va + cbcr[index]);
+        if (!(value & (1u << QUD_UFS_CBCR_RUNNING))) fb_ufs_run_mask |= 1u << index;
+        if (value & 1u) fb_ufs_en_mask |= 1u << index;
+        IOLog("QCOMUSB UFS cbcr %08x=%08x run=%u en=%u\n", cbcr[index], value,
+              (value & (1u << QUD_UFS_CBCR_RUNNING)) ? 0u : 1u, value & 1u);
+    }
+    p = append_text(p, "UFS clk=");
+    p = append_hex32n(p, fb_ufs_run_mask, 3u);
+    p = append_text(p, " en=");
+    p = append_hex32n(p, fb_ufs_en_mask, 3u);
+    if ((fb_ufs_run_mask & required) == required && native.ufs_va != 0) {
+        volatile uint32_t *hc = (volatile uint32_t *)(uintptr_t)native.ufs_va;
+        fb_ufs_ver = hc[QUD_UFS_HC_VER / 4u];
+        fb_ufs_hcs = hc[QUD_UFS_HC_HCS / 4u];
+        fb_ufs_hce = hc[QUD_UFS_HC_HCE / 4u];
+        p = append_text(p, " V=");
+        p = append_hex32n(p, fb_ufs_ver, 4u);
+        p = append_text(p, " hce=");
+        p = append_hex32n(p, fb_ufs_hce, 2u);
+        p = append_text(p, " hcs=");
+        p = append_hex32n(p, fb_ufs_hcs, 2u);
+    } else {
+        p = append_text(p, " hc=skip");
+    }
+    *p = 0;
+    fb_ufs_sampled = 1;
+    IOLog("QCOMUSB UFS %s\n", fb_ufs_line);
+}
+
 static int program_eusb2_phy(void)
 {
     QPHY_IO io;
@@ -1710,9 +1789,15 @@ int qcom_usb_debug_init(void)
      * b223 firmware dump shows it holds a mis-programmed PLL at hand-off. Mapped one page wide
      * because ml_io_map takes pages; the node's own reg is 0x154 bytes. */
     native.phy_va = ml_io_map((vm_offset_t)QUD_EUSB2_PHY_BASE, QUD_EUSB2_PHY_MAPPED);
+    /* UFS is mapped but never written: the log writer in the device package owns it. Mapping costs
+     * nothing and a gated block tolerates a translation; only reads of it are gated below. */
+    native.ufs_va = ml_io_map((vm_offset_t)QUD_UFS_HC_BASE, QUD_UFS_HC_BYTES);
     if (!native.gcc_va || !native.usb_va || !native.smmu_va) {
         fail(QCOM_USB_DEBUG_MAP_FAILED, 0); goto out;
     }
+    /* Before anything can refuse this boot: the one observation that tells whether the UFS log window
+     * is empty because the writer failed or because the block was never clocked for it. */
+    sample_ufs_state();
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_INSPECT);
     result = QcomUsbInspectInherited(physical_read, 0, &inherited);
     native.status.qcom_result = (uint32_t)result;

@@ -99,6 +99,30 @@
 #define QUD_EUSB2_PHY_MAPPED 0x1000u
 #define QUD_EUSB2_PHY_EUD_ENABLE_REG 0x088e2000u
 
+/* UFS, read-only. The userdata log writer (device package/UfsLogKernel.c) maps this controller itself
+ * and sends one NOP OUT through the apps SMMU stream 0x60; nothing in this port's own firmware ever
+ * powers the block, so whether UFS is still clocked at hand-off decides whether that writer can attach.
+ * The port only reads - no clock, reset or GDSC write is made here.
+ *
+ * Controller window: work/re/data/ufs-cliffs.json host.regions, "ufs_mem" base 0x1d84000 size 0x3000
+ * (live.dts ufshc_mem). Offsets 0x08/0x30/0x34 are the UFSHCI standard VER/HCS/HCE words.
+ *
+ * Branch clocks: gcc-cliffs.c clk_branch halt_reg/enable_reg, the ufs_phy_* set. Halt and enable share
+ * one register per branch, enable is BIT(0) and CLK_OFF is BIT(31) (clk-branch.c), exactly as the USB
+ * CBCRs above. The symbol clocks are TX/RX lane branches (live.dts lanes-per-direction = 2). */
+#define QUD_UFS_HC_BASE   0x01d84000ULL
+#define QUD_UFS_HC_BYTES  0x3000u
+#define QUD_UFS_HC_VER    0x0008u
+#define QUD_UFS_HC_HCS    0x0030u
+#define QUD_UFS_HC_HCE    0x0034u
+#define QUD_UFS_CBCR_COUNT 9u
+#define QUD_UFS_CBCR_OFFSETS {0x77018u, 0x77024u, 0x77028u, 0x7702cu, 0x77068u, \
+                              0x77074u, 0x770b0u, 0x770ccu, 0x770e4u}
+/* Order of QUD_UFS_CBCR_OFFSETS: axi, ahb, tx_symbol_0, rx_symbol_0, unipro_core, ice_core, phy_aux,
+ * rx_symbol_1, aggre_axi. AXI and AHB are the two the host cannot live without. */
+#define QUD_UFS_CBCR_REQUIRED 2u
+#define QUD_UFS_CBCR_RUNNING  31u
+
 /* QSCRATCH inside the wrapper window: wrapper base 0xa6f8800 (live.dts:15967 window + 0xf8800)
  * plus QSCRATCH_HS_PHY_CTRL 0x10 (dwc3-qcom.c) = 0xa6f8810, i.e. 0xf8810 relative to
  * QUD_DWC3_BASE. Bit meanings: UTMI_OTG_VBUS_VALID BIT(20), SW_SESSVLD_SEL BIT(28). */
