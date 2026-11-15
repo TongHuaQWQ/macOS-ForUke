@@ -521,7 +521,7 @@ static char fb_key_line[QCOM_USB_FB_WIDTH + 1u];
  * and when its own ENABLE bit is set. Everything after "HCS=" is read only when the required branches
  * are running, because a read of a gated UFS block can abort rather than return. */
 static char fb_ufs_line[QCOM_USB_FB_WIDTH + 1u];
-static uint32_t fb_ufs_run_mask, fb_ufs_en_mask, fb_ufs_hcs, fb_ufs_ver, fb_ufs_hce;
+static uint32_t fb_ufs_run_mask, fb_ufs_en_mask, fb_ufs_gd_mask, fb_ufs_hcs, fb_ufs_ver, fb_ufs_hce;
 static unsigned fb_ufs_sampled;
 static unsigned fb_setup_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
@@ -1523,13 +1523,22 @@ static void sample_phy_after_init(void)
  */
 static void sample_ufs_state(void)
 {
+    static const uint32_t gdscr[QUD_UFS_GDSCR_COUNT] = QUD_UFS_GDSCR_OFFSETS;
     static const uint32_t cbcr[QUD_UFS_CBCR_COUNT] = QUD_UFS_CBCR_OFFSETS;
     const uint32_t required = (1u << QUD_UFS_CBCR_REQUIRED) - 1u;
     char *p = fb_ufs_line;
     unsigned index;
     uint32_t value;
     if (fb_ufs_sampled || native.gcc_va == 0) return;
-    fb_ufs_run_mask = fb_ufs_en_mask = 0;
+    fb_ufs_run_mask = fb_ufs_en_mask = fb_ufs_gd_mask = 0;
+    for (index = 0; index < QUD_UFS_GDSCR_COUNT; ++index) {
+        uint32_t state = *(volatile uint32_t *)(uintptr_t)
+            (native.gcc_va + gdscr[index] + QUD_UFS_CFG_GDSCR_OFFSET);
+        uint32_t control = *(volatile uint32_t *)(uintptr_t)(native.gcc_va + gdscr[index]);
+        if (state & QUD_UFS_CFG_POWER_UP_BIT) fb_ufs_gd_mask |= 1u << index;
+        IOLog("QCOMUSB UFS gdscr %08x=%08x cfg=%08x up=%u\n", gdscr[index], control, state,
+              (state & QUD_UFS_CFG_POWER_UP_BIT) ? 1u : 0u);
+    }
     for (index = 0; index < QUD_UFS_CBCR_COUNT; ++index) {
         value = *(volatile uint32_t *)(uintptr_t)(native.gcc_va + cbcr[index]);
         if (!(value & (1u << QUD_UFS_CBCR_RUNNING))) fb_ufs_run_mask |= 1u << index;
@@ -1541,6 +1550,8 @@ static void sample_ufs_state(void)
     p = append_hex32n(p, fb_ufs_run_mask, 3u);
     p = append_text(p, " en=");
     p = append_hex32n(p, fb_ufs_en_mask, 3u);
+    p = append_text(p, " gd=");
+    p = append_hex32n(p, fb_ufs_gd_mask, 2u);
     if ((fb_ufs_run_mask & required) == required && native.ufs_va != 0) {
         volatile uint32_t *hc = (volatile uint32_t *)(uintptr_t)native.ufs_va;
         fb_ufs_ver = hc[QUD_UFS_HC_VER / 4u];

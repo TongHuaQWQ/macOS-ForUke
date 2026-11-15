@@ -115,6 +115,18 @@
 #define QUD_UFS_HC_VER    0x0008u
 #define QUD_UFS_HC_HCS    0x0030u
 #define QUD_UFS_HC_HCE    0x0034u
+/* The two UFS GDSCs, from the same live.dts node set as the USB one above:
+ *   gcc_ufs_phy_gdsc      qcom,gdsc@177004  reg <0x177004 0x04>  -> GCC-relative 0x77004
+ *   gcc_ufs_mem_phy_gdsc  qcom,gdsc@19e000  reg <0x19e000 0x04>  -> GCC-relative 0x9e000
+ * Both carry qcom,support-cfg-gdscr, so the power state is CFG_GDSCR.POWER_UP_COMPLETE BIT(16) at
+ * gdscr + 4 - the bit the USB GDSC comment above already relies on - and both carry
+ * qcom,proxy-consumer-enable, the same "vendor GCC probe opens it and holds it for the boot"
+ * arrangement the USB port was measured to have. Read only here. */
+#define QUD_UFS_GDSCR_COUNT 2u
+#define QUD_UFS_GDSCR_OFFSETS {0x77004u, 0x9e000u}
+#define QUD_UFS_CFG_GDSCR_OFFSET   0x4u
+#define QUD_UFS_CFG_POWER_UP_BIT   (1u << 16)
+
 #define QUD_UFS_CBCR_COUNT 9u
 #define QUD_UFS_CBCR_OFFSETS {0x77018u, 0x77024u, 0x77028u, 0x7702cu, 0x77068u, \
                               0x77074u, 0x770b0u, 0x770ccu, 0x770e4u}
