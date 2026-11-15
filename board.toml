@@ -40,10 +40,12 @@ boot_partition_bytes = 0x6000000
 [components]
 include = [
   "ArmDTPlatform", "ArmCpu", "ArmVirtPlatform",
-  # ShengUfs is deliberately absent: archive_plan() requires an archives entry for every selected
-  # kernel-stage component, and its arm64e recipe needs the profile's signed root policy. It returns
-  # together with the policy directory.
-  # ShengHidInput is absent for the same reason as ShengUfs: build-sheng-hid-input.py refuses any
+  # ShengUfs is back: the profile's signed root policy it needed exists now (scripts/policies/26C5035r),
+  # and its [kernel] archives entry below returns with it. archive_plan() requires that entry for every
+  # selected kernel-stage component, so the two lines move together.
+  "ShengUfs",
+  # ShengHidInput is absent for a different reason than ShengUfs ever was: build-sheng-hid-input.py
+  # refuses any
   # target except arm64 iOS 17 ("The original HID ABI builder only supports arm64 iOS 17"), and its
   # suggested replacement, build-sheng-source-drivers.py, is a compile audit whose output still needs
   # target-family linking. The menu counts down and boots without an input device, so a prelink round
@@ -118,6 +120,64 @@ windows = [
   # image that lacks it; on this image it is present and will be included.
   { name = "App", component = "Cryptex1,AppOS" },
 ]
+# Data objects (SHNGROOT version 2, block_size 4096, flags 3): the kernel reads them itself and never
+# publishes them as block devices. These are the block hash tables of the three root policies in [root],
+# 130 MiB together, which cannot ride in the 96 MiB boot image. NativeUfs opens each as "<window>.vroot"
+# and checks it against that window's signed 544-byte header.
+#
+# They live in THIS repository under scripts/policies/26C5035r/<NAME>/hashes.bin, and only the tables are
+# untracked: build-sheng-source-storage.py says the signed headers ship in the checkout while "the full
+# block tables stay a local input of the userdata image". So the three *headers*, three anchors and three
+# verification records (4,349 B) are added with `git add -f` because .gitignore drops *.bin, while the
+# tables stay local and are produced once by scripts/make-root-policies.py on macOS:
+#   TREE/build/verified-root-<NAME>/hashes.bin   the table     -> this directory
+#   TREE/scripts/policies/<build>/<NAME>/        header, anchor, verification record
+# {tree} below is the build tree, and scripts/unixnu/tree.py merges this repository's scripts/ into it
+# (tree.py:85-92), which is how the staged tree finds these files. A CI kernel build needs only the
+# 4,349 B of headers; a local `unixnu userdata` additionally needs the tables, or it stops with MISSING.
+# scripts/unixnu/test_userdata.py covers the declaration, the 1 MiB placement and the refusals.
+objects = [
+  { name = "OS.vroot", path = "{tree}/scripts/policies/26C5035r/OS/hashes.bin" },
+  { name = "SystemOS.vroot", path = "{tree}/scripts/policies/26C5035r/SystemOS/hashes.bin" },
+  { name = "App.vroot", path = "{tree}/scripts/policies/26C5035r/App/hashes.bin" },
+]
+
+[root]
+# The signed root windows: the APFS volume UUIDs and image digests the owner-root path binds, and the
+# inputs of scripts/make-root-policies.py. They belong in the board, not in profiles/os/macos-27.3-uke:
+# scripts/unixnu/kernel.py:58 reads ctx.board['root'] (never the OS profile) and maps these six keys to
+# XNU_OWNER_ROOT_VOLUME_UUID / _CACHE_VOLUME_UUID / _APP_VOLUME_UUID and UNIXNU_ROOT_*_SHA256, and
+# build-xnu-4k-baseline.sh:489 hard-fails CONFIG_XNU_OWNER_BOOT_MANIFEST without the root volume UUID.
+#
+# The values are properties of Apple's signed 26C5035r disk images rather than of this board, so they are
+# taken verbatim from upstream profiles/os/macos-27.3-26C5035r/profile.toml [root] — and every one of the
+# three digests is confirmed against the image actually on disk in out/ipsw/26C5035r/:
+#   OS        141-22233-021.dmg  14,493,417,472 B  -> the upstream os_image_sha256
+#   SystemOS  141-22145-021.dmg   2,917,138,432 B  -> the upstream systemos_image_sha256
+#   App       141-22106-021.dmg      54,525,952 B  -> the upstream app_image_sha256
+# (all three after AEA decryption, per their .dmg.json records). Same images, same signatures: the policies
+# this board signs describe exactly the volumes it installs.
+# The Data volume UUID is the exception — it is this port's own seed, and it lives in the defconfig as
+# CONFIG_XNU_OWNER_DATA_VOLUME_UUID (BB2462E2-...), see [payload.runtime] below.
+os_volume_uuid = "84581E99-85BE-4957-AC53-2947E887B3E4"
+os_image_sha256 = "40d8282eb8650da9b4d7437a981764c48d47ee4bdc5b8b362248f25ecbce0e70"
+systemos_volume_uuid = "6678E466-2F88-4C56-9408-DC7361BAA0BA"
+systemos_image_sha256 = "14330ed990fe7022114b10718f4defe3049d49b6e5d52fd3ac71a487541cd1f3"
+app_volume_uuid = "F2AEA010-C8EB-4AF8-92A9-4B90781CD668"
+app_image_sha256 = "797bb1e07e354e80e75d3be2658d8f586b343dbdc05cb93cb880e772ab0d23d1"
+# The signed block hash tables do NOT fit in the boot image on this unit, so they travel in the userdata
+# image instead and the kernel bundle carries only the 544-byte signed header of each policy. Measured,
+# not estimated: 32 bytes per 4096-byte block over the actual images
+#   OS        3,538,432 blocks -> 113,229,824 B (108.0 MiB)
+#   SystemOS    712,192 blocks ->  22,790,144 B ( 21.7 MiB)
+#   App          13,312 blocks ->     425,984 B (  0.4 MiB)
+# against boot_partition_bytes = 0x6000000 (96 MiB) for boot and vendor_boot alike, with the payload
+# already at 80 MiB. The OS table alone is larger than the whole partition. This is what makes
+# [userdata] objects below mandatory rather than optional: kernel.py maps this key to
+# XNU_SOURCE_STORAGE_TABLES=userdata, build-sheng-source-storage.py then emits header-only bundles, and
+# NativeUfs reads "<window>.vroot" from the root image (build-sheng-source-storage.py: "NativeUfs reads
+# <window>.vroot from the root image and vr_open checks it against the header").
+tables_in_userdata = true
 
 [payload.runtime]
 # SHAPE copied from the reference sheng board (work/ref-sheng/board.toml [payload.runtime]).
@@ -186,22 +246,22 @@ archives = [
   # extent emit_prelink.py plans for com.apple.iokit.IOCryptoAcceleratorFamily), not a re-pinned
   # address set.
   "prepare-storage-headers.py",
-  # WITHOUT the two UFS entries — component:ShengUfs and build-arm-driver.py NativeUfs --unverified —
-  # for the prelink round. On arm64e the component delegates to build-sheng-source-storage.py, which
-  # authenticates every read against the OS profile's signed root policy and has none for 25F84; the
-  # classic driver it falls back to was written against the iPadOS 17 IOStorageFamily headers and does
-  # not compile against the 26-train headers prepare-storage-headers.py prepares. Neither belongs to
-  # this round: the point here is whether the collection's own kexts load. Dropping them cannot break
-  # the link — the 12377 series mentions NativeUfs only as a device-tree IOClass string — and the
-  # payload is built with native-ufs-root=0 so nothing dereferences the missing driver.
-  # Storage returns with the source runtime and a policy directory derived from the system volumes.
-  # "component:ShengUfs",
-  # "build-arm-driver.py NativeUfs --unverified",
+  # Storage is back (2026-11-15): the policy directory it was waiting for now exists
+  # (scripts/policies/26C5035r, signed on the x86 Mac from this board's own images), so on arm64e the
+  # component takes its authenticated branch — build-sheng-source-storage.py with header-only bundles,
+  # the tables arriving as the [userdata] objects "<window>.vroot". This is the only UFS entry that
+  # returns: build-arm-driver.py NativeUfs --unverified stays out, because that classic driver was
+  # written against the iPadOS 17 IOStorageFamily headers and does not compile against the 26-train
+  # headers prepare-storage-headers.py prepares. configs/uke-macos_defconfig therefore sets
+  # CONFIG_XNU_NATIVE_UFS and, for the same round, native-ufs-root=1 in kernel_args finally points at a
+  # driver that is in the kernel.
+  "component:ShengUfs",
+  # WITHOUT build-arm-driver.py NativeUfs --unverified: the classic driver above, superseded.
   # WITHOUT build-ufs-original-bindings.py: it binds IOBlockStorageDevice from a *prelinked* candidate
   # and insists the plan's original_sha256 equals kernelcache.release.ipad7 (f18b4df8… in the script),
   # so on this port it fails twice over — the provenance is the iPadOS 17 image, and the candidate this
   # workflow stages comes from a --skip-prelink build whose JSON carries no prelink plan at all.
-  # Entry above already asks for the unverified bindings, which is what this port uses.
+  # The source runtime carries its own bindings; nothing here asks for the unverified ones any more.
   "component:RamBlock",
   "component:VirtioMmioBlock",
   "component:VirtioMmioConsole",

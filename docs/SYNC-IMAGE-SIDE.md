@@ -108,3 +108,80 @@ CONFIG_XNU_OWNER_DATA_MOUNT / OWNER_UNION_SYSTEMOS / BOOT_PROGRESS
 
 `-uketextconsole` 我**没有**重新加回去 —— `board.toml:550` 是你为 b226 主动注释掉的
 （"PARKED for the b226-card round"）。当前 kernel_args **50 条 / 966 字节**，余量 34 字节。
+
+# 追加（2026-11-15 晚：照片里那行 `IOCPUInterruptController: not registry member` 查清了，我改了 ArmCpu）
+
+## 一、照片确认的进展（不用你做什么）
+
+- `ArmCpu: armcpu-probe=0, continuing to registerService` —— 删掉 `armcpu-probe=1` 生效了，不再故意 panic。
+- `cpu_start (cpu 0..7)` 八条都在 —— **8 个核全起来了**，从核路径没问题。
+- 之后走到 BSD init：AMFI/Sandbox/Quarantine 策略加载、`MFC framework successfully initialized`、
+  `using 16384 buffer headers and 16384 cluster IO buffers`。
+- `AppleAPFSContainerScheme: Error: Failed to initialize/load the APFS container` —— **预期内**，
+  就是上面第四节那条（owner-root 四个 CONFIG 全关 + `[payload.runtime] enabled = false`，盘上根本没有那个容器）。
+
+## 二、`not registry member at registerService()` 不是噪音，是我们自己的 bug（已改）
+
+字符串原文是 **`%s: not registry member at registerService()`**（`iokit/Kernel/IOService.cpp:1060`，
+不是 "not registered member"）。链路：
+
+1. `IOCPUInterruptController::registerCPUInterruptController()`（`IOCPU.cpp:637`）第一件事是
+   `setProperty(gPlatformInterruptControllerName)` 然后 `registerService()`。
+2. `IOService::registerService()`（`IOService.cpp:1053-1062`）先沿 `gIOServicePlane` 往上找
+   registry root；`ArmCpu.cpp` 里这个 controller 是 `new` 出来的，**从没 `attach()` 过**，
+   所以 `parent != root` → 打那行日志 **然后直接 return**，`setProperty` 落在一个永远不会被发布的孤儿对象上。
+3. 想要它的消费者是 `IOPlatformExpert::setCPUInterruptProperties()`（`IOPlatformExpert.cpp:472-478`）：
+   `serviceMatching("IOInterruptController") + propertyMatching(gPlatformInterruptControllerName, true)`
+   —— 在服务平面上按属性找，找不到就什么都配不上。
+
+不致命（后面那句 `getPlatform()->registerInterruptController(name, this)` 照常执行，
+`lookUpInterruptController()` 走的是那张表，所以中断和 8 核启动都不受影响），但属性永远发不出去。
+
+**改动**：`drivers/ArmCpu/ArmCpu.cpp:501-514`，在 `registerCPUInterruptController()` 之前加
+`controller->attach (this)`（失败的路径只 `kprintf` 不 panic，避免为一条诊断再赔一轮刷机）。
+写法照 `ArmDTPlatform.cpp:154` 现成的 `attach → registerService` 顺序。
+
+**我没有推 CI**：`ci-b225-phyinit` 上有你的 #239/#240 在跑，单 macOS runner，我这行等你合并后再推，
+或者你直接拷过去。**本地没编过**（`build-arm-driver.py` 要在已准备的内核树里跑，这台机器没有那棵树），
+只按签名核对过：`IOService::attach(IOService*)` 是 public（`IOService.h:1210`），`kprintf` 在本文件已在用。
+
+## 三、下次启动省掉拍照的判据
+
+`ArmCpu: 0 timer interrupts, 0 IPIs in the first 10 ms after registration` 这条**先别当故障**：
+它是注册后 10 ms 的窗口，那时候还没有人 arm 到期时间，0/0 是可能的。真正有信息量的是
+`PREVIOUS XNU LOG (pram=… size=… valid=?)`（`pexpert/arm/pe_init.c` 的 `pe_print_last_panic`）：
+只要 `valid=1` 且后面跟着文本，pram 通道就通了，以后日志不用拍照，直接读上一次的内容。
+
+# 追加（2026-11-15 深夜：`AppleAPFSContainerScheme` 的根因不是配置开关，是没存储驱动；存储轮已就位）
+
+## 一、根因（你要知道，因为它改变内核轮的性质）
+
+`configs/uke-macos_defconfig` 原来 `CONFIG_XNU_NATIVE_UFS is not set` —— macos 轨的内核**根本没有块驱动**，
+payload 也是按 `native-ufs-root=0` 造的。没有介质就没有 APFS 容器，所以面板上那条
+`AppleAPFSContainerScheme: Failed to initialize/load the APFS container` 是必然结果，翻 `OWNER_*` 开关没用。
+
+而 board 里写着无策略时的经典回落「does not compile against the 26-train headers」，所以也不是翻个开关的事。
+
+## 二、我改了什么（都会进你的下一轮 CI）
+
+1. **`[components] include` 加回 `ShengUfs`，`[kernel] archives` 加回 `component:ShengUfs`**（两条必须同时存在，
+   `archive_plan()` 要求）。`build-arm-driver.py NativeUfs --unverified` 那条**没有**加回 —— 它才是编不过的那个。
+2. **`configs/uke-macos_defconfig`**：`NATIVE_UFS=y`、`BRINGUP_OWNER_CACHE=y`（和 `uke-userland_defconfig` 同一套逃生阀）、
+   `OWNER_CACHE_MOUNT/CACHE_STARTUP/UNION_SYSTEMOS=y`；`OWNER_DATA_MOUNT`/`BOOT_MANIFEST`/`VERIFIED_ROOT_PROBE`/
+   `ROOT_TRUST` 仍关（Data seed 还没装，trust 是下一个里程碑）。
+3. **`board.toml [root]`**：三个卷 UUID + 三个镜像 sha256，取自上游同镜像 profile 并与盘上解密 DMG 逐字节核对。
+4. **`scripts/policies/26C5035r/`**（新目录）：三个窗口的 544 B 签名头 + 395 B anchor + verification.json 共 **4,349 B**
+   （`git add -f` 加的，因为 `.gitignore` 有 `*.bin`）。**块表 `hashes.bin`（130 MiB）是本机输入、不入库** ——
+   `build-sheng-source-storage.py:81-82` 明说「the full block tables stay a local input of the userdata image」。
+   **CI 只需要那 4,349 B**；本地 `unixnu userdata` 才需要表，缺了会打印 MISSING。
+5. **UniXNU 侧两处框架改动**（如果你也拉 UniXNU）：`scripts/unixnu/userdata.py` 新增 `[userdata] objects`
+   板级声明（表以 `<window>.vroot` 送进 partition 2，块表放不进 96 MiB 的 vendor_boot），
+   `scripts/unixnu/kernel.py` 把 `[root] tables_in_userdata` 映射成 `XNU_SOURCE_STORAGE_TABLES=userdata`。
+   单测 `scripts/unixnu/test_userdata.py`（10 个）+ `check-unixnu.py` 全过。
+
+内核轮现在会真的编存储档案，所以**如果编译失败，先看 `component:ShengUfs` 那一步的日志**，不要怀疑你的 USB/PHY 改动。
+
+## 三、我没动的
+
+`package/qcom-usb-debug`、固件、`kernel_args`（`native-ufs-root=1` / `native-ufs-allow-unverified=1` 本来就在）。
+CI 我**没有推**，等你 #239/#240 跑完。

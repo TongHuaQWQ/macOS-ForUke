@@ -498,6 +498,19 @@ bool ArmCpu::start (IOService *provider)
   if ((controller == nullptr) || (controller->initCPUInterruptController (cpuCount, 1) != kIOReturnSuccess)) {
     panic ("ArmCpu: CPU interrupt controller allocation failed");
   }
+  //
+  // registerCPUInterruptController() sets the IOPlatformInterruptController property and then calls
+  // registerService() before handing the controller to getPlatform()->registerInterruptController(). That
+  // first call publishes nothing unless the object is already on the service plane: IOService::registerService
+  // walks up gIOServicePlane, and a controller that was only constructed with new is not a registry member, so
+  // it logs "not registry member at registerService()" and returns before setProperty/registerService do any
+  // publishing. Attach it to this CPU nub so the property lands on a published object and service matching can
+  // find it (IOPlatformExpert::setCPUInterruptProperties matches on that property). Neither failure is fatal:
+  // the registerInterruptController() call after it is what lookUpInterruptController() uses, so this keeps the
+  // CPU path running if the attach is refused.
+  if (!controller->attach (this)) {
+    kprintf ("ArmCpu: IOCPUInterruptController attach failed; its IOPlatformInterruptController property stays unpublished\n");
+  }
   controller->registerCPUInterruptController ();
   controller->enableCPUInterrupt (this);
   if (controller->registerInterrupt (provider, logicalId, this, &ArmCpu::dispatch, nullptr) != kIOReturnSuccess) {
