@@ -247,6 +247,12 @@ archives = [
   # libQcomXnuUsbDebug.a (package/qcom-usb-debug), built against this tree's own compile records with
   # soc/Uke.h. The kernel links it when CONFIG_XNU_QCOM_USB_DEBUG is on, which it now is.
   "build-qcom-usb-debug.py",
+  # libQcomDwc3.a (drivers/QcomDwc3 + package/UsbProbe.cpp): the official route. The script generates the
+  # two base classes from scripts/usb-{xdci,xhci}-26C5035r.json, compiles the driver against them, reads the
+  # compiled vtables back entry by entry to prove each one authenticates with the original slot's
+  # diversity, and emits the branch stubs that bind them to the prelinked collection's own code.
+  # configs/uke-macos_defconfig force-loads the archive; `usb=1` decides at boot whether it runs.
+  "build-qcom-dwc3.py",
   # libUkeUfsLog.a (package/UfsLog.cpp + package/UfsLogKernel.c): the freestanding UFS transport that
   # gives UkeLastLog.c's userdata half its native_ufs_log_* symbols without CONFIG_XNU_NATIVE_UFS.
   # configs/uke-macos_defconfig force-loads it through CONFIG_XNU_EXTRA_LD_ARCHIVES, so a configuration
@@ -403,6 +409,31 @@ roots = [
   "com.apple.security.sandbox",
   "com.apple.iokit.IOHIDFamily",
   "com.apple.iokit.IOHIDEventDriver",
+  # The USB stack, for drivers/QcomDwc3 (the official route). Everything above is what the 25F84/26C5035r
+  # port needed before there was a controller; these eleven are the device stack, the host stack and the
+  # storage chain they pull in, copied from the sheng board, which runs this driver on the same generation
+  # of Apple USB code (UniXNU-sheng board.toml [kernel.prelink] roots).
+  #
+  # Why each one is named rather than left to be pulled in: the prelink walks *dependencies of the roots*,
+  # and these eleven are what makes the closure contain the USB kexts at all -- QcomDwc3Xdci derives from
+  # AppleUSBXDCI, whose kext has no personality, so nothing else would ever load it.
+  #
+  # The two `!` entries exclude rather than add. AppleUSBXHCI's metaclass comparison reaches
+  # AppleOnboardSerial and AppleSMC, neither of which can exist on a Snapdragon; excluding them keeps a
+  # match from silently binding a serial or SMC personality to our controller's name.
+  "com.apple.iokit.IOUSBDeviceFamily",
+  "com.apple.driver.AppleUSBXDCI",
+  "com.apple.driver.AppleUSBDeviceMux",
+  "com.apple.iokit.IOUSBHostFamily",
+  "com.apple.driver.usb.AppleUSBXHCI",
+  "com.apple.driver.usb.AppleUSBHub",
+  "com.apple.driver.usb.AppleUSBHostCompositeDevice",
+  "com.apple.driver.usb.IOUSBHostHIDDevice",
+  "com.apple.iokit.IOUSBMassStorageDriver",
+  "com.apple.iokit.IOSCSIArchitectureModelFamily",
+  "com.apple.iokit.IOSCSIBlockCommandsDevice",
+  "!com.apple.driver.AppleOnboardSerial",
+  "!com.apple.driver.AppleSMC",
 ]
 
 [firmware]
@@ -670,7 +701,24 @@ kernel_args = [
   # The OneSend card stays off (it now needs qcom-usb-qr=1), so the panel keeps the plain kernel text.
   # If the kernel hangs in USB init instead of reaching kext loading, set this back to 0: that is one
   # payload rebuild, not a CI round, and it restores the previous boot exactly.
-  "qcom-usb-debug=1",
+  # OFF for the official-route round, and this is the one variable changed. The CDC-ACM probe
+  # (package/qcom-usb-debug) and drivers/QcomDwc3 both drive the same controller: the probe programs
+  # DEVCTRL/DEVCTRLHLT and arms ep0 its own way, so leaving it on would fight the official sequence for
+  # the core reset. It stays force-loaded (CONFIG_XNU_QCOM_USB_DEBUG) because its switches are what the
+  # previous rounds read, so turning it back on is this one line, not a rebuild of the archive.
+  # "qcom-usb-debug=1",
+  # The official route (drivers/QcomDwc3, package/UsbProbe.cpp): uke_usb_probe() runs only when this is
+  # set, waits 3 s for the boot to settle, brings the controller up (nine stages, recorded in
+  # native_usb_stats[0], negative = the stage that failed), loads AppleUSBXDCI and AppleUSBXHCI, then
+  # publishes the two subclasses. 2 adds register sampling, 3 also takes the controller off the bus and
+  # back once. UsbProbe.cpp prints the stage table to the console after bring-up, so no log-sys is
+  # needed: package/BootLog.c, which owns the log-sys group, is not part of this port.
+  "usb=1",
+  # Text on the panel again, and it is the other deliberate change of this round. The USB bring-up's
+  # evidence is its own console lines (qcom-dwc3: and the UKE usb: stage table), which the graphics
+  # console does not draw; the diagnostic card that made that trade acceptable is off in this round
+  # (qcom-usb-debug=1 above). Costs 16 bytes of the 1000-byte command line.
+  "-uketextconsole",
   # b206's firmware log (Advanced Logger export, 2026-11-14 01:45) settled the hand-off question the
   # other way round from what b204 suggested: the USB30 GDSC was powered all along (UkeProgressDxe at
   # 00:00:07.443 already printed gdsc_powered=1 usb_clocks_running=3/3, and the DWC3 answers with

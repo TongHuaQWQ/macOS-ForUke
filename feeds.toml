@@ -49,6 +49,19 @@ name = "ShengNovatekTouch"
 kind = "driver"
 local = "drivers/NativeNovatekTouch"
 
+# The official USB controller, as this board's copy. The catalog entry (UniXNU/QcomDwc3, "Qualcomm DWC3 USB
+# device and host controller for Apple's native stacks") is verified on sheng, an SM8550 board; this copy is
+# the same driver with the board's own constants -- the DWC3 wrapper, TCSR, RPMh-RSC and the USB SPI are
+# cliffs addresses (work/analysis/NOW.md records each one against live.dts), not sheng's.
+#
+# `local` and not a `git` pin, for the first-wins reason ArmCpu above explains; this one is not a submodule
+# of the core, but the same override has to hold when the catalog starts pinning a revision we do not match.
+# scripts/build-qcom-dwc3.py compiles it; the tree only needs the sources materialised at drivers/QcomDwc3.
+[[source]]
+name = "QcomDwc3"
+kind = "driver"
+local = "drivers/QcomDwc3"
+
 # The instrumented ArmCpu. prepareGic() fails silently by design, so on a board where the timer never ticks
 # there is no way to tell "the driver never matched" from "mapGic/initDistributor/wakeRedistributor returned
 # false". This copy reports each step and prints IGROUPR0/ISENABLER0 for PPI 27 once the GIC is up.

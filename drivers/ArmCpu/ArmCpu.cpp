@@ -962,3 +962,19 @@ extern "C" uint64_t armcpu_spi_count (uint32_t intid)
   }
   return 0;
 }
+
+// Enable or disable one SPI's delivery without detaching it. attach() above arms an interrupt for good and the USB controller
+// needs the other shape: it shares the INTID with the event poller and masks it around every control-transfer window, so the
+// handler stays registered and only the distributor's enable bit moves. masked == true gates the line (ICENABLER), false re-arms
+// it (ISENABLER); both are ignored by the distributor while the ID is disabled, so a mask before attach() is harmless.
+extern "C" int armcpu_spi_mask (uint32_t intid, bool masked)
+{
+  uint32_t word, bit;
+  if (gDist == 0 || armcpu_gic_ready == 0) { return kIOReturnNotReady; }
+  if (intid < 32 || intid >= 1020) { return kIOReturnBadArgument; }
+  word = (intid / 32) * 4;
+  bit = 1U << (intid % 32);
+  write32 (gDist, (masked ? 0x180u : 0x100u) + word, bit);
+  __asm__ volatile ("dsb sy" ::: "memory");
+  return kIOReturnSuccess;
+}

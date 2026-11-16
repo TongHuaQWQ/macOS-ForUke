@@ -170,6 +170,12 @@ CONFIG_XNU_QCOM_USB_DEBUG=y
 # Force-loaded straight into the kernel link (build-xnu-4k-baseline.sh appends XNU_EXTRA_LD_ARCHIVES
 # verbatim, so the -force_load comes from here). {tree} is the build tree, which is also what the
 # script's $ROOT is -- the same substitution uke-full-plus_defconfig's two *_ARCHIVE keys use.
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a"
+#
+# The second archive is the official USB route (drivers/QcomDwc3, scripts/build-qcom-dwc3.py). It is
+# force-loaded rather than pulled in by a reference because nothing in the kernel links against it: the
+# classes register themselves after bring-up, and the one call site (package/LegacyDisplayProbe.cpp)
+# imports uke_usb_probe as weak_import so a build without the archive still links. Whether the driver
+# runs is decided at boot by `usb=1`, not by the link.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a -Wl,-force_load,{tree}/build/qcom-dwc3/libQcomDwc3.a"
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n

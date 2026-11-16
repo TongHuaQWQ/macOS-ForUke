@@ -657,6 +657,12 @@ extern void native_qemu_metal_publish(void);
 extern void sheng_cpufreq_probe(void);
 extern void sheng_gpu_power_probe(void);
 extern void native_touch_probe(void);
+// The official USB route (package/UsbProbe.cpp + drivers/QcomDwc3): a worker thread that waits 3 s, brings the
+// controller up and then loads and registers Apple's own USB classes. weak_import so a build without
+// build/qcom-dwc3/libQcomDwc3.a still links; whether it does anything is the usb=1 boot argument's decision,
+// taken inside uke_usb_probe() itself. Called after the input probes for the same reason sheng calls its
+// usb probe last among the drivers: the bring-up reprograms the apps-SMMU and must not race them.
+extern void uke_usb_probe(void) __attribute__((weak_import));
 // The DPU track's read-only snapshot and controlled-pipe test (package/DpuProbe.cpp):
 // a thread that waits for the firmware's scanout and then reads or (only with
 // uke-dpu-test=<n>) briefly writes the live pipes. Default off.
@@ -752,6 +758,7 @@ void native_legacy_display_late_probe(void) {
     native_dpu_probe();
     native_touch_probe();
     native_hid_input_probe();
+    if (uke_usb_probe) uke_usb_probe();
     native_virtio_input_probe();
     native_shared_window_probe();
     native_qemu_metal_publish();
