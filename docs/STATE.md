@@ -5741,3 +5741,38 @@ The last error is mine: `-x` applies to the inputs that *follow* it, and I appen
 the source, so clang compiled `.text` as C. The language is now forced in front of the source and the
 record's own `-x` pair is dropped (it describes the unit the record was taken from, not ours); the `.S`
 units compile as `assembler-with-cpp`, which is what a `.S` suffix means.
+
+### 95j. Third CI round: the archive built, the link missed every inherited slot
+
+Run `43892185873` on `e61fec4` is the round that proved the archive: all seven units compiled as the right
+language, the vtables verified against the fixtures, and the step printed
+
+```
+QcomDwc3: 263 original bindings, 7 objects, 568736 bytes, sha d7368fc40d745d21
+```
+
+Then the kernel link failed on exactly the symbols the stubs were supposed to answer:
+
+```
+Undefined symbols for architecture arm64e.kernel:
+  "AppleUSBXDCI::setPowerState(unsigned long, IOService*)", referenced from:
+      vtable for QcomDwc3Xdci in libQcomDwc3.a[2](QcomDwc3.late.o)
+  "AppleUSBXDCI::free()" … "AppleUSBXHCI::handleIsOpen(IOService const*) const" …
+```
+
+Cause: I had kept only the *diversity* lookup for the stubs. It resolves a name by hashing it, and it works
+for the slots the fixture names — but when the native class leaves a slot to the base implementation, clang
+names that entry after the base class **we declared** (`AppleUSBXDCI::free`), while the original slot's
+diversity belongs to whoever introduced the method (`IOUSBDeviceController` in this collection). Those names
+never hash to a slot, so 21 of them were silently skipped. Upstream's builder binds them by *vtable
+position*, which cannot miss: `for slot, (name, _) in enumerate(entries): if name in imports: bind(slot)`.
+That pass is restored as the primary one, with the diversity lookup kept for a direct call that never
+passes through a slot.
+
+The round also gained the check that would have failed the build instead of the link: after the bindings
+are built, every import naming `AppleUSBXDCI`/`AppleUSBXHCI` must have one, or the script stops with the
+list. `bindings: N (M original-class imports, all covered)` is printed either way.
+
+One thing to keep an eye on when the hardware speaks: these inherited slots are bound to the *original*
+implementation's address (fixture slot + collection slide), which is what the reference board does. If the
+device faults on the first `free`/`init`, that binding is the first suspect.

@@ -569,9 +569,23 @@ def main():
         for name, va in data['bindings'].items():
             bindings[name] = int(va, 16) + slide
         mangled = f'{len(original_class)}{original_class}'
+        imported = {name for name, _va, kind in found if kind == 1}
+        # The vtable is the authority on which slot an import belongs to: when this class leaves a slot to
+        # the base implementation, clang names that entry after the *base class we declared*, e.g.
+        # AppleUSBXDCI::setPowerState, while the original slot's diversity belongs to whatever introduced
+        # the method (IOUSBDeviceController in this collection). A diversity lookup alone therefore misses
+        # every inherited slot and the kernel link fails with exactly those names undefined -- which is what
+        # run 43892185873 reported. Reading the slot index off the compiled vtable cannot miss them.
+        for slot, (name, _word) in enumerate(entries_of):
+            if name in imported and mangled in name:
+                address = slots[slot][0] + slide
+                if bindings.setdefault(name, address) != address:
+                    raise SystemExit(f'{name}: one original address per symbol')
+        # Anything the vtables do not name is bound by its own diversity, which covers a direct call such as
+        # AppleUSBXHCI::someMethod() that never passes through a slot.
         by_diversity = {d: i for i, (_, d) in enumerate(slots)}
-        for name, _word, kind in found:
-            if kind != 1 or mangled not in name:
+        for name in imported:
+            if mangled not in name or name in bindings:
                 continue
             slot = by_diversity.get(discriminator(name[1:]))
             if slot is None:
@@ -579,6 +593,15 @@ def main():
             address = slots[slot][0] + slide
             if bindings.setdefault(name, address) != address:
                 raise SystemExit(f'{name}: one original address per symbol')
+    # Nothing may reach the kernel link still undefined: the archive's own imports of the two original
+    # classes are exactly what the stubs above exist to answer, and a missed one is a link failure twenty
+    # minutes later instead of a build failure here (run 43892185873 lost a round to that).
+    original_imports = {name for name in imported if '12AppleUSBXDCI' in name or '12AppleUSBXHCI' in name}
+    uncovered = sorted(original_imports - set(bindings))
+    if uncovered:
+        raise SystemExit('original-class imports with no binding (the kernel link would fail):\n  '
+                         + '\n  '.join(uncovered[:20]))
+    print(f'bindings: {len(bindings)} ({len(original_imports)} original-class imports, all covered)')
     # Names reached as data (a metaclass pointer, the vtable itself): absolute, no stub.
     data_only = {'__ZN12AppleUSBXDCI10gMetaClassE', '__ZTV12AppleUSBXDCI',
                  '__ZN12AppleUSBXHCI10gMetaClassE', '__ZTV12AppleUSBXHCI'}
