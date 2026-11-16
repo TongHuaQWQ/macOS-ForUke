@@ -5658,3 +5658,33 @@ Then the two questions this round is meant to answer:
    is the target of this round; SuperSpeed is not.
 4. **QMP/USB3 and the retimer were not re-derived** for cliffs; `native_usb_stats[32..34]` reports what
    they did, which is why they are in the log line.
+
+### 95g. The `!` prelink roots needed a kit port
+
+`board.toml` writes two roots as `!com.apple.driver.AppleOnboardSerial` and `!com.apple.driver.AppleSMC`,
+the way the sheng board does. This board's `kits/XnuPrelink` copy predates that convention and did not
+parse it: `dependency_closure()` fed every root straight into the bundle-id lookup, so a `!` root would
+have died with `Missing prelink dependency: !com.apple.driver.AppleOnboardSerial` about twenty-five
+minutes into the round.
+
+Upstream `XnuPrelink`'s `fileset_emit.py` has the two hunks that handle it, and both are now ported into
+the board copy (they are inert without a `!` root, so nothing else changes):
+
+- `dependency_closure()`: an excluded bundle is never added to the closure, even when a retained kext
+  lists it in `OSBundleLibraries`.
+- `rebase_collection()`: that library entry is deleted from the retained kext's own list, so the
+  collection does not carry a library slot nothing fills.
+
+Measured on the 26C5035r kernelcache (the fixtures' `d1003b51…`), which is also the prelink budget
+number for §95f risk 1:
+
+| roots | closure |
+|---|---|
+| the 31 pre-USB roots | 41 kexts |
+| + 11 USB roots, no exclusions | 68 kexts |
+| + 11 USB roots and the two `!` exclusions | **58 kexts** |
+
+The exclusions drop exactly `AppleOnboardSerial` and `AppleSMC` (and the eight kexts that came in only
+for them: A7IOP, ARMPMU, EmbeddedTempSensor, IOSlaveProcessor, RTBuddy, mDNSOffloadUserClient,
+IOSkywalkFamily, IONetworkingFamily). The kit's own suite still passes: `pytest -q` in `kits/XnuPrelink`
+→ 70 passed.
