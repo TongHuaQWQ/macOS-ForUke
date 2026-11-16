@@ -5688,3 +5688,33 @@ The exclusions drop exactly `AppleOnboardSerial` and `AppleSMC` (and the eight k
 for them: A7IOP, ARMPMU, EmbeddedTempSensor, IOSlaveProcessor, RTBuddy, mDNSOffloadUserClient,
 IOSkywalkFamily, IONetworkingFamily). The kit's own suite still passes: `pytest -q` in `kits/XnuPrelink`
 → 70 passed.
+
+### 95h. First CI round: the archive step reached the compile, and bitcode stopped it
+
+Run `43885411003` on `d33172b` failed in `archive-18-build-qcom-dwc3`, six log lines:
+
+```
+driver: …/UniXNU-uke/drivers/QcomDwc3        <- the UNIXNU_DEVICE fallback, as designed (the tree does
+kits:   …/tree/kits/uke                          not link an unselected driver)
+usb-xdci-26C5035r.json: 384 slots … 112 names re-derive their diversity
+usb-xhci-26C5035r.json: 427 slots … 155 names re-derive their diversity
+kernelcache d1003b51…, collection slide 0x1f000000000
+not an arm64 Mach-O object
+```
+
+So the generation half worked on the runner — both fixtures, the SipHash check on all 267 names — and the
+five units **compiled clean** (no compile diagnostics in the log). The failure is at the read-back:
+`CONFIG_XNU_BUILD_LTO=y` means the compile records are LTO units, so the same command line emitted an
+LLVM bitcode wrapper (magic `0x0b17c0de`) instead of a Mach-O object, and `macho()` said so in the least
+useful possible words.
+
+The fix is in the script, not the board: `-flto`/`-emit-llvm`/`-fembed-bitcode*` are dropped from the
+record (every archive force-loaded into this link is native — the UFS log, the CDC-ACM probe, the
+component archives — so native is the shape that links), the drop is printed per unit, and
+`read_object()` now names the magic it found: a bitcode wrapper, a wrong magic, or a truncated file each
+get their own message.
+
+Two things this round bought even while failing: the device-checkout fallback for `drivers/QcomDwc3`
+works (`module()`'s second candidate), and the compile of `package/QcomDwc3Platform.c` through an
+`osfmk` record is confirmed — the bsd-record question from the previous commit never had to be tested on
+the runner.

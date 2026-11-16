@@ -275,6 +275,16 @@ XHCI_OVERRIDES = ('bool start(IOService *) override;\n'
 # Mach-O: the compiled vtable, which is the only place the diversities can be read
 # ---------------------------------------------------------------------------------------------------
 
+# Flags that make clang emit an LLVM bitcode wrapper instead of an object. CONFIG_XNU_BUILD_LTO=y makes the
+# compile records carry them, and the archive this script produces is native on purpose: it is force-loaded
+# into the same link as the UFS log and the component archives, which are native too.
+BITCODE_FLAGS = ('-flto', '-emit-llvm', '-fembed-bitcode', '-fembed-bitcode-marker')
+
+
+def is_bitcode_flag(value):
+    return value in BITCODE_FLAGS or value.startswith(('-flto=', '-fembed-bitcode'))
+
+
 def macho(data):
     """Load commands, segments and sections of an arm64e relocatable object."""
     magic, cpu, _, _, count = struct.unpack_from('<5I', data)
@@ -369,17 +379,19 @@ def load_record(candidates, what):
 def compile_unit(source, record_name, obj, extra, language=None):
     """The record's own command line with our source, our -o and the flags this port needs."""
     record = json.loads((ROOT / record_name).read_text().strip().rstrip(','))
-    arguments, command, index = record['arguments'], [], 0
-    while index < len(arguments):
-        value = arguments[index]
+    argument_list, command, index, dropped = record['arguments'], [], 0, []
+    while index < len(argument_list):
+        value = argument_list[index]
         if value == record['file']:
             command.append(str(source))
         elif value in ('-o', '-MF', '-MT', '-MJ'):
             if value == '-o':
                 command += ['-o', str(obj)]
             index += 1
-        elif value == '-Xclang' and index + 1 < len(arguments) and arguments[index + 1].startswith('-W'):
+        elif value == '-Xclang' and index + 1 < len(argument_list) and argument_list[index + 1].startswith('-W'):
             index += 1
+        elif is_bitcode_flag(value):
+            dropped.append(value)
         elif not value.startswith('-W'):
             command.append(value)
         index += 1
@@ -398,7 +410,32 @@ def compile_unit(source, record_name, obj, extra, language=None):
         errors = [line for line in result.stdout.splitlines() if re.search(r'(^|: )error: ', line)]
         if errors:
             raise SystemExit(f'{source.name} produced errors:\n' + '\n'.join(errors[:40]))
+    if dropped:
+        # Reported, not silent: "the archive is native although the record is an LTO unit" is the kind of
+        # difference that has to be visible in the log when the next link behaves unexpectedly.
+        print(f'{source.name}: compiled native (record carried {", ".join(sorted(set(dropped)))})')
     return hashlib.sha256(obj.read_bytes()).hexdigest()
+
+
+def read_object(path, what):
+    """A compiled unit, refusing anything but a native arm64 Mach-O object.
+
+    The record this port compiles with is an *LTO* unit when CONFIG_XNU_BUILD_LTO is on, so the same
+    command line also produces a bitcode wrapper (magic 0x0b17c0de) instead of an object -- which the
+    first CI round reported only as "not an arm64 Mach-O object". Every archive force-loaded into this
+    kernel link is native (the UFS log, the CDC-ACM probe, the component archives), so the bitcode flags
+    are dropped above and the file is checked here, with the magic spelled out when it is not an object.
+    """
+    data = path.read_bytes()
+    if len(data) < 32:
+        raise SystemExit(f'{what}: {path} is {len(data)} bytes, not an object')
+    magic = struct.unpack_from('<I', data)[0]
+    if magic == 0x0b17c0de:
+        raise SystemExit(f'{what}: {path} is an LLVM bitcode wrapper (the compile kept -flto)')
+    if magic != 0xfeedfacf:
+        raise SystemExit(f'{what}: {path} starts with {magic:#010x}, not a Mach-O 64 magic')
+    macho(data)   # cputype/width, and the load-command sanity macho() checks
+    return data
 
 
 def symbols(archive):
@@ -504,8 +541,10 @@ def main():
         compile_unit(kits / unit, c_record, OUT / (Path(unit).stem + '.o'), kernel_includes + ['-I', str(kits)])
         objects.append(OUT / (Path(unit).stem + '.o'))
 
-    # The compiled vtables, against the fixture each header was generated from.
-    raw = (OUT / 'QcomDwc3.o').read_bytes()
+    # Every unit is a native object, and the driver's two vtables are read out of it.
+    for path in objects:
+        read_object(path, path.name)
+    raw = read_object(OUT / 'QcomDwc3.o', 'QcomDwc3.cpp')
     found = object_symbols(raw)
     bindings = {}
     for stem, original_class, data, _overrides, _path in entries:
