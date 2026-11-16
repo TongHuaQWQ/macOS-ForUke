@@ -5776,3 +5776,41 @@ list. `bindings: N (M original-class imports, all covered)` is printed either wa
 One thing to keep an eye on when the hardware speaks: these inherited slots are bound to the *original*
 implementation's address (fixture slot + collection slide), which is what the reference board does. If the
 device faults on the first `free`/`init`, that binding is the first suspect.
+
+### 95k. Fourth CI round: the kernel links with the USB archive; prelink's anchors were layout-pinned
+
+Run `43898991311` on `4eee689` is the first round in which everything through the kernel link worked:
+
+```
+bindings: 299 (298 original-class imports, all covered)
+QcomDwc3: 299 original bindings, 7 objects, 582896 bytes, sha 63a3eb3dc8cabe2c
+…
+ld: symbol(s) not found for architecture arm64e.kernel   <- kernel-bootstrap.log only, tolerated
+```
+
+The vtable-position pass added 299 stubs where the diversity lookup had found 263, the coverage check
+passed before archiving, and the real link (`kernel.log`, 5149 lines) has no undefined symbols: the
+driver, its two subclasses and their bindings are in the kernel.
+
+Prelink then stopped on the board's *reviewed anchors*:
+
+```
+native:   30075 functions, 1645 diversities
+ValueError: Reviewed native address is not a function start: 0xfffffff007364b28
+```
+
+`fixtures/fileset-26C5035r-symbols.json` pins two identities AppleImage4 reaches through `__DATA_CONST`
+slots (`kalloc_type_impl`, `kfree_type_var_impl`) by *native address*, because both names are ambiguous —
+each also exists as an `_external` alias in `__TEXT_EXEC`, so `named_functions` (which keeps only unique
+names) cannot bind them. An address is a fact about one build: adding the USB archive moved both.
+
+The board's matcher copy now falls back to the symbol name when the recorded address is no longer a
+function start, and *stops with the candidate list* when the name is not unique there. The review itself
+is untouched — the original-side bytes are still hashed against `original_sha256` — only the layout pin is
+replaced by a resolution. Log line when it happens:
+
+```
+reviewed _kalloc_type_impl: recorded 0xfffffff007364b28 is stale after a layout change; bound … by symbol name
+```
+
+`pytest -q` in `kits/XnuPrelink`: 70 passed.

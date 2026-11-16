@@ -622,8 +622,23 @@ class Matcher:
                     # drift onto a different function silently.
                     address = int(entry['native_address'], 16)
                     if address not in self.native.functions:
-                        raise ValueError('Reviewed native address is not a function start: '
-                                         f'{entry["native_address"]}')
+                        # The recorded address is a function start *of the kernel it was reviewed on*, and
+                        # it moves as soon as that kernel gains or loses code -- every archive round does
+                        # that, and this board's USB round moved both of these. Rebind by name, which is
+                        # what the record actually asserts. When the name is ambiguous the round stops and
+                        # names the candidates: a guessed address is the failure the record exists to stop.
+                        candidates = sorted(at for at, symbols in self.native.symbol_names.items()
+                                            if at in self.native.functions
+                                            and entry['native_symbol'] in symbols)
+                        if len(candidates) != 1:
+                            raise ValueError(
+                                f'Reviewed native address is not a function start: {entry["native_address"]}'
+                                f' (stale after a layout change), and {entry["native_symbol"]} resolves to '
+                                f'{len(candidates)} function starts: '
+                                + ', '.join(hex(c) for c in candidates))
+                        address = candidates[0]
+                        print(f'reviewed {entry["native_symbol"]}: recorded {entry["native_address"]} is '
+                              f'stale after a layout change; bound {address:#x} by symbol name')
                     if entry['native_symbol'] not in self.native.symbol_names.get(address, ()):
                         raise ValueError(f'Reviewed symbol {entry["native_symbol"]} is not at '
                                          f'{entry["native_address"]}')
