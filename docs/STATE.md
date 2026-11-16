@@ -5718,3 +5718,26 @@ Two things this round bought even while failing: the device-checkout fallback fo
 works (`module()`'s second candidate), and the compile of `package/QcomDwc3Platform.c` through an
 `osfmk` record is confirmed — the bsd-record question from the previous commit never had to be tested on
 the runner.
+
+### 95i. Second CI round: bitcode fixed, the assembly lost its language
+
+Run `43889478153` on `da19d6b` got the whole compile through — the log awards the round its evidence:
+
+```
+QcomDwc3.cpp: compiled native (record carried -flto=full)
+UsbProbe.cpp: compiled native (record carried -flto=full)
+GeniI2c.c / QcomRpmh.c / QcomDwc3Platform.c: compiled native (record carried -flto=full)
+usb-bindings.S failed to compile:
+  clang: warning: '-x assembler' after last input file has no effect [-Wunused-command-line-argument]
+  usb-bindings.S:1:1: error: expected identifier or '('
+      1 | .text
+```
+
+So the driver, the board entry and all three C units compile against the generated ABI classes on the
+runner; the LTO stripping works, and `read_object()` is what stopped the round from getting further with
+a wrong-shaped archive.
+
+The last error is mine: `-x` applies to the inputs that *follow* it, and I appended `-x assembler` after
+the source, so clang compiled `.text` as C. The language is now forced in front of the source and the
+record's own `-x` pair is dropped (it describes the unit the record was taken from, not ours); the `.S`
+units compile as `assembler-with-cpp`, which is what a `.S` suffix means.

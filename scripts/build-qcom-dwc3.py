@@ -376,14 +376,24 @@ def load_record(candidates, what):
                      'the kernel pass must run before the archives')
 
 
-def compile_unit(source, record_name, obj, extra, language=None):
-    """The record's own command line with our source, our -o and the flags this port needs."""
+def compile_unit(source, record_name, obj, extra, language):
+    """The record's own command line with our source, our -o, our language and the flags this port needs.
+
+    The language is forced *in front of* the source rather than appended: `-x` applies to the inputs that
+    follow it, and clang says so ("'-x assembler' after last input file has no effect") while happily
+    compiling a `.S` file as C -- which is how the second CI round failed at `usb-bindings.S:1:1:
+    expected identifier or '('` on the `.text` directive. The record's own `-x` pair is dropped for the
+    same reason: it describes the unit the record was taken from, not the one we are compiling.
+    """
     record = json.loads((ROOT / record_name).read_text().strip().rstrip(','))
     argument_list, command, index, dropped = record['arguments'], [], 0, []
     while index < len(argument_list):
         value = argument_list[index]
         if value == record['file']:
-            command.append(str(source))
+            command += ['-x', language, str(source)]
+        elif value == '-x':
+            dropped.append(value + ' ' + argument_list[index + 1])
+            index += 1
         elif value in ('-o', '-MF', '-MT', '-MJ'):
             if value == '-o':
                 command += ['-o', str(obj)]
@@ -395,8 +405,6 @@ def compile_unit(source, record_name, obj, extra, language=None):
         elif not value.startswith('-W'):
             command.append(value)
         index += 1
-    if language:
-        command += ['-x', language]
     command += extra
     command += ['-mgeneral-regs-only', '-Wall', '-Wextra', '-Wno-unused-parameter',
                 '-Wno-unused-function', '-Wno-deprecated-declarations', '-Wno-unnecessary-virtual-specifier']
@@ -413,7 +421,7 @@ def compile_unit(source, record_name, obj, extra, language=None):
     if dropped:
         # Reported, not silent: "the archive is native although the record is an LTO unit" is the kind of
         # difference that has to be visible in the log when the next link behaves unexpectedly.
-        print(f'{source.name}: compiled native (record carried {", ".join(sorted(set(dropped)))})')
+        print(f'{source.name}: compiled as {language} (record carried {", ".join(sorted(set(dropped)))})')
     return hashlib.sha256(obj.read_bytes()).hexdigest()
 
 
@@ -534,11 +542,12 @@ def main():
             if (base / name).is_dir():
                 kernel_includes += ['-I', str(base / name)]
     objects.append(OUT / 'QcomDwc3.o')
-    compile_unit(driver / 'QcomDwc3.cpp', cxx_record, OUT / 'QcomDwc3.o', common)
-    compile_unit(kits / 'UsbProbe.cpp', cxx_record, OUT / 'UsbProbe.o', common)
+    compile_unit(driver / 'QcomDwc3.cpp', cxx_record, OUT / 'QcomDwc3.o', common, 'c++')
+    compile_unit(kits / 'UsbProbe.cpp', cxx_record, OUT / 'UsbProbe.o', common, 'c++')
     objects.append(OUT / 'UsbProbe.o')
     for unit in ('GeniI2c.c', 'QcomRpmh.c', 'QcomDwc3Platform.c'):
-        compile_unit(kits / unit, c_record, OUT / (Path(unit).stem + '.o'), kernel_includes + ['-I', str(kits)])
+        compile_unit(kits / unit, c_record, OUT / (Path(unit).stem + '.o'),
+                     kernel_includes + ['-I', str(kits)], 'c')
         objects.append(OUT / (Path(unit).stem + '.o'))
 
     # Every unit is a native object, and the driver's two vtables are read out of it.
@@ -585,7 +594,7 @@ def main():
     (OUT / 'usb-bindings.S').write_text(text)
     (OUT / 'usb-addresses.S').write_text(addresses)
     for stem in ('usb-bindings', 'usb-addresses'):
-        compile_unit(OUT / f'{stem}.S', c_record, OUT / f'{stem}.o', [], language='assembler')
+        compile_unit(OUT / f'{stem}.S', c_record, OUT / f'{stem}.o', [], 'assembler-with-cpp')
     objects += [OUT / 'usb-bindings.o', OUT / 'usb-addresses.o']
 
     # The static initialisers must not run before uke_usb_probe asks for them (the driver registers its
