@@ -600,7 +600,7 @@ class Matcher:
 
     def anchor_reviewed(self, inputs):
         """Load individually reviewed ABI identities for the exactly pinned original image."""
-        added = 0
+        added, pinned = 0, []
         for record in self.reviewed_records(inputs):
             for entry in record['functions']:
                 if not entry.get('evidence'):
@@ -611,41 +611,72 @@ class Matcher:
                 fn = self.original.functions[orig]
                 if hashlib.sha256(self.original.image.read(orig, fn['end'] - orig)).hexdigest() != entry['original_sha256']:
                     raise ValueError(f'Reviewed function bytes changed: {entry["original"]}')
-                native = self.native.named_functions.get(entry['native_symbol'])
                 if entry.get('native_address'):
-                    # A reviewed identity may name the native side by address when the symbol name is not
-                    # unique: named_functions only carries names with exactly one address, so a function
-                    # that also appears under an <name>_external alias elsewhere in __TEXT_EXEC cannot be
-                    # bound by name at all -- kalloc_type_impl and kfree_type_var_impl are both like that,
-                    # and they are what AppleImage4 calls through its __DATA_CONST slots on this board.
-                    # The address is cross-checked against the declared symbol, so a reviewed entry cannot
-                    # drift onto a different function silently.
-                    address = int(entry['native_address'], 16)
-                    if address not in self.native.functions:
-                        # The recorded address is a function start *of the kernel it was reviewed on*, and
-                        # it moves as soon as that kernel gains or loses code -- every archive round does
-                        # that, and this board's USB round moved both of these. Rebind by name, which is
-                        # what the record actually asserts. When the name is ambiguous the round stops and
-                        # names the candidates: a guessed address is the failure the record exists to stop.
-                        candidates = sorted(at for at, symbols in self.native.symbol_names.items()
-                                            if at in self.native.functions
-                                            and entry['native_symbol'] in symbols)
-                        if len(candidates) != 1:
-                            raise ValueError(
-                                f'Reviewed native address is not a function start: {entry["native_address"]}'
-                                f' (stale after a layout change), and {entry["native_symbol"]} resolves to '
-                                f'{len(candidates)} function starts: '
-                                + ', '.join(hex(c) for c in candidates))
-                        address = candidates[0]
-                        print(f'reviewed {entry["native_symbol"]}: recorded {entry["native_address"]} is '
-                              f'stale after a layout change; bound {address:#x} by symbol name')
-                    if entry['native_symbol'] not in self.native.symbol_names.get(address, ()):
-                        raise ValueError(f'Reviewed symbol {entry["native_symbol"]} is not at '
-                                         f'{entry["native_address"]}')
-                    native = address
+                    # A reviewed identity may name the native side by address when the name is not unique:
+                    # named_functions keeps only names with exactly one address, and kalloc_type_impl and
+                    # kfree_type_var_impl each also exist under an _external alias elsewhere in
+                    # __TEXT_EXEC -- they are what AppleImage4 calls through its __DATA_CONST slots on this
+                    # board. The recorded address is a fact about the kernel it was reviewed on, though, and
+                    # it moves as soon as that kernel gains or loses code, which every archive round does.
+                    pinned.append({'entry': entry, 'recorded': int(entry['native_address'], 16),
+                                   'candidates': sorted(
+                                       at for at, symbols in self.native.symbol_names.items()
+                                       if at in self.native.functions
+                                       and entry['native_symbol'] in symbols)})
+                    continue
+                native = self.native.named_functions.get(entry['native_symbol'])
                 if native is not None:
                     added += self.bind(orig, native, 'reviewed')
+        if pinned:
+            # The recorded absolute addresses are one build's layout; the *distances between* reviewed
+            # functions are the same review's statement about their production unit and do not move with
+            # it. Resolving the group by those distances is what lets an archive round -- which shifts text
+            # by tens of KiB -- keep two reviewed identities that cannot be named uniquely.
+            for symbol, address in self.resolve_reviewed_layout(pinned).items():
+                entry = next(e['entry'] for e in pinned if e['entry']['native_symbol'] == symbol)
+                if symbol not in self.native.symbol_names.get(address, ()):
+                    raise ValueError(f'Reviewed symbol {symbol} is not at {address:#x}')
+                added += self.bind(int(entry['original'], 16), address, 'reviewed')
         return added
+
+    @staticmethod
+    def resolve_reviewed_layout(pinned):
+        """Address each reviewed native function, using recorded distances when a recorded address moved."""
+        import itertools
+        for item in pinned:
+            if not item['candidates']:
+                raise ValueError(f'Reviewed symbol {item["entry"]["native_symbol"]} is not a function '
+                                 'start in this kernel at all')
+        symbols = sorted({item['entry']['native_symbol'] for item in pinned})
+        if len(symbols) != len(pinned):
+            raise ValueError('One reviewed symbol appears twice with a pinned address')
+        pools = {item['entry']['native_symbol']: item['candidates'] for item in pinned}
+        recorded = {item['entry']['native_symbol']: item['recorded'] for item in pinned}
+        combinations = 1
+        for symbol in symbols:
+            combinations *= len(pools[symbol])
+        if combinations > 256:
+            raise ValueError('Reviewed layout has too many candidate combinations: '
+                             + ', '.join(f'{s} x{len(pools[s])}' for s in symbols))
+        survivors = []
+        for combination in itertools.product(*(pools[symbol] for symbol in symbols)):
+            chosen = dict(zip(symbols, combination))
+            if all(chosen[b] - chosen[a] == recorded[b] - recorded[a]
+                   for position, a in enumerate(symbols) for b in symbols[position + 1:]):
+                survivors.append(chosen)
+        if len(survivors) != 1:
+            raise ValueError(
+                'Reviewed native addresses moved and '
+                + ('no combination of their candidates preserves the recorded distances'
+                   if not survivors else 'several do')
+                + ': ' + '; '.join(f'{s} recorded {recorded[s]:#x}, candidates '
+                                   + ', '.join(hex(c) for c in pools[s]) for s in symbols))
+        chosen = survivors[0]
+        for symbol, address in sorted(chosen.items()):
+            if address != recorded[symbol]:
+                print(f'reviewed {symbol}: recorded {recorded[symbol]:#x} is stale after a layout change; '
+                      f'bound {address:#x} by the recorded distance to the other reviewed function')
+        return chosen
 
     def reviewed_data(self, inputs, known):
         """Reviewed data identities: original address -> native symbol plus addend."""

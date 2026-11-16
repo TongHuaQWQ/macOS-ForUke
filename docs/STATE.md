@@ -5814,3 +5814,30 @@ reviewed _kalloc_type_impl: recorded 0xfffffff007364b28 is stale after a layout 
 ```
 
 `pytest -q` in `kits/XnuPrelink`: 70 passed.
+
+### 95l. Fifth CI round: the anchor fallback refused to guess, and was right to
+
+Run `43907588798` on `03f8e75` reached prelink again and stopped inside the fallback added in 95k:
+
+```
+ValueError: Reviewed native address is not a function start: 0xfffffff007364b28 (stale after a layout
+change), and _kalloc_type_impl resolves to 2 function starts: 0xfffffff007368b28, 0xfffffff007551388
+```
+
+Both candidates are real function starts that carry the bare symbol — so name resolution alone cannot pick
+one, and picking the nearer one would have been a guess in an identity review. What the review *also*
+records is the distance between the two reviewed functions: `kalloc_type_impl` at `0x…64b28` and
+`kfree_type_var_impl` at `0x…65020`, i.e. `+0x4f8`, and both live in one production unit, so that
+distance survives a layout shift even though the absolute addresses do not.
+
+`resolve_reviewed_layout()` therefore resolves the pinned group *together*: every combination of one
+candidate per reviewed function is checked against every recorded pairwise distance, and the round
+proceeds only when exactly one combination survives. It says so in the log —
+
+```
+reviewed _kalloc_type_impl: recorded 0xfffffff007364b28 is stale after a layout change;
+  bound 0xfffffff007368b28 by the recorded distance to the other reviewed function
+```
+
+— and refuses, listing the candidate pools, when several combinations survive or none does. The
+candidate lists are printed either way, so the next round's log says what this kernel actually offers.
