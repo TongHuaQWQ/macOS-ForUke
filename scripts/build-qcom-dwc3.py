@@ -65,16 +65,19 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/qcom-dwc3'
 RECORDS = 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837'
-# C++ units take a .cpo record when the tree has one; C units and the two assembly files take a C/.o
-# one. Both are probed rather than assumed: with CONFIG_XNU_BUILD_LTO the records do not always sit at
-# the path the pre-LTO build wrote them to (build-ufs-log.py carries the same note).
+# C++ units take a .cpo record when the tree has one. The C units go to an *osfmk* record, not a bsd one:
+# package/QcomDwc3Platform.c includes <IOKit/IOLib.h> and <IOKit/IOLocks.h>, and a bsd record's include set
+# has no iokit/ on it -- the wall build-ufs-log.py records ("a bsd record has no iokit/ on its include
+# path and deriving one from the record cost the first writer round"). osfmk/DEVELOPMENT/startup.o.json is
+# the record package/UkeLastLog.c already compiles through, and that unit includes <IOKit/IOLib.h> too.
 CXX_RECORD = f'{RECORDS}/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
 CXX_RECORD_ALTERNATES = (f'{RECORDS}/iokit/DEVELOPMENT/IOPlatformExpert.o.json',
                          f'{RECORDS}/libkern/DEVELOPMENT/OSObject.cpo.json',
                          f'{RECORDS}/libkern/c++/DEVELOPMENT/OSObject.cpo.json',
                          f'{RECORDS}/osfmk/DEVELOPMENT/startup.cpo.json')
-C_RECORD = f'{RECORDS}/bsd/DEVELOPMENT/bsd_init.o.json'
-C_RECORD_ALTERNATES = (f'{RECORDS}/osfmk/DEVELOPMENT/startup.o.json',
+C_RECORD = f'{RECORDS}/osfmk/DEVELOPMENT/startup.o.json'
+C_RECORD_ALTERNATES = (f'{RECORDS}/iokit/DEVELOPMENT/IOPlatformExpert.o.json',
+                       f'{RECORDS}/bsd/DEVELOPMENT/bsd_init.o.json',
                        f'{RECORDS}/pexpert/DEVELOPMENT/pe_kprintf.o.json')
 # What the archive must define for the force-load to be more than dead weight.
 EXPORTS = ('qcom_dwc3_bring_up', 'qcom_dwc3_publish', 'qcom_dwc3_diag', 'qcom_dwc3_host_load',
@@ -484,12 +487,21 @@ def main():
 
     objects = []
     common = ['-I', str(OUT), '-I', str(driver), '-I', str(kits)]
+    # The kernel's own include roots, named here as well as carried by the record: load_record() can fall
+    # back to a unit whose include set does not cover IOKit, and three of these units include it. The XNU
+    # checkout sits under .cache/xnu-work in a prepared tree (that is the path the sheng board's own builder
+    # uses) and at the tree root in a tree that was built in place, so both spellings are probed.
+    kernel_includes = []
+    for base in (ROOT / '.cache/xnu-work', ROOT):
+        for name in ('osfmk', 'iokit', 'libkern', 'bsd'):
+            if (base / name).is_dir():
+                kernel_includes += ['-I', str(base / name)]
     objects.append(OUT / 'QcomDwc3.o')
     compile_unit(driver / 'QcomDwc3.cpp', cxx_record, OUT / 'QcomDwc3.o', common)
     compile_unit(kits / 'UsbProbe.cpp', cxx_record, OUT / 'UsbProbe.o', common)
     objects.append(OUT / 'UsbProbe.o')
     for unit in ('GeniI2c.c', 'QcomRpmh.c', 'QcomDwc3Platform.c'):
-        compile_unit(kits / unit, c_record, OUT / (Path(unit).stem + '.o'), ['-I', str(kits)])
+        compile_unit(kits / unit, c_record, OUT / (Path(unit).stem + '.o'), kernel_includes + ['-I', str(kits)])
         objects.append(OUT / (Path(unit).stem + '.o'))
 
     # The compiled vtables, against the fixture each header was generated from.
