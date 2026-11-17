@@ -5597,3 +5597,64 @@ ok   self-test 8 asm-align  no wide store in the writer's aarch64 code, -mstrict
 `AllocateReservedPages` 拿到的缓冲区地址交给内核（`make-uke-adt.py` 生成的是固定常量，所以要么让固件在
 把 ADT 交给 payload 前改写它，要么另找一块 XNU 不会分配、且固件肯 reserve 的 DRAM 洞）。
 在拿到安全交接之前，writer 保持"只追加、无头则停"的行为。
+
+---
+
+## §94 2026-11-18 01:4x：风暴结案（是我们自己的诊断读），以及和"能跑到 iPadOS 的那份"逐项对差
+
+### 94.1 结案：`platform error` 风暴 = 我们自己的诊断读
+
+b261 的 panic 给出 `pc 0xfffffff00c411a0c`、`esr 0x96000010`（DFSC 0x10 同步外部中止）。符号化后是
+`ldr w11, [x10, #0x80]!`，落在 `ArmCpu::prepareGic()` 里我加的那段诊断：
+
+```cpp
+uintptr_t sgi = redist + 0x10000;
+kprintf ("ArmCpu: gic ready ... igroupr0=%08x isenabler0=%08x",
+    ..., *(volatile uint32_t *)(sgi + 0x80), *(volatile uint32_t *)(sgi + 0x100));
+```
+
+和 `Allenwdk/ArmCpu@8721288`（这台机器**跑到 iPadOS、八核 IRQ/定时器/IPI 持续增长**的那个驱动）逐行对：
+它的 `wakeRedistributor()` 与我们的**完全一致**（同样的 `sgi+0x180/0x80/0xd00/0x280/0x400..` 写），
+但**从不回读** SGI 帧。差别只有我们加的三处诊断读：
+
+| 位置 | 读的内容 | 结果 |
+|---|---|---|
+| `prepareGic()` 尾部 | `sgi+0x80`、`sgi+0x100` | 每次启动必炸（b261 就是它） |
+| `enableGic()` 非 secondary 分支 | `redist+0x10000` 的 `0x80/0x100/0xd00` | 每核都跑，同样会炸 |
+| `armcpu_gic_diag()` | 同上再加 `0x200/0x400` | 诊断函数，但同样会炸 |
+
+**为什么写没事、读就炸**：写是 posted，没有 slave 应答就丢掉；读必须等应答，等不到就是外部中止。
+SGI 帧写进去了却读不出来，说明这个帧**不接受对它的读**（掉电/安全态/未实现都可能），但**写不报错**。
+所以"写完回读校验"这条通用经验在这里是反的。
+
+b262 把这三处读全部改成 `0xffffffff = not sampled`（保留写、保留 `armcpu_gic_boot[]` 数组形状，
+`GpuPowerProbe.cpp:140` 的消费方不用改）。**以后不要再加这个读**，要状态就从 `ICC_*_EL1` 或已启动的核上取。
+
+### 94.2 和参考实现的差距（同一台机器，已到 iPadOS）
+
+来源：`Allenwdk/UniXNU-uke`（板级）+ `Allenwdk/ArmCpu@8721288`（驱动）。
+本地副本：`work/ref-allenwdk/`、`work/ref-armcpu/`。
+
+| 项 | 他们（能用） | 我们（卡住） | 影响 |
+|---|---|---|---|
+| SGI 帧回读 | 从不回读 | 三处回读 | **风暴根因**（94.1） |
+| `dts` CPU 类型 | 8 个核全部标 `unixnu,cluster-type`（0-2 E，3-7 P） | **一个都没有** | 他们注释写明：缺类型会退化成 SMP，`cluster_type_to_pset_type()` 在 `processor_bootstrap()` 里拒绝 —— 即我们**除 CPU0 外的核根本起不来** |
+| SMP 开关 | `board.toml` 带 `sheng-smp=1` | **没有任何 smp 参数** | 我们的 ArmCpu 读 `sheng-smp`（他们钉的版本读 `smp`），两边都没开 → 只能单核跑，定时器/IPI 永远不会累加 |
+| `wlan` 节点 | `dts` 里 `wlan { unixnu,adt-name = "wlan" }` | 无 | 没有它 `wifid` 不起，Wi-Fi 面板不存在（我们还没到这一步，但迟早要） |
+| 日志通道 | `sheng-log=1` + `UkeLastLog` 写 userdata 尾 32 MiB，**TWRP 下 dd 读**（`docs/RECOVERY-LOG.md`） | 同机制，但内核到不了 BSD init，transport 从未 attach（导出的 32 MiB 只有 517 字节非零） | 日志方法没有错，是**没跑到** |
+| kernel_args | 42 条 / 733 字节（含 `boot-progress=2`、`-ukedeferredconsole`、`sheng-smp=1`、`memory-window-high=1`、`gpu-pool=0`…） | 52 条 / 982 字节（塞满了 UFS/USB/日志诊断） | 我们把预算花在了诊断上，他们的参数是"能用"的最小集 |
+
+### 94.3 目前问题清单（按阻塞程度）
+
+1. **P1 风暴**（94.1）→ b262 已修，待验证。
+2. **P2 单核**：`cluster-type` 缺失 + `sheng-smp` 未开 → 8 核里只有 CPU0；`ArmCpu: N timer interrupts` 永远为 0，`IOServiceWait` 里的 deadline 永不触发，看起来像"卡死"。→ b263（dts 加 cluster-type + args 加 `sheng-smp=1`/`smp=1`）。
+3. **P3 日志通道**：依赖 P2 之后能走到 BSD init；在此之前 QR 导出只有固件部分（内核行进不去）。
+4. **P4 USB**：repeater 调参表错设备（我们抄 SM8550），且**必须用 device 角色那列**（厂商 DT 三套序列：normal/factory/host），另需 `F_CLK_19P2M_EN` 先清后置 → 另一个窗口负责；**刷之前必须去掉 `uke-platform-error-panic=1`**，否则死在 ArmCpu、到不了 stage 6/7。
+5. **P5 平台错误诊断本身有害**：三处回读已删；`armcpu_gic_diag()` 也改成不碰 SGI 帧。
+
+### 94.4 接下来（顺序）
+
+1. **刷 b262**：只删诊断读，其他不变。验收：不再出现 `platform error` 风暴，内核继续往下走（应能看到 kext 加载、`ArmCpu: 0 timer interrupts` 依然为 0）。
+2. **b263 = P2**：`dts/uke.dts` 加 8 个 `unixnu,cluster-type`；kernel_args 加 `sheng-smp=1`（并同时加 `smp=1` 兜住两种命名，预算要腾）。验收：`ArmCpu: N timer interrupts` N>0、`sheng-smp` step 行、`IOServiceWait` 不再堆积。
+3. **b264 = 日志**：P2 通了以后 `UkeLastLog` 的 userdata transport 应能 attach；用他们的方法（TWRP + `dd` window / `work/analysis/read-uke-log.py`）读全量内核日志，此后每轮不用拍屏。
+4. **USB 轮**：repeater 表 + 去 panic 参数，看 `dctl/dsts/halted`。

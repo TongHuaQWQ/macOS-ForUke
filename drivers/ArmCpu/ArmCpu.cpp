@@ -361,12 +361,20 @@ bool ArmCpu::prepareGic (void)
     return false;
   }
   gGicShared = 1;
-  if (redist != 0) {
-    uintptr_t sgi = redist + 0x10000;
-    kprintf ("ArmCpu: gic ready dist=%p redist=%p igroupr0=%08x isenabler0=%08x\n",
-        (void *) dist, (void *) redist, *reinterpret_cast<volatile uint32_t *> (sgi + 0x80),
-        *reinterpret_cast<volatile uint32_t *> (sgi + 0x100));
-  }
+  // The "gic ready" line that used to read GICR_IGROUPR0/ISENABLER0 back here is GONE, and it was the
+  // single reason every round since b170 ended in an "ignored" platform error storm: reading the
+  // redistributor's SGI frame (redist + 0x10000 + 0x80) takes a synchronous external abort
+  // (esr 0x96000010, DFSC 0x10, far ending in 0x080), the handler resumed the faulting instruction, and
+  // the same read aborted again forever. b261's panic-on-platform-error turned that into one readable
+  // panic: pc 0xfffffff00c411a0c == this block.
+  //
+  // The writes above (sgi + 0x180/0x80/0xd00/0x280/0x400..) are kept: they are identical to the driver
+  // this board runs iPadOS with (Allenwdk/ArmCpu@8721288 `wakeRedistributor`), which never reads those
+  // registers back. Writes to a frame that does not answer are posted and dropped; a read must wait for
+  // the response. That asymmetry is the whole bug.
+  //
+  // Do not re-add the read. If a future round needs the post-wake state, read it through ICC_*_EL1 system
+  // registers or from a core that has already started, not from the SGI frame on the boot CPU.
   return true;
 }
 
@@ -428,11 +436,16 @@ void ArmCpu::enableGic (void)
     __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (pmr));
     __asm__ volatile ("mrs %0, icc_igrpen1_el1" : "=r" (ig));
     __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (sre));
-    armcpu_gic_boot[0] = read32 (redist + 0x10000, 0x80);
-    armcpu_gic_boot[1] = read32 (redist + 0x10000, 0x100);
+    // The three redistributor-SGI-frame reads that used to fill [0], [1] and [4] are gone for the same
+    // reason as the one in prepareGic: this board aborts on a read of redist+0x10000+0x{80,100,d00}
+    // (esr 0x96000010, DFSC 0x10). enableGic() runs on every core, so leaving them in would have turned
+    // the first CPU into the same endless "platform error ... (ignored)" storm the moment the panic
+    // switch was off. [0], [1] and [4] now report 0xffffffff = "not sampled" instead of a lie.
+    armcpu_gic_boot[0] = 0xffffffffU;
+    armcpu_gic_boot[1] = 0xffffffffU;
     armcpu_gic_boot[2] = read32 (dist, 0);
     armcpu_gic_boot[3] = read32 (dist, 4);
-    armcpu_gic_boot[4] = read32 (redist + 0x10000, 0xd00);
+    armcpu_gic_boot[4] = 0xffffffffU;
     armcpu_gic_boot[5] = static_cast<uint32_t> (pmr);
     armcpu_gic_boot[6] = static_cast<uint32_t> (ig);
     armcpu_gic_boot[7] = static_cast<uint32_t> (sre);
@@ -780,13 +793,17 @@ extern "C" void armcpu_gic_diag (uint64_t aff, uint32_t *out)
     const uint64_t typer = *reinterpret_cast<volatile uint64_t *> (gFrames + offset + 8);
     if (static_cast<uint32_t> (typer >> 32) == target) {
       const uintptr_t redist = gFrames + offset, sgi = redist + 0x10000;
-      armcpu_gic_diag_stage = 2; out[0] = read32 (sgi, 0x80);
-      armcpu_gic_diag_stage = 3; out[1] = read32 (sgi, 0x100);
-      armcpu_gic_diag_stage = 4; out[2] = read32 (sgi, 0x200);
-      armcpu_gic_diag_stage = 5; out[3] = read32 (sgi, 0xd00);
+      // Only the RD_base half and the distributor are read here. The SGI frame (redist+0x10000) aborts on
+      // this board when read - see prepareGic - so [0..2] and [6] stay "not sampled" rather than faulting
+      // inside a diagnostic that was supposed to describe the fault.
+      (void) sgi;
+      out[0] = 0xffffffffU; armcpu_gic_diag_stage = 2;
+      out[1] = 0xffffffffU; armcpu_gic_diag_stage = 3;
+      out[2] = 0xffffffffU; armcpu_gic_diag_stage = 4;
+      out[3] = 0xffffffffU; armcpu_gic_diag_stage = 5;
       armcpu_gic_diag_stage = 6; out[4] = read32 (redist, 0x14);
       armcpu_gic_diag_stage = 7; out[5] = read32 (gDist, 0);
-      armcpu_gic_diag_stage = 8; out[6] = read32 (sgi, 0x400);
+      out[6] = 0xffffffffU; armcpu_gic_diag_stage = 8;
       out[7] = 1;
       armcpu_gic_diag_stage = 9;
       return;
