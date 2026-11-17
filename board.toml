@@ -613,6 +613,22 @@ kernel_args = [
   "boot-progress=2",
   "-apfs_shared_datavolume",
   "offline-key-events=1",
+  # usb= is the USB side's single interface (they own package/qcom-usb-debug and drivers/QcomDwc3; this
+  # file owns the arguments). Levels: 1 bring-up only (non-fatal), 4 add the Apple stack
+  # (OSKextLoadKextWithIdentifier + preModLoad/postModLoad + publish), 6 panic after bring-up with the
+  # judgement line (stage/gsnpsid/gdsc/smmu/rep/qmp/rpmh/irq). 1 here, not 6: 6 stops the boot inside
+  # bsd_autoconf(), and the question this round asks is whether the boot gets PAST BSD init now that the
+  # timer is armed - a deliberate panic there would answer the USB half and hide the timer half. Flipping
+  # to 6 is one character when the timer is confirmed and the USB readout is what matters.
+  "usb=1",
+  # Arms the userdata half of UkeLastLog (UkeLastLog.c:789; the pram half needs panic_region and stays
+  # off). The transport is freestanding - UfsLog.cpp/UfsLogKernel.c map the UFS host and the apps SMMU
+  # themselves - so it does NOT need CONFIG_XNU_NATIVE_UFS, contrary to the 2026-11-17 report from the
+  # device side: their two zero-record reads used uke-log-first=256566 / uke-log-last=281141, which are
+  # an order of magnitude away from the GPT values this board carries (2,961,408 / 61,949,946 in
+  # [userdata]), so the window they opened was not the userdata tail at all. This round ships the correct
+  # pair plus sheng-log=1, which is the actual test of that channel.
+  "sheng-log=1",
   # 0 for this round, and stated here rather than injected by the build script. configs/uke-macos_defconfig
   # still has CONFIG_XNU_NATIVE_UFS off, so this kernel carries no UFS driver and
   # drivers/NativeUfs/NativeUfs.cpp:2089 returns false on a 0 argument anyway - the value itself changes
