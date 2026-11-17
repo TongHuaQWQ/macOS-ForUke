@@ -835,7 +835,15 @@ chip_id = "207"
 owned_memory_size = "0x100000000"     # 4 GiB of this unit's 5 GiB high run (0x8C0000000..0xA0000000).
                                       # Ladder if DarwinBoot reports Out of Resources or the VM misbehaves:
                                       # 0xC0000000 (3 GiB) -> 0x80000000 (2 GiB). 12 GB reference used 4.75 GiB.
-root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+# The OS volume of the image this board installs, i.e. the same value as [root] os_volume_uuid and
+# upstream profiles/os/macos-27.3-26C5035r [payload.adt] root_match_volume_uuid. It was 04769D26-...
+# until 2026-11-17: that is the OS volume of iPadOS 17.7.11 21H461 (profiles/os/ipados-17.7.11-21H461
+# os_volume_uuid), the image this port started from, so /chosen/root-matching named a volume that is
+# not on this unit and IOFindBSDRoot could never match. The official macOS reference is explicit about
+# this failure mode: "xnu waits for IOMedia, default matching Content=Apple_HFS; select the root by
+# the verified BaseSystem APFS volume UUID, do not keep the default HFS selection"
+# (Jelly10086/macOS-ForSheng docs/status.md, pinned in docs/MACOS-REFERENCE.md).
+root_match_volume_uuid = "84581E99-85BE-4957-AC53-2947E887B3E4"
 # mount(8) phase 1 requires a boot manifest hash to name /private/preboot/<hash>.
 # uke has no Apple personalization manifest, so this is an explicit bring-up
 # owner boot-set identity (SHA-384 of "UkeBringup.BootSet.v1\0"), not Apple data.
