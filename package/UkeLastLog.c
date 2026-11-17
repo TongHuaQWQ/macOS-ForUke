@@ -33,6 +33,7 @@ extern unsigned int gPanicSize;
 extern int desiredvnodes;
 extern uint64_t sane_size;
 extern void uke_crash_log_start(void);
+extern void uke_adv_log_start(void);
 extern void pe_print_last_panic_again(void);
 
 /* The fixed page the boot marks go to (see uke_mark below); also UkePramLog.h's KERNEL stamp. */
@@ -775,6 +776,10 @@ uke_last_log_start(void)
 		return;
 	}
 	started = 1;
+	// The Advanced Logger writer shares this entry point on purpose: this is the start path that the
+	// bsd_init and csr_check hooks actually reach (see the note above), and both writers are in the
+	// same archive, so there is nothing to resolve at run time.
+	uke_adv_log_start();
 	uke_last_log_beacon("UKELASTLOG-STARTUP-ENTERED");
 	// The pram record runs unconditionally, and sheng-log no longer switches it on. Two reasons:
 	// the boot argument does not fit (the command line is 998 of DarwinBoot's 1000 bytes, so a new

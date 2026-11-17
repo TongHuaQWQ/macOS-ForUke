@@ -52,6 +52,8 @@ sources = [
     ('MissingKernelSymbols.c', STARTUP_RECORD, 'MissingKernelSymbols.o', []),
     ('BootWatchdogPolicy.c', KERN_EXEC_RECORD, 'BootWatchdogPolicy.o', []),
     ('CrashLogProbe.c', KERN_EXEC_RECORD, 'CrashLogProbe.o', []),
+    # Appends the message buffer to the firmware's Advanced Logger window (fixed address, no storage).
+    ('UkeAdvLogger.c', STARTUP_RECORD, 'UkeAdvLogger.o', []),
 ]
 report = {'userdata_log': USERDATA_LOG}
 objects = []

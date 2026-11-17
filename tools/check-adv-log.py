@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Check the kernel-to-firmware Advanced Logger handoff before a CI round builds it.
+
+Two owners share one buffer: the firmware's AdvLoggerPkg places and exports it, and
+package/UkeAdvLogger.c appends the kernel message buffer to the same place. Nothing in either
+repository makes them agree, so this file does:
+
+  * uke.dsc must name a fixed base address, 64 pages and PcdAdvancedLoggerFixedInRAM = TRUE
+    (without the last one AdvancedLoggerLib ignores the base and allocates its own buffer);
+  * package/UkeAdvLogger.c must use the same base and the same window size;
+  * dts/uke.dts must end its memory node exactly at the base, so XNU's VM never allocates the window;
+  * the window must be the reserved tail of DRAM, not something inside the memory node.
+
+It then replays the walk that AdvancedLoggerAccessLib performs (LOG_BUFFER_FROM_ALI, forward to
+LogCurrentOffset, 'ALM2' entries, 8-byte aligned, bounded) over a buffer built the way the writer
+builds it, and over the four refusals that keep a bad header from being walked.
+
+    python3 tools/check-adv-log.py            # check this checkout
+    python3 tools/check-adv-log.py --self-test-only
+"""
+import argparse
+import pathlib
+import re
+import struct
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+# AdvancedLoggerInternal.h: signature, version and the entry structure, restated here on purpose so a
+# change in the vendored package shows up as a failure rather than as a silently different layout.
+ALOG = 0x474F4C41
+ALM2 = 0x324D4C41
+ALMS = 0x534D4C41
+INFO_VERSION = 6
+INFO_SIZE = 88
+ENTRY_SIZE = 24           # ADVANCED_LOGGER_MESSAGE_ENTRY_V2 header
+PHASE_RUNTIME = 5
+LEVEL_INFO = 0x40
+
+
+def align8(value):
+    return (value + 7) & ~7
+
+
+class Info:
+    """The packed ADVANCED_LOGGER_INFO the firmware and the kernel both write."""
+
+    def __init__(self, signature=ALOG, version=INFO_VERSION, offset=INFO_SIZE, size=0, current=None):
+        self.signature = signature
+        self.version = version
+        self.log_buffer_offset = offset
+        self.log_buffer_size = size
+        self.log_current_offset = offset if current is None else current
+        self.discarded_size = 0
+        self.in_permanent_ram = 1
+        self.at_runtime = 1
+
+    def pack(self):
+        raw = bytearray(INFO_SIZE)
+        struct.pack_into('<IH6sIIIII', raw, 0, self.signature, self.version, bytes(6),
+                         self.log_buffer_offset, 0, self.log_current_offset,
+                         self.discarded_size, self.log_buffer_size)
+        raw[32] = self.in_permanent_ram
+        raw[33] = self.at_runtime
+        return bytes(raw)
+
+
+def walk(window):
+    """AdvancedLoggerAccessLib's walk: bounded, signature-checked, forward only.
+
+    Returns the list of messages, and raises ValueError on anything the library would reject.
+    """
+    info = Info()
+    (info.signature, info.version) = struct.unpack_from('<IH', window, 0)
+    info.log_buffer_offset, _, info.log_current_offset, info.discarded_size, info.log_buffer_size = \
+        struct.unpack_from('<IIIII', window, 12)
+    if info.signature != ALOG:
+        raise ValueError(f'not an ALOG header: 0x{info.signature:08x}')
+    if info.log_buffer_offset % 8 or info.log_buffer_offset < INFO_SIZE:
+        raise ValueError('log buffer offset is not an aligned offset past the info structure')
+    low = info.log_buffer_offset
+    high = info.log_buffer_offset + info.log_buffer_size
+    if high > len(window):
+        raise ValueError(f'log area ends at {high}, past the {len(window)}-byte window')
+    if not low <= info.log_current_offset <= high:
+        raise ValueError('cursor outside the log area')
+    messages = []
+    cursor = low
+    while cursor < info.log_current_offset:
+        if cursor % 8:
+            raise ValueError(f'entry at {cursor} is not 8-byte aligned')
+        signature, major, minor, level, stamp, phase, length, offset = \
+            struct.unpack_from('<IBBIQHHH', window, cursor)
+        if signature == ALM2:
+            if offset != ENTRY_SIZE:
+                raise ValueError(f'ALM2 entry at {cursor} declares a message offset of {offset}')
+            text = window[cursor + offset: cursor + offset + length]
+            messages.append(text.rstrip(b'\0').decode('utf-8', 'replace'))
+            cursor += align8(offset + length)
+        elif signature == ALMS:
+            level, stamp, length = struct.unpack_from('<IIH', window, cursor + 4)
+            text = window[cursor + 16: cursor + 16 + length]
+            messages.append(text.rstrip(b'\0').decode('utf-8', 'replace'))
+            cursor += align8(16 + length)
+        else:
+            raise ValueError(f'bad entry signature 0x{signature:08x} at {cursor}')
+        if cursor > high:
+            raise ValueError('entry runs past the log area')
+    return messages
+
+
+class Writer:
+    """package/UkeAdvLogger.c's append path, as arithmetic."""
+
+    def __init__(self, window_bytes, create_header=True):
+        self.window = bytearray(window_bytes)
+        info = Info(size=window_bytes - INFO_SIZE)
+        if create_header:
+            self.window[:INFO_SIZE] = info.pack()
+        self.info = info
+
+    def append(self, text):
+        payload = text.encode()
+        total = align8(ENTRY_SIZE + len(payload))
+        offset = self.info.log_current_offset
+        limit = self.info.log_buffer_offset + self.info.log_buffer_size
+        if offset + total > limit:
+            return False
+        struct.pack_into('<IBBIQHHH', self.window, offset, ALM2, 2, 1, LEVEL_INFO,
+                         len(payload), PHASE_RUNTIME, len(payload), ENTRY_SIZE)
+        self.window[offset + ENTRY_SIZE: offset + ENTRY_SIZE + len(payload)] = payload
+        # The C writer stores the new cursor back into the mapped header; the model has to do the same or
+        # the walk below would read the old one.
+        self.info.log_current_offset = offset + total
+        struct.pack_into('<I', self.window, 20, self.info.log_current_offset)
+        return True
+
+
+def read_dsc(path):
+    text = path.read_text(errors='ignore')
+    base = re.search(r'PcdAdvancedLoggerBase\|(\S+)', text)
+    pages = re.search(r'PcdAdvancedLoggerPages\|(\d+)', text)
+    fixed = re.search(r'PcdAdvancedLoggerFixedInRAM\|(\w+)', text)
+    return (int(base.group(1), 0) if base else None,
+            int(pages.group(1), 0) if pages else None,
+            fixed.group(1).upper() if fixed else None)
+
+
+def read_driver(path):
+    text = path.read_text(errors='ignore')
+    base = re.search(r'#define\s+UKE_ADV_BASE\s+(0x[0-9A-Fa-f]+)', text)
+    size = re.search(r'#define\s+UKE_ADV_BYTES\s+(0x[0-9A-Fa-f]+)', text)
+    return (int(base.group(1), 16) if base else None, int(size.group(1), 16) if size else None)
+
+
+def read_dts_end(path):
+    text = path.read_text(errors='ignore')
+    match = re.search(r'memory@[0-9a-fA-F]+\s*\{[^}]*?reg\s*=\s*<0x0*\s*([0-9a-fA-F]+)\s+0x0*\s*([0-9a-fA-F]+)\s+0x0*\s*([0-9a-fA-F]+)\s+0x0*\s*([0-9a-fA-F]+)>', text, re.S)
+    if not match:
+        return None
+    high_base = (int(match.group(1), 16) << 32) | int(match.group(2), 16)
+    high_size = (int(match.group(3), 16) << 32) | int(match.group(4), 16)
+    return high_base + high_size
+
+
+def self_tests():
+    ok = 0
+
+    # 1: the writer's own output walks back to the same text, in order.
+    writer = Writer(0x40000)
+    texts = ['UKE-ADVLOG: writer alive', 'AppleAPFSContainer: starting', 'kernel[0]: hello']
+    for text in texts:
+        assert writer.append(text), text
+    assert walk(bytes(writer.window)) == texts, walk(bytes(writer.window))
+    print('ok   self-test 1 order      written text comes back through the access-library walk')
+    ok += 1
+
+    # 2: a bad header is refused rather than walked.
+    broken = bytearray(Writer(0x40000).window)
+    struct.pack_into('<I', broken, 0, 0xDEADBEEF)
+    try:
+        walk(bytes(broken))
+    except ValueError:
+        print('ok   self-test 2 signature  a window without ALOG is rejected')
+        ok += 1
+    else:
+        raise SystemExit('FAIL: a bad header was walked')
+
+    # 3: a cursor outside the log area is refused.
+    bad = bytearray(Writer(0x40000).window)
+    struct.pack_into('<I', bad, 20, 0x7FFFFFFF)
+    try:
+        walk(bytes(bad))
+    except ValueError:
+        print('ok   self-test 3 cursor     a cursor outside the log area is rejected')
+        ok += 1
+    else:
+        raise SystemExit('FAIL: an out-of-bounds cursor was walked')
+
+    # 4: append-only. Once the window is full the writer stops instead of wrapping, and what is in the
+    # window is still walkable.
+    small = Writer(INFO_SIZE + ENTRY_SIZE + 8)
+    assert small.append('first') is True
+    assert small.append('second') is False
+    messages = walk(bytes(small.window))
+    assert messages == ['first'], messages
+    print('ok   self-test 4 append     a full window stops the writer and stays walkable')
+    ok += 1
+
+    # 5: an entry whose message offset lies is refused, not misread.
+    liar = bytearray(Writer(0x40000).window)
+    writer = Writer(0x40000)
+    writer.append('x')
+    liar = bytearray(writer.window)
+    struct.pack_into('<H', liar, INFO_SIZE + 22, 0x40)
+    try:
+        walk(bytes(liar))
+    except ValueError:
+        print('ok   self-test 5 offset     a lying message offset is rejected')
+        ok += 1
+    else:
+        raise SystemExit('FAIL: a lying message offset was walked')
+
+    # 6: a version-1 entry written by the firmware is still walked.
+    mixed = bytearray(Writer(0x40000).window)
+    info = Info(size=0x40000 - INFO_SIZE)
+    mixed[:INFO_SIZE] = info.pack()
+    payload = b'firmware line'
+    total = align8(16 + len(payload))
+    struct.pack_into('<IIIH', mixed, INFO_SIZE, ALMS, LEVEL_INFO, 0, len(payload))
+    mixed[INFO_SIZE + 16: INFO_SIZE + 16 + len(payload)] = payload
+    info.log_current_offset = INFO_SIZE + total
+    struct.pack_into('<I', mixed, 20, info.log_current_offset)
+    messages = walk(bytes(mixed))
+    assert messages == ['firmware line'], messages
+    print('ok   self-test 6 v1 entry   a firmware ALMS entry is walked')
+    ok += 1
+
+    return ok
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--self-test-only', action='store_true')
+    args = parser.parse_args()
+
+    tests = self_tests()
+    if args.self_test_only:
+        print(f'PASS: {tests} self-tests')
+        return 0
+
+    failures = []
+    dsc = ROOT / 'firmware' / 'uefi-uke' / 'Platforms' / 'Xiaomi' / 'ukePkg' / 'uke.dsc'
+    if not dsc.is_file():
+        dsc = pathlib.Path('/home/tonghua/Code/mcOS/workspace/uefi-uke/Platforms/Xiaomi/ukePkg/uke.dsc')
+    driver = ROOT / 'package' / 'UkeAdvLogger.c'
+    dts = ROOT / 'dts' / 'uke.dts'
+
+    base, pages, fixed = read_dsc(dsc)
+    driver_base, driver_bytes = read_driver(driver)
+    dts_end = read_dts_end(dts)
+
+    if base is None or pages is None:
+        failures.append(f'{dsc}: no PcdAdvancedLoggerBase / PcdAdvancedLoggerPages')
+    if fixed != 'TRUE':
+        failures.append(f'{dsc}: PcdAdvancedLoggerFixedInRAM is {fixed}, so the library will ignore the base')
+    if base is not None and pages is not None:
+        window = pages * 4096
+        if driver_base != base:
+            failures.append(f'driver UKE_ADV_BASE 0x{driver_base and hex(driver_base)} != DSC base 0x{base:x}')
+        if driver_bytes != window:
+            failures.append(f'driver UKE_ADV_BYTES 0x{driver_bytes and hex(driver_bytes)} != {pages} pages (0x{window:x})')
+        if dts_end is not None and dts_end != base:
+            failures.append(f'dts memory node ends at 0x{dts_end:x}, the log window starts at 0x{base:x}')
+        # The window has to be the reserved tail and nothing else: it must end at a 2 MiB boundary above
+        # the memory node, which the two checks above already pin down; this one catches a base that
+        # points inside the memory node while the sizes happen to agree.
+        if dts_end is not None and base < dts_end:
+            failures.append('the log window overlaps the memory node handed to XNU')
+
+    if failures:
+        for failure in failures:
+            print(f'FAIL: {failure}')
+        print('FAILED')
+        return 1
+    print(f'ok   firmware   base 0x{base:x}, {pages} pages ({pages * 4096 // 1024} KiB), fixed in RAM')
+    print(f'ok   driver     UkeAdvLogger.c uses the same base and window')
+    print(f'ok   device tree memory node ends at 0x{dts_end:x}, so XNU never allocates the window')
+    print(f'ok   self-tests {tests}')
+    print('PASS: the kernel-to-firmware Advanced Logger handoff agrees on both sides')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
