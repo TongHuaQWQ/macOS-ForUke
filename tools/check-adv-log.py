@@ -159,6 +159,24 @@ def read_driver(path):
     return (int(base.group(1), 16) if base else None, int(size.group(1), 16) if size else None)
 
 
+# Info-header fields the writer must never write. It may append entries and may mark the buffer as
+# outliving ExitBootServices, but a header it invented is exactly what broke b256/b257 and the firmware's
+# ValidateInfoBlock() would then accept it on the next boot.
+HEADER_FIELDS = {'UKE_ALI_OFF_SIGNATURE', 'UKE_ALI_OFF_VERSION', 'UKE_ALI_OFF_LOG_OFFSET',
+                 'UKE_ALI_OFF_SIZE', 'UKE_ALI_OFF_DISCARDED'}
+ALLOWED_FIELDS = {'UKE_ALI_OFF_CURRENT', 'UKE_ALI_OFF_PERMANENT_RAM', 'UKE_ALI_OFF_AT_RUNTIME'}
+
+
+def header_writes(path):
+    """Every info-header field the writer stores into, by name. Empty means it never touches a header."""
+    text = path.read_text(errors='ignore')
+    written = set()
+    for field in re.findall(r'uke_adv_put(?:8|16|32|64)\s*\([^,]+,\s*(UKE_ALI_OFF_\w+)', text):
+        if field in HEADER_FIELDS:
+            written.add(field)
+    return written
+
+
 def read_dts_end(path):
     text = path.read_text(errors='ignore')
     match = re.search(r'memory@[0-9a-fA-F]+\s*\{[^}]*?reg\s*=\s*<0x0*\s*([0-9a-fA-F]+)\s+0x0*\s*([0-9a-fA-F]+)\s+0x0*\s*([0-9a-fA-F]+)\s+0x0*\s*([0-9a-fA-F]+)>', text, re.S)
@@ -570,10 +588,16 @@ def main():
     #     second boot surviving - nothing here can prove that.
     if base is None or fixed is None:
         print('ok   firmware   fixed base not configured: the firmware allocates its own buffer')
-        if driver_bytes != 0 and not (ROOT / 'package' / 'UkeAdvLogger.c').read_text().count('not creating one'):
-            failures.append('the writer still creates a header; with no fixed base it must stand down')
+        created = header_writes(driver)
+        if created:
+            failures.append(f'the writer stores into header fields {sorted(created)}; it must only append')
         else:
-            print('ok   driver     the writer only appends and stands down without a firmware header')
+            print('ok   driver     the writer never writes a header field; it only appends to one')
+        # The address it appends at has to be the firmware allocator's window, not the platform's
+        # reserved tail: the DXE log reports "Advanced Logger Info = B112E000" there and the firmware map
+        # reports 0x9FFDF0000..0x9FFFFFFF as EfiReservedMemoryType.
+        if driver_base is not None and driver_base >= 0x8C0000000:
+            failures.append(f'driver UKE_ADV_BASE 0x{driver_base:x} is inside the memory this kernel owns')
     elif fixed != 'TRUE':
         failures.append(f'{dsc}: PcdAdvancedLoggerFixedInRAM is {fixed}, so the library will ignore the base')
     if base is not None and pages is not None and fixed == 'TRUE':

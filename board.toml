@@ -629,6 +629,12 @@ kernel_args = [
   # [userdata]), so the window they opened was not the userdata tail at all. This round ships the correct
   # pair plus sheng-log=1, which is the actual test of that channel.
   "sheng-log=1",
+  # XNU panics with "Console I/O from interrupt-disabled context" (osfmk/console/serial_console.c:181,
+  # console_io_allowed) as soon as anything prints with interrupts masked. On this port that fires late
+  # in kext loading, after AppleImage4 has already logged its nonce-slot failures; the tunable's own name
+  # is the boot-arg (TUNABLE(bool, allow_printf_from_interrupts_disabled_context, "nointr_consio")).
+  # Passing it keeps the boot going so the next panic is the interesting one instead of this noise.
+  "nointr_consio=1",
   # 0 for this round, and stated here rather than injected by the build script. configs/uke-macos_defconfig
   # still has CONFIG_XNU_NATIVE_UFS off, so this kernel carries no UFS driver and
   # drivers/NativeUfs/NativeUfs.cpp:2089 returns false on a 0 argument anyway - the value itself changes

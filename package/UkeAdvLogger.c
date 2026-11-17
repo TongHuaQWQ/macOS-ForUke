@@ -56,8 +56,31 @@ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 // One owner of the geometry: these must equal uke.dsc's PcdAdvancedLoggerBase and
 // PcdAdvancedLoggerPages * 4096 (tools/check-adv-log.py enforces it, and that the window is the reserved
 // tail described above).
-#define UKE_ADV_BASE        0x9FFE00000ULL
+// Where the firmware's Advanced Logger buffer actually is. This is NOT guessed: the DXE driver prints
+// its own geometry into the log it exports, and the ScanLine below came straight out of it
+//
+//   00:00:11.659 : [DXE  ] [LOAD] Loading driver at ... AdvancedLogDxe.efi
+//   00:00:11.671 : [DXE  ] [ERR ] Advanced Logger Info = B112E000, Min = B112E058, Max = B116E000
+//
+// i.e. INFO at 0xB112E000, first log byte at 0xB112E058 (= INFO + 88, exactly EXPECTED_LOG_BUFFER_OFFSET)
+// and the buffer ending at 0xB116E000 (256 KiB, PcdAdvancedLoggerPages|64). Two consecutive boots
+// (log/uke-20190100-000038 (6).log and log/uke-20190100-000037 (5).log) report the same address, and it
+// sits in the firmware's own low-DRAM allocator window (the DXE log shows Allocations from 0xA7000000
+// upwards), which is nowhere near the memory this kernel was handed: the firmware map reports the XNU
+// run as EfiConventionalMemory from 0x8C0000000, two and a half decades of bytes above this.
+//
+// The previous round named 0x9FFE00000 instead, which the firmware map reports as EfiReservedMemoryType
+// and which the DXE log shows is full of platform state (UKELOG slots at 0x9FFFC0000 and 0x9FFFE0000, a
+// UKEMARK window at 0x9FFE30000, a kernel-snapshot window at 0x9FFE00000+0x1C0000). Writing there is what
+// made the next firmware boot die in ArmCpuDxe.
+//
+// UKE_ADV_SCAN_* is the belt: the address is an allocator's choice, so if it ever moves, find the header
+// instead of trusting the constant. Reads only - the writer still refuses to create anything.
+#define UKE_ADV_BASE        0xB112E000ULL
 #define UKE_ADV_BYTES       0x40000U     /* 64 pages, PcdAdvancedLoggerPages|64 */
+#define UKE_ADV_SCAN_BASE   0xB1000000ULL
+#define UKE_ADV_SCAN_BYTES  0x00400000U
+#define UKE_ADV_SCAN_STEP   0x1000U
 #define UKE_ADV_INTERVAL_MS 2000
 
 // A 128 KiB DEVELOPMENT msgbuf seeded as one record would hit the 64 KiB length limit of the v2 entry
@@ -152,12 +175,35 @@ uke_adv_get32(const volatile uint8_t *base, size_t offset)
 	       ((uint32_t)base[offset + 3] << 24);
 }
 
+// Geometry a header has to satisfy before this writer will touch it. Kept as a separate predicate so the
+// scan and the fixed probe are held to exactly the same rule.
+static bool
+uke_adv_geometry_ok(volatile uint8_t *window, uint32_t *offset_out, uint32_t *limit_out)
+{
+	uint32_t offset, size, current;
+
+	if (uke_adv_get32(window, UKE_ALI_OFF_SIGNATURE) != UKE_ALOG_SIGNATURE) {
+		return false;
+	}
+	offset = uke_adv_get32(window, UKE_ALI_OFF_LOG_OFFSET);
+	size = uke_adv_get32(window, UKE_ALI_OFF_SIZE);
+	current = uke_adv_get32(window, UKE_ALI_OFF_CURRENT);
+	if ((offset < UKE_ALI_BYTES) || ((offset % 8) != 0) || (size == 0) ||
+	    (offset + size > UKE_ADV_BYTES) || (current < offset) || (current > offset + size)) {
+		return false;
+	}
+	*offset_out = offset;
+	*limit_out = offset + size;
+	return true;
+}
+
 static bool
 uke_adv_open(void)
 {
 	vm_offset_t va;
 	volatile uint8_t *window;
 	uint32_t offset, size, current;
+	uint32_t limit = 0;
 
 	if (ukeAdvWindow != NULL) {
 		return true;
@@ -165,47 +211,52 @@ uke_adv_open(void)
 	if (ukeAdvRefused) {
 		return false;
 	}
+	// 1. The address the firmware printed in its own log.
 	va = ml_io_map_wcomb((vm_offset_t)UKE_ADV_BASE, (vm_size_t)UKE_ADV_BYTES);
-	if (va == 0) {
-		IOLog("UkeAdvLogger: cannot map 0x%llx\n", (unsigned long long)UKE_ADV_BASE);
-		ukeAdvRefused = true;
-		return false;
-	}
-	window = (volatile uint8_t *)va;
-	if (uke_adv_get32(window, UKE_ALI_OFF_SIGNATURE) != UKE_ALOG_SIGNATURE) {
-		// The writer used to lay a header down here when it found none, and that is what broke b256/b257:
-		// 0x9FFE00000 is NOT free memory. This unit's firmware memory map reports
-		//   0x8C0000000-0x9FFDEFFFF   EfiConventionalMemory (7)
-		//   0x9FFDF0000-0x9FFFFFFF   EfiReservedMemoryType (0)
-		// so the tail belongs to the platform, and a kernel that wrote there made the NEXT firmware boot
-		// take a synchronous exception in ArmCpuDxe (CpuExceptionHandlerLib's ASSERT(FALSE)), with the
-		// same stack contents every time. It also explains the old "the pram region kills the boot"
-		// rounds (b156/b158/b175): that region was never ours to write.
-		// So: append to a header the firmware published, never create one. With uke.dsc reverted
-		// (PcdAdvancedLoggerFixedInRAM off, base 0) the firmware allocates its own buffer and this writer
-		// stands down with one line - which is the correct behaviour until a safe handoff exists (the
-		// address the firmware allocated has to reach the kernel, e.g. as an FDT /chosen property).
-		IOLog("UkeAdvLogger: no ALOG header at 0x%llx (read 0x%08x); not creating one in reserved memory\n",
+	if (va != 0) {
+		window = (volatile uint8_t *)va;
+		if (uke_adv_geometry_ok(window, &offset, &limit)) {
+			goto found;
+		}
+		IOLog("UkeAdvLogger: no usable ALOG header at 0x%llx (read 0x%08x)\n",
 		    (unsigned long long)UKE_ADV_BASE, uke_adv_get32(window, UKE_ALI_OFF_SIGNATURE));
-		ukeAdvRefused = true;
-		return false;
 	}
-	// Whoever produced the header, only accept geometry this writer can stay inside of.
+	// 2. The address is the firmware allocator's choice, so do not trust the constant: look for the header
+	//    inside the allocator's window. This reads only; a header is never created, because a header this
+	//    writer invented is exactly what broke b256/b257.
+	va = ml_io_map_wcomb((vm_offset_t)UKE_ADV_SCAN_BASE, (vm_size_t)UKE_ADV_SCAN_BYTES);
+	if (va != 0) {
+		uint32_t scanned;
+		for (scanned = 0; scanned + UKE_ADV_BYTES <= UKE_ADV_SCAN_BYTES; scanned += UKE_ADV_SCAN_STEP) {
+			window = (volatile uint8_t *)va + scanned;
+			if (uke_adv_geometry_ok(window, &offset, &limit)) {
+				IOLog("UkeAdvLogger: found the firmware buffer at 0x%llx by scan\n",
+				    (unsigned long long)(UKE_ADV_SCAN_BASE + scanned));
+				goto found;
+			}
+		}
+		IOLog("UkeAdvLogger: no ALOG header in 0x%llx..0x%llx either\n",
+		    (unsigned long long)UKE_ADV_SCAN_BASE,
+		    (unsigned long long)(UKE_ADV_SCAN_BASE + UKE_ADV_SCAN_BYTES));
+	}
+	// Standing down is a result, not a failure: it means this booting image has no firmware buffer to
+	// append to, and inventing one in memory this kernel does not own is what cost us b256 and b257.
+	IOLog("UkeAdvLogger: standing down; the log channel needs the firmware's own buffer\n");
+	ukeAdvRefused = true;
+	return false;
+
+found:
+	// Re-read through the same accessors so the values are the ones this writer will use.
 	offset = uke_adv_get32(window, UKE_ALI_OFF_LOG_OFFSET);
 	size = uke_adv_get32(window, UKE_ALI_OFF_SIZE);
 	current = uke_adv_get32(window, UKE_ALI_OFF_CURRENT);
-	if ((offset < UKE_ALI_BYTES) || ((offset % 8) != 0) || (size == 0) ||
-	    (offset + size > UKE_ADV_BYTES) || (current < offset) || (current > offset + size)) {
-		IOLog("UkeAdvLogger: refused header offset=%u size=%u current=%u window=%u\n",
-		    offset, size, current, UKE_ADV_BYTES);
-		ukeAdvRefused = true;
-		return false;
-	}
 	ukeAdvWindow = window;
-	ukeAdvLimit = offset + size;
+	ukeAdvLimit = limit;
 	// Tell the exporter that the buffer outlived ExitBootServices and is in permanent RAM.
 	uke_adv_put8(window, UKE_ALI_OFF_PERMANENT_RAM, 1);
 	uke_adv_put8(window, UKE_ALI_OFF_AT_RUNTIME, 1);
+	IOLog("UkeAdvLogger: appending at offset=%u size=%u current=%u of %u\n",
+	    offset, size, current, UKE_ADV_BYTES);
 	return true;
 }
 
