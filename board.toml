@@ -725,7 +725,7 @@ kernel_args = [
   # No log-sys: that group belongs to package/BootLog.c, which this port does not carry; UsbProbe.cpp logs
   # the table itself. Nor any IOSleep: this kernel's timer never interrupts, so the driver's delays spin on
   # the timebase (uke_delay_ms in package/QcomDwc3Platform.c).
-  "usb=6",
+  "usb=1",
   # Text on the panel again, and it is the other deliberate change of this round. The USB bring-up's
   # evidence is its own console lines (qcom-dwc3: and the UKE usb: stage table), which the graphics
   # console does not draw; the diagnostic card that made that trade acceptable is off in this round

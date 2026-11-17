@@ -67,6 +67,21 @@ static void report_forever(const char *where) {
         uke_delay_ms(5000);
     }
 }
+// A thread that does nothing but re-state which stage the bring-up is in. It exists because the bring-up
+// runs on another thread and can block inside an allocation or a mapping -- and a blocked bring-up prints
+// nothing at all, which is what b254's panel showed: no panic, no stage lines, only the console freezing
+// later on AppleImage4's output. A line every second survives that, because the console's scrollback always
+// holds the most recent second.
+static void reporter(void *, wait_result_t) {
+    for (unsigned beat = 1;; ++beat) {
+        const int32_t stage = (int32_t)native_usb_stats[0];
+        IOLog("UKE usb: beat #%u stage=%d gsnpsid=%08x gdsc=%x/%x smmu=%08x rep=%08x rpmh=%u\n",
+              beat, (int)stage, (unsigned)native_usb_stats[1], (unsigned)native_usb_stats[5],
+              (unsigned)native_usb_stats[6], (unsigned)native_usb_stats[7], (unsigned)native_usb_stats[8],
+              (unsigned)native_usb_stats[9]);
+        uke_delay_ms(1000);
+    }
+}
 static void worker(void *, wait_result_t) {
     unsigned mode = 0;
     PE_parse_boot_argn("usb", &mode, sizeof mode);
@@ -129,8 +144,11 @@ extern "C" void uke_usb_probe(void) {
         return;
     }
     thread_t thread = nullptr;
-    const kern_return_t started = kernel_thread_start(worker, nullptr, &thread);
-    if (started != KERN_SUCCESS) { IOLog("UKE usb: kernel_thread_start failed %d\n", (int)started); return; }
+    kern_return_t started = kernel_thread_start(reporter, nullptr, &thread);
+    if (started != KERN_SUCCESS) { IOLog("UKE usb: reporter thread failed %d\n", (int)started); }
+    else { thread_deallocate(thread); }
+    started = kernel_thread_start(worker, nullptr, &thread);
+    if (started != KERN_SUCCESS) { IOLog("UKE usb: worker thread failed %d\n", (int)started); return; }
     thread_deallocate(thread);
     IOLog("UKE usb: worker started usb=%u\n", enabled);
 }
