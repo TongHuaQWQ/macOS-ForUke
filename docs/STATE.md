@@ -4,19 +4,28 @@
 
 ## 0. 现在在哪（每次会话先看这 30 行）
 
+> 更新时间 **2026-11-18 02:0x**。这一节的旧内容（b105/ep0 那批）已经翻过去了，那一整段历史在 §89–§92。
+
 | 项 | 值 |
 |---|---|
-| 目标 | Xiaomi Pad 7（uke / SM7675 "Cliffs"）上跑 macOS 26.5.2（25F84），4 KiB 页 + arm64e/PAC 自建 XNU |
-| 当前卡点 | 内核在写 Advanced Logger 窗口时 panic（`unaligned kernel data abort`，见 §93：编译器把字节写合并成宽存储）；日志通道因此暂无输出 |
-| 当前镜像 | b258（内核不再写 `0x9FFE00000`）与 b259（`volatile` + `-mstrict-align`，带汇编闸门）；索引见 `work/flash/INDEX.md` |
-| 索引 | `work/flash/INDEX.md`（每轮镜像、sha、用途）；刷写用 `bash work/flash/apply.sh <round>`，恢复原厂用 `bash work/flash/restore-os4.sh`（OS4 在 `device/uke-backup/os4/`，`uke-backup/` 那份是 OS3 不要刷） |
-| 正在做的事 | §89–§92：ep0 三个阶段由驱动**自己武装**、`SET_ADDRESS` 地址立即写、轮询不再以错误自杀、`CONNECTDONE` 重新分配 transfer resource、看门狗不碰已挂起的传输 |
-| 下一轮要看 | 面板 `S=`（控制阶段）、`ER=`（吞掉的错误数）、`LS=`（链路状态）、`TA/TB`（最后一条被拒命令，`TB` 的 bit12..15 = `CmdStatus`）；主机是否出现 `cdc_acm … ttyACM0` |
-| 情报库 | `work/analysis/porting-kb/`（移植知识，含 `linux-dwc3` 源码副本）、`work/analysis/hw-intel/`（9 个分项 + `README.md` 排序后的行动清单，7300 行） |
-| 组件自检 | `package/qcom-usb-debug/scripts/check-component.sh`（一条命令：patch 副本 + gcc/clang `-Werror` 编译 + 28 项 sanitised 测试，几十秒） |
+| 目标 | Xiaomi Pad 7（uke / SM7675 "Cliffs"）跑 macOS 26.5.2（25F84，profile `macos-27.3-uke`），4 KiB 页 + arm64e/PAC 自建 XNU |
+| **当前卡点** | **只有 CPU0 在跑**：`dts/uke.dts` 缺 8 个 `unixnu,cluster-type`，`processor_bootstrap()` 拒绝其余核（详见 `docs/ROADMAP-20261118.md` P2） |
+| 刚修掉的 | **平台错误风暴**（`esr 0x96000010`）——成因是我们自己给 ArmCpu 加的 GICR SGI 帧回读，b262/b263 已删（§94）|
+| 当前分支 | `ci-b263-clustertype`（b262 的 GIC 修复 + dts 的 8 个 cluster-type）|
+| 镜像索引 | `work/flash/INDEX.md`；刷 `bash work/flash/apply.sh <round>`，回原厂 `bash work/flash/restore-os4.sh`（**OS4** 在 `device/uke-backup/os4/`，`uke-backup/` 那份是 OS3 不要刷）|
+| 出镜像 | `python3 work/round.py <RUN_ID> --name <round> --core work/push/UniXNU --device work/push/uke-main-merge --profile macos-27.3-uke`（约 6 分钟）|
+| **参考实现**（别手搓，直接拿）| `work/ref-sheng/`=UniXNU-sheng（**跑 macOS**）、`work/ref-allenwdk/`=Allenwdk/UniXNU-uke（**这台机器跑 iPadOS**）、`work/ref-armcpu/`、`work/ref-senemos/`=Linux 补丁集、`work/ref-vendor-dt/`=厂商 DT |
+| 本轮文档 | `docs/ROADMAP-20261118.md`（问题清单+路线）、`docs/UPSTREAM-REVIEW-20261118.md`（哪些本地覆盖该丢）、`work/re/linux-ref/`（Linux 树交叉核对）|
+| 下一轮验收 | `ArmCpu: N timer interrupts` **N>0**；`IOServiceWait` 不再堆积；`ArmCpu: smp step` 有非 0 值 |
+| 组件自检 | `bash package/qcom-usb-debug/scripts/check-component.sh`（几十秒，改归档代码前必跑）|
+| 设备操作铁律 | **不要长按断电**（DRAM 里的诊断全丢）；要在 TWRP 里读日志 |
+| CI 铁律 | `ci-*` 分支一推就构建（~35 分钟），**同一时间只推一个**：推新分支会把在跑的那次顶掉（b262 就是这么被 cancel 的）|
 
-**组件侧的铁律**（违反过，代价是 25 分钟的 CI 轮次）：改内核/归档代码前，先跑
-`scripts/check-component.sh`；任何改动都可能只在 macOS runner 上编译，所以能在主机上验证的就别留给 CI。
+**两条已经付过代价的教训**
+
+1. 诊断代码本身会打死启动：读 GICR SGI 帧 → 同步外部中止 → 错误处理器恢复同一条指令 → 无限风暴。
+   **写是 posted（丢了也不报错），读必须等应答**，所以"写完回读校验"在这块板子上是反的。
+2. 拍屏/扫二维码能拿到什么，取决于内核跑到了哪一步。内核没到 BSD init 之前，QR 里只有固件日志。
 
 ### 章节索引
 
