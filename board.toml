@@ -490,29 +490,29 @@ kernel_args = [
   # reset goes through gIOPlatform, so a panic taken before an IOPlatformExpert exists still spins
   # (PEHaltRestartInternal returns -1) -- the stall probe and the lock watchdog cover that window.
   "debug=0x14a",
-  # Round b170 (2026-11-13): the hand-rolled GIC path is switched OFF and the board is back on the
-  # upstream interrupt path. Two facts forced this:
+  # Round b170 (2026-11-13) switched the hand-rolled GIC path OFF and moved to the upstream one:
   #   * upstream's device records state it plainly - "Gunyah hypervisor: SGIs are not delivered, so
   #     IPIs use armcpu-spi-ipi=1" (UniXNU catalogue, device record for the same SoC class), and
-  #   * the kernel now reaches this port's own uke_gic_arm_cpu() and dies there: the store to
-  #     GICR_IGROUPR0 (PA 0x17190080) is refused by the bus (esr 0x96000010, DFSC 0x10) although the
-  #     redistributor reports itself awake and this firmware's own ArmGicV3Dxe programmed the same
-  #     frame earlier in the same boot.
-  # ArmCpu (already a component of this board: UniXNU/ArmCpu, device-verified upstream) wakes the
-  # redistributor, enables PPI 27 and routes IPIs over software-pended SPIs from its start(), i.e.
-  # from a kext, once the kernel is up - which is the layer this port never reached before tonight.
-  # uke-gic=0 keeps uke-gic-timer.patch compiled in but inert, so the comparison is one boot-arg away.
-  # Both kernel-side GIC owners are switched OFF, because the firmware already has the controller in
-  # exactly the state the kernel needs and it does it without faulting. UKEGPIO at hand-off measured:
-  #   GICD_CTLR = 0xD2  -> ARE_NS (bit 4, arm-gic-v3.h:61), DS (bit 6), ENABLE_G1A (bit 1)
-  #   GICR_ISENABLER0 = 0x6C000000 -> PPIs 26, 27 (arch timer), 29, 30 already enabled
-  #   GICR_IGROUPR0   = 0xFFFFFFFF -> every SGI/PPI in Group 1
-  # and the same firmware reads and writes that SGI frame with rd0's WAKER still at 0x2 (ProcessorSleep),
-  # so neither "ARE_NS missing" nor "asleep redistributor blocks the frame" survives as an explanation.
-  # The kernel is the only party that gets a bus abort there, so this round asks what happens when it
-  # touches nothing at all and simply takes interrupts the firmware already enabled.
+  #   * the kernel reached this port's own uke_gic_arm_cpu() and died there: the store to
+  #     GICR_IGROUPR0 (PA 0x17190080) is refused by the bus (esr 0x96000010, DFSC 0x10).
+  # uke-gic=0 keeps uke-gic-timer.patch compiled in but inert, so that comparison stays one boot-arg away.
   "uke-gic=0",
-  "armcpu-skip-gic=1",
+  # armcpu-skip-gic=1 is OFF again (2026-11-17) and it was the bug, not a workaround. ArmCpu.cpp:671-677
+  # returns from initCPU() before enableGic() when it is set: "CPU registration still happens; the timer
+  # is left off". It was the second arm of b170's A/B test ("what happens when the kernel touches no GIC
+  # MMIO at all") and it was never switched back, so every round since ran with NO timer interrupt. That
+  # is exactly what the panel has been reporting, and none of it was a fault:
+  #   ArmCpu: 0 timer interrupts, 0 IPIs in the first 10 ms after registration    <- no timer armed
+  #   uke-stall-probe: samples=0 last_pc=...                                      <- the sampler rides PPI 27
+  #   IOServiceWait / lck-mtx lines piling up after BSD init                      <- deadlines never fire
+  # The working macOS reference (UniXNU-sheng, work/ref-sheng/board.toml:60) sets armcpu-spi-ipi=1 and
+  # armcpu-self-ipi=1 and does NOT set skip-gic, i.e. its ArmCpu really does wake the redistributor and
+  # enable PPI 27 from initCPU - the design the paragraph above describes. This round does the same and
+  # keeps uke-gic=0 (the hand-rolled path stays out of the picture, so this is one variable).
+  # What a failure looks like now: the same GICR_IGROUPR0 store refused with esr 0x96000010 DFSC 0x10,
+  # but issued by ArmCpu::enableGic() from a kext with the console already up, so it is readable -
+  # which is why -uketextconsole is restored in this round.
+  # "armcpu-skip-gic=1",
   "armcpu-spi-ipi=1",
   # armcpu-probe DROPPED 2026-11-15: the 2026-11-15 11:51 photo shows that boot ending in
   #   panic(cpu 0): "ArmCpu: uke interrupt-path diagnostics -- read the lines above"  @ArmCpu.cpp:546
@@ -541,7 +541,7 @@ kernel_args = [
   # whether the vendor eUSB2 sequence actually took effect). Without this arg the graphics console
   # stays as it is and the card owns the panel. Cost: kernel text is no longer drawn, so a panic is
   # only readable through the panic screen itself. Restore this line when text is what is being read.
-  # "-uketextconsole",
+  "-uketextconsole",
   "kt_fixed_zones=120",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",
@@ -613,7 +613,15 @@ kernel_args = [
   "boot-progress=2",
   "-apfs_shared_datavolume",
   "offline-key-events=1",
-  "native-ufs-root=1",
+  # 0 for this round, and stated here rather than injected by the build script. configs/uke-macos_defconfig
+  # still has CONFIG_XNU_NATIVE_UFS off, so this kernel carries no UFS driver and
+  # drivers/NativeUfs/NativeUfs.cpp:2089 returns false on a 0 argument anyway - the value itself changes
+  # no behaviour. What it does change is scripts/unixnu/payload.py:check_native_root(): with 1 it demands
+  # exactly one pmgr=2 plus the _sheng_pmgr_run symbol, neither of which this train links, so the build
+  # stops - or silently passes native-ufs-root=0 behind your back through
+  # tools/build-payload-linux.sh:186-189, which is the trap the device side hit on 2026-11-15. The storage
+  # round puts this back to 1 together with the policy directory and CONFIG_XNU_NATIVE_UFS.
+  "native-ufs-root=0",
   "native-ufs-allow-unverified=1",
   "sheng-data-persist=2",
   # "sheng-staged-apps=1",   (see the note above: dropped for the 1000-byte command-line cap)
