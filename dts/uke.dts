@@ -47,3 +47,17 @@
         method = "smc";
     };
 };
+
+// AMP/Edge requires an explicit E/P type per core: a missing type becomes SMP and
+// cluster_type_to_pset_type() rejects it during processor_bootstrap(), which is why only CPU0 has ever
+// run on this port. The split is the stock uke one (freq domain 0 / 1 / 2):
+// CPUs 0-2 are the little cluster, 3-7 the big one. Verified against both working references -
+// UniXNU-sheng/dts/sheng.dts:35-42 (macOS) and Allenwdk/UniXNU-uke/dts/uke.dts (iPadOS).
+&cpu0 { unixnu,cluster-type = "E"; };
+&cpu1 { unixnu,cluster-type = "E"; };
+&cpu2 { unixnu,cluster-type = "E"; };
+&cpu3 { unixnu,cluster-type = "P"; };
+&cpu4 { unixnu,cluster-type = "P"; };
+&cpu5 { unixnu,cluster-type = "P"; };
+&cpu6 { unixnu,cluster-type = "P"; };
+&cpu7 { unixnu,cluster-type = "P"; };

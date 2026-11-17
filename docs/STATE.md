@@ -5639,7 +5639,7 @@ b262 把这三处读全部改成 `0xffffffff = not sampled`（保留写、保留
 |---|---|---|---|
 | SGI 帧回读 | 从不回读 | 三处回读 | **风暴根因**（94.1） |
 | `dts` CPU 类型 | 8 个核全部标 `unixnu,cluster-type`（0-2 E，3-7 P） | **一个都没有** | 他们注释写明：缺类型会退化成 SMP，`cluster_type_to_pset_type()` 在 `processor_bootstrap()` 里拒绝 —— 即我们**除 CPU0 外的核根本起不来** |
-| SMP 开关 | `board.toml` 带 `sheng-smp=1` | **没有任何 smp 参数** | 我们的 ArmCpu 读 `sheng-smp`（他们钉的版本读 `smp`），两边都没开 → 只能单核跑，定时器/IPI 永远不会累加 |
+| SMP 开关 | `board.toml` 带 `sheng-smp=1` | **也有** `sheng-smp=1`（board.toml:747） | ~~以为没开~~ —— 更正：开关两边都在。真正缺的只有下一行的 `cluster-type` |
 | `wlan` 节点 | `dts` 里 `wlan { unixnu,adt-name = "wlan" }` | 无 | 没有它 `wifid` 不起，Wi-Fi 面板不存在（我们还没到这一步，但迟早要） |
 | 日志通道 | `sheng-log=1` + `UkeLastLog` 写 userdata 尾 32 MiB，**TWRP 下 dd 读**（`docs/RECOVERY-LOG.md`） | 同机制，但内核到不了 BSD init，transport 从未 attach（导出的 32 MiB 只有 517 字节非零） | 日志方法没有错，是**没跑到** |
 | kernel_args | 42 条 / 733 字节（含 `boot-progress=2`、`-ukedeferredconsole`、`sheng-smp=1`、`memory-window-high=1`、`gpu-pool=0`…） | 52 条 / 982 字节（塞满了 UFS/USB/日志诊断） | 我们把预算花在了诊断上，他们的参数是"能用"的最小集 |
@@ -5647,7 +5647,11 @@ b262 把这三处读全部改成 `0xffffffff = not sampled`（保留写、保留
 ### 94.3 目前问题清单（按阻塞程度）
 
 1. **P1 风暴**（94.1）→ b262 已修，待验证。
-2. **P2 单核**：`cluster-type` 缺失 + `sheng-smp` 未开 → 8 核里只有 CPU0；`ArmCpu: N timer interrupts` 永远为 0，`IOServiceWait` 里的 deadline 永不触发，看起来像"卡死"。→ b263（dts 加 cluster-type + args 加 `sheng-smp=1`/`smp=1`）。
+2. **P2 单核**：`dts/uke.dts` **缺 8 个 `unixnu,cluster-type`**（`sheng-smp=1` 本来就在）。缺类型时
+   `cluster_type_to_pset_type()` 在 `processor_bootstrap()` 里拒绝这个核，于是只有 CPU0 真正
+   注册/启动，`ArmCpu: N timer interrupts` 永远是 0，`IOServiceWait` 的 deadline 永不触发 ——
+   外部看就是"内核卡死"。两份工作参考都在 dts 里标了 8 个（sheng macOS / allenwdk-uke iPadOS）。
+   → b263 = 只加这一项（本地已验证生成的 ADT 里 8 个核都是 E/E/E/P/P/P/P/P）。
 3. **P3 日志通道**：依赖 P2 之后能走到 BSD init；在此之前 QR 导出只有固件部分（内核行进不去）。
 4. **P4 USB**：repeater 调参表错设备（我们抄 SM8550），且**必须用 device 角色那列**（厂商 DT 三套序列：normal/factory/host），另需 `F_CLK_19P2M_EN` 先清后置 → 另一个窗口负责；**刷之前必须去掉 `uke-platform-error-panic=1`**，否则死在 ArmCpu、到不了 stage 6/7。
 5. **P5 平台错误诊断本身有害**：三处回读已删；`armcpu_gic_diag()` 也改成不碰 SGI 帧。
