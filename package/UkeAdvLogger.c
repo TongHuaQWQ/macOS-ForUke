@@ -166,26 +166,22 @@ uke_adv_open(void)
 	}
 	window = (uint8_t *)va;
 	if (uke_adv_get32(window, UKE_ALI_OFF_SIGNATURE) != UKE_ALOG_SIGNATURE) {
-		// Nothing has claimed the window yet: the firmware's DxeCore logger only adopts a fixed address
-		// whose header already validates (AdvancedLoggerLib.c:144 and :164) and otherwise allocates its
-		// own buffer, so on the first boot this region still holds whatever the reset left. The region is
-		// reserved for exactly this purpose and nothing else writes it, so lay down a header that the
-		// firmware's own ValidateInfoBlock() accepts on the next boot - at which point it appends its log
-		// after ours instead of allocating elsewhere.
-		size_t at;
-
-		IOLog("UkeAdvLogger: no ALOG header at 0x%llx (read 0x%08x), creating one\n",
+		// The writer used to lay a header down here when it found none, and that is what broke b256/b257:
+		// 0x9FFE00000 is NOT free memory. This unit's firmware memory map reports
+		//   0x8C0000000-0x9FFDEFFFF   EfiConventionalMemory (7)
+		//   0x9FFDF0000-0x9FFFFFFF   EfiReservedMemoryType (0)
+		// so the tail belongs to the platform, and a kernel that wrote there made the NEXT firmware boot
+		// take a synchronous exception in ArmCpuDxe (CpuExceptionHandlerLib's ASSERT(FALSE)), with the
+		// same stack contents every time. It also explains the old "the pram region kills the boot"
+		// rounds (b156/b158/b175): that region was never ours to write.
+		// So: append to a header the firmware published, never create one. With uke.dsc reverted
+		// (PcdAdvancedLoggerFixedInRAM off, base 0) the firmware allocates its own buffer and this writer
+		// stands down with one line - which is the correct behaviour until a safe handoff exists (the
+		// address the firmware allocated has to reach the kernel, e.g. as an FDT /chosen property).
+		IOLog("UkeAdvLogger: no ALOG header at 0x%llx (read 0x%08x); not creating one in reserved memory\n",
 		    (unsigned long long)UKE_ADV_BASE, uke_adv_get32(window, UKE_ALI_OFF_SIGNATURE));
-		for (at = 0; at < UKE_ALI_BYTES; at++) {
-			uke_adv_put8(window, at, 0);
-		}
-		uke_adv_put32(window, UKE_ALI_OFF_SIGNATURE, UKE_ALOG_SIGNATURE);
-		uke_adv_put16(window, UKE_ALI_OFF_VERSION, UKE_AL_INFO_VERSION);
-		uke_adv_put32(window, UKE_ALI_OFF_LOG_OFFSET, UKE_ALI_BYTES);
-		uke_adv_put32(window, UKE_ALI_OFF_SIZE, UKE_ADV_BYTES - UKE_ALI_BYTES);
-		uke_adv_put32(window, UKE_ALI_OFF_CURRENT, UKE_ALI_BYTES);
-		uke_adv_put8(window, UKE_ALI_OFF_PERMANENT_RAM, 1);
-		uke_adv_put8(window, UKE_ALI_OFF_AT_RUNTIME, 1);
+		ukeAdvRefused = true;
+		return false;
 	}
 	// Whoever produced the header, only accept geometry this writer can stay inside of.
 	offset = uke_adv_get32(window, UKE_ALI_OFF_LOG_OFFSET);

@@ -140,7 +140,10 @@ class Writer:
 
 
 def read_dsc(path):
-    text = path.read_text(errors='ignore')
+    # Strip comments first: the fixed-base experiment is reverted as a comment, and a naive search would
+    # keep reading the value it no longer sets.
+    text = '\n'.join(line for line in path.read_text(errors='ignore').splitlines()
+                     if not line.lstrip().startswith('#'))
     base = re.search(r'PcdAdvancedLoggerBase\|(\S+)', text)
     pages = re.search(r'PcdAdvancedLoggerPages\|(\d+)', text)
     fixed = re.search(r'PcdAdvancedLoggerFixedInRAM\|(\w+)', text)
@@ -236,6 +239,14 @@ int main(void)
 	for (i = 0; i < 64; i++) {
 		gText[i] = (unsigned char)('A' + (i % 26));
 	}
+	/* Stand in for the firmware: publish a valid ALOG header, which the writer now only appends to. */
+	memset(gWindow, 0, sizeof(gWindow));
+	gWindow[0x00] = 'A'; gWindow[0x01] = 'L'; gWindow[0x02] = 'O'; gWindow[0x03] = 'G';
+	gWindow[0x04] = 6; gWindow[0x05] = 0;                 /* Version */
+	*(unsigned int *)(gWindow + 0x0c) = 88;               /* LogBufferOffset */
+	*(unsigned int *)(gWindow + 0x14) = 88;               /* LogCurrentOffset */
+	*(unsigned int *)(gWindow + 0x1c) = sizeof(gWindow) - 88;  /* LogBufferSize */
+
 	gMsgbuf.msg_magic = MSG_MAGIC;
 	gMsgbuf.msg_size = (int)sizeof(gText);
 	gMsgbuf.msg_bufx = 64;
@@ -393,11 +404,21 @@ def main():
     driver_base, driver_bytes = read_driver(driver)
     dts_end = read_dts_end(dts)
 
-    if base is None or pages is None:
-        failures.append(f'{dsc}: no PcdAdvancedLoggerBase / PcdAdvancedLoggerPages')
-    if fixed != 'TRUE':
+    # Two acceptable states, and the difference matters:
+    #   * fixed base OFF (the current, safe one): the firmware allocates its own buffer and the writer
+    #     must stand down, because 0x9FFE00000 is EfiReservedMemoryType on this unit and a kernel that
+    #     wrote there broke the next firmware boot;
+    #   * fixed base ON: only valid together with FixedInRAM, and only if a previous round has shown the
+    #     second boot surviving - nothing here can prove that.
+    if base is None or fixed is None:
+        print('ok   firmware   fixed base not configured: the firmware allocates its own buffer')
+        if driver_bytes != 0 and not (ROOT / 'package' / 'UkeAdvLogger.c').read_text().count('not creating one'):
+            failures.append('the writer still creates a header; with no fixed base it must stand down')
+        else:
+            print('ok   driver     the writer only appends and stands down without a firmware header')
+    elif fixed != 'TRUE':
         failures.append(f'{dsc}: PcdAdvancedLoggerFixedInRAM is {fixed}, so the library will ignore the base')
-    if base is not None and pages is not None:
+    if base is not None and pages is not None and fixed == 'TRUE':
         window = pages * 4096
         if driver_base != base:
             failures.append(f'driver UKE_ADV_BASE 0x{driver_base and hex(driver_base)} != DSC base 0x{base:x}')
@@ -416,7 +437,8 @@ def main():
             print(f'FAIL: {failure}')
         print('FAILED')
         return 1
-    print(f'ok   firmware   base 0x{base:x}, {pages} pages ({pages * 4096 // 1024} KiB), fixed in RAM')
+    if base is not None and fixed == 'TRUE':
+        print(f'ok   firmware   base 0x{base:x}, {pages} pages ({pages * 4096 // 1024} KiB), fixed in RAM')
     print(f'ok   driver     UkeAdvLogger.c uses the same base and window')
     print(f'ok   device tree memory node ends at 0x{dts_end:x}, so XNU never allocates the window')
     print(f'ok   self-tests {tests}')
