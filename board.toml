@@ -707,12 +707,18 @@ kernel_args = [
   # the core reset. It stays force-loaded (CONFIG_XNU_QCOM_USB_DEBUG) because its switches are what the
   # previous rounds read, so turning it back on is this one line, not a rebuild of the archive.
   # "qcom-usb-debug=1",
-  # The official route (drivers/QcomDwc3, package/UsbProbe.cpp): uke_usb_probe() runs only when this is
-  # set, waits 3 s for the boot to settle, brings the controller up (nine stages, recorded in
-  # native_usb_stats[0], negative = the stage that failed), loads AppleUSBXDCI and AppleUSBXHCI, then
-  # publishes the two subclasses. 2 adds register sampling, 3 also takes the controller off the bus and
-  # back once. UsbProbe.cpp prints the stage table to the console after bring-up, so no log-sys is
-  # needed: package/BootLog.c, which owns the log-sys group, is not part of this port.
+  # The official route (drivers/QcomDwc3, package/UsbProbe.cpp), started from bsd_autoconf() by
+  # patches/xnu/zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch:
+  #   1  bring the controller up and stop there. Nine stages, one "qcom-dwc3: stage N" line each and two
+  #      "UKE usb:" summary lines after the attempt; stage is negative when a step failed. This is what
+  #      b252 ships: on b251 the driver was force-loaded and never called at all, so the first job is the
+  #      bring-up reading, not the Apple stack.
+  #   4  also load AppleUSBXDCI/AppleUSBXHCI and publish the two subclasses (bounded retry, reports the
+  #      load result). Try it with a payload rebuild -- this is a boot argument, not a kernel change.
+  #   5  and additionally run qcom_dwc3_diag(true), the controller-off-the-bus cycle.
+  # No log-sys: that group belongs to package/BootLog.c, which this port does not carry; UsbProbe.cpp logs
+  # the table itself. Nor any IOSleep: this kernel's timer never interrupts, so the driver's delays spin on
+  # the timebase (uke_delay_ms in package/QcomDwc3Platform.c).
   "usb=1",
   # Text on the panel again, and it is the other deliberate change of this round. The USB bring-up's
   # evidence is its own console lines (qcom-dwc3: and the UKE usb: stage table), which the graphics

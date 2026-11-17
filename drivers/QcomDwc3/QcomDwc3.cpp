@@ -18,6 +18,12 @@
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOPlatformExpert.h>
+// uke: this kernel's architected timer never delivers an interrupt, and IOSleep() waits on that timer, so
+// a sleep here is a permanent wait (b251-usbdwc3 hung inside the first IOSleep the driver takes). Every
+// delay becomes a spin on the timebase, which is what IODelay() already is; the vendored call sites stay
+// verbatim. See package/QcomDwc3Platform.c for uke_delay_ms().
+extern "C" void uke_delay_ms(uint32_t);
+#define IOSleep(ms) uke_delay_ms((uint32_t)(ms))
 extern "C" {
 int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 int armcpu_spi_mask(uint32_t, bool);
@@ -50,7 +56,9 @@ constexpr unsigned kOwnedTcs = 2;   // shared with the microphone rail under the
 struct Region {IOMemoryMap *map; volatile uint32_t *va;};
 Region gGcc, gScratch, gPhy, gTcsrMap;
 bool gSuperSpeed;
-void stage(int value) {native_usb_stats[0] = (uint32_t)value;}
+// Every stage is logged as it is entered, not only reported once bringUp() returns: a round that hangs in
+// a later stage has to say which ones were reached, and the panel is the only channel on this board.
+void stage(int value) {native_usb_stats[0] = (uint32_t)value; IOLog("qcom-dwc3: stage %d\n", value);}
 bool mapRegion(Region &r, uint64_t pa, uint64_t bytes) {
     IODeviceMemory *d = IODeviceMemory::withRange(pa, bytes);
     r.map = d ? d->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;

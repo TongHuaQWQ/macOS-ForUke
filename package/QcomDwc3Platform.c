@@ -67,3 +67,13 @@ void sm8550_apps_smmu_unlock (void)
     IOLock *lock = __atomic_load_n (&gSmmuLock, __ATOMIC_ACQUIRE);
     if (lock != NULL) { IOLockUnlock (lock); }
 }
+
+/* The third board hook, and the one that decides whether the driver can run at all on this machine:
+ * this kernel's architected timer never delivers an interrupt (a long-standing finding, docs/STATE.md
+ * section 3), and IOSleep() is a wait with a timeout on exactly that timer -- a thread that calls it
+ * never wakes. IODelay() spins on the timebase instead, which advances whether or not an interrupt
+ * arrives, so every delay in the driver goes through here. Bounded by the caller, never by a timer. */
+void uke_delay_ms (uint32_t milliseconds)
+{
+    if (milliseconds != 0) { IODelay (milliseconds * 1000u); }
+}

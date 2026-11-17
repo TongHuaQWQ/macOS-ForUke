@@ -5894,3 +5894,66 @@ preModLoad, `-11` postModLoad). Then on a Mac: `ioreg -p IOUSB -l -w0 | grep -E 
 Speed'`. §95e has the branch table for each reading, and §95f the four risks: the prelink data budget did
 not bite this round (the collection emitted with nothing stubbed), the two DWC3 owners stayed linked and
 only one is switched on, the QMP table is still SM8550's, and the retimer was not re-derived for cliffs.
+
+## 96. 2026-11-17: b251-usbdwc3 flashed, and the log named two reasons it could never have worked
+
+The round's kernel booted (eight CPUs started, `security policy loaded`, kexts starting) and printed not one
+`UKE usb:` line. Two independent causes, both mine, both now fixed; neither is a hardware finding.
+
+### 96a. The call site was compiled out
+
+`offline-legacy-start.patch` calls `native_legacy_display_late_probe()` — the function that used to call
+`uke_usb_probe()` — inside
+
+```c
+#if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
+```
+
+and `configs/uke-macos_defconfig:99` says `# CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set`. The built kernel
+proves it: `native/native.macho` from run `43913735659` defines `_uke_usb_probe`, `_qcom_dwc3_bring_up`,
+`_native_usb_stats`, `_armcpu_spi_mask` and `_sm8550_gcc_update32`, and has no
+`_native_legacy_display_late_probe` at all. `2f4e573`+`88b8de4` therefore shipped a driver that was linked
+(force-load worked) and unreachable. My earlier claim that this hook is unconditional was wrong: I read the
+hunk body and not the guard above it.
+
+The same guard explains a much older puzzle: the `zzzzzzzzzzzzzzzzz-uke-bsd-init-hook` and
+`zzzzzzzzzzzzzzzzzz-qcom-usb-debug-*` hunks are guarded by `#if XNU_QCOM_USB_DEBUG`, and nothing in
+`scripts/build-xnu-4k-baseline.sh` turns `CONFIG_XNU_QCOM_USB_DEBUG` into that define (it reaches the build
+only as an environment variable, `kernel.py:xnu_env`). Those hooks have been dead code in every round;
+the CDC-ACM console's output came from its archive, not from them. Whether to wire that define is a
+separate question — it would switch on code nobody has compiled in months.
+
+### 96b. `IOSleep` cannot return on this machine
+
+The panel also carries the long-standing timer finding in the same frame: `Proc: 0 timer interrupts, 0 IPIs
+in the first 10 s after registration`, `uke-stall-probe: samples=0`, and `fileset-wait: … (Infinite)`
+everywhere. `IOSleep()` is a wait with a timeout on that timer, so it never wakes. The worker opened with
+`IOSleep(3000)` and the driver takes eleven `IOSleep`s of its own (`QcomDwc3.cpp:83,224,225,270,305,599,645,
+651,662,678,849`). Even with the call site fixed, the first line would have been that 3 s sleep.
+
+### 96c. What changed
+
+| change | where |
+| --- | --- |
+| the call site, once, at the top of `bsd_autoconf()` | `patches/xnu/zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch` (new) |
+| a **weak** no-op `uke_usb_probe()` so every configuration still links | same patch |
+| `IOSleep` → a spin on the timebase | `drivers/QcomDwc3/QcomDwc3.cpp` (`#define IOSleep` → `uke_delay_ms`), `package/QcomDwc3Platform.c` (`uke_delay_ms` = `IODelay`) |
+| one line per bring-up stage, as it is entered | `QcomDwc3.cpp:stage()` |
+| entry line before anything can block, and a bounded retry of the two kext loads | `package/UsbProbe.cpp` |
+| the old display-probe call site removed | `package/LegacyDisplayProbe.cpp` |
+| `usb=` semantics documented (1 = bring-up only, 4 = + Apple stack, 5 = + diag cycle) | `board.toml` |
+
+Why a weak definition rather than a `#if`: a call from `bsd_init.c` is a link-time reference, and the
+bootstrap configuration links without the archives — an undefined pac-signed import is a hard failure there
+(that is the `l_…$auth_ptr$ia$` error `zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch` records). A weak
+definition keeps every configuration linkable; where `build/qcom-dwc3/libQcomDwc3.a` is linked, its strong
+definition wins. No core repository change, no new configuration key.
+
+`usb=1` deliberately stops after the bring-up: this is the first round whose question is "does the
+controller come up, and where does it stop", not "does the Apple stack enumerate". `usb=4` is the stack
+half and needs only a payload rebuild once the bring-up reading is in hand.
+
+Checked before pushing: the new patch applies both alone and after its sibling
+(`zzzzzzzzzzzzzzzzzz-qcom-usb-debug-worker.patch`), `check-patch-copies.py` and `check-patch-hygiene.py`
+(35 patches, 0 problems) pass, `porting-record.py check` passes (14 areas), the command line is still 971 of
+1000 bytes, and `QcomDwc3Platform.c` compiles clean freestanding.

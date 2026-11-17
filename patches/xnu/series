@@ -182,6 +182,17 @@ zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch
 zzzzzzzzzzzzzzzzzz-qcom-usb-debug-console.patch
 zzzzzzzzzzzzzzzzzz-qcom-usb-debug-worker.patch
 
+# uke-usb-start: the official USB route's call site. b251-usbdwc3 linked drivers/QcomDwc3 into the
+# kernel and nothing ever called it: the single caller was native_legacy_display_late_probe(), whose call
+# site sits behind XNU_NATIVE_LEGACY_DISPLAY and never compiled in -- the built kernel carried
+# _uke_usb_probe and no _native_legacy_display_late_probe at all. This calls uke_usb_probe() from the
+# first statement of bsd_autoconf(), the point the qcom-usb-debug worker also uses because this kernel
+# never returns from IOKitBSDInit(). The weak no-op definition it adds is the "stub archive supplies a weak
+# no-op" pattern this board already uses for sheng_gpu_power_probe, placed in the kernel because it has to
+# hold for every configuration: the bootstrap link has no archives, and the strong definition in
+# build/qcom-dwc3/libQcomDwc3.a wins wherever that archive is linked.
+zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch
+
 # uke-boot-marks.patch is NOT applied: its uke_mark() calls ml_io_map() at _arm_init+0x34,
 # which is before arm_vm_init() at +0x768, so the bootstrap pmap is not up yet. The official entry
 # probe (patch-xnu-entry-probe.py) asked the same questions without touching the kernel source:
