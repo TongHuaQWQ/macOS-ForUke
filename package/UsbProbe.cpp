@@ -74,6 +74,19 @@ static void report_forever(const char *where) {
 // holds the most recent second.
 static void reporter(void *, wait_result_t) {
     for (unsigned beat = 1;; ++beat) {
+        if (beat == 3) {
+            // A binary test the panel cannot lose. Two rounds of photographs show the console's tail full of
+            // late boot output (AMFI, vm_page_find_contiguous failures, fileset-wait) and not one
+            // "UKE usb: beat" line, although this thread re-prints once a second. Two explanations fit: the
+            // thread never ran, or its IOLog blocks on a console lock held by a stuck thread -- and from
+            // outside those look identical. panic() takes a different path and, with debug=0x14e, spins
+            // instead of resetting, so its text stays on the screen: no panic means the thread never ran, and
+            // a frozen panic screen carries the stage number.
+            panic("UKE usb: stage=%d gsnpsid=%08x gdsc=%x/%x smmu=%08x rep=%08x rpmh=%u",
+                  (int)native_usb_stats[0], (unsigned)native_usb_stats[1], (unsigned)native_usb_stats[5],
+                  (unsigned)native_usb_stats[6], (unsigned)native_usb_stats[7], (unsigned)native_usb_stats[8],
+                  (unsigned)native_usb_stats[9]);
+        }
         const int32_t stage = (int32_t)native_usb_stats[0];
         IOLog("UKE usb: beat #%u stage=%d gsnpsid=%08x gdsc=%x/%x smmu=%08x rep=%08x rpmh=%u\n",
               beat, (int)stage, (unsigned)native_usb_stats[1], (unsigned)native_usb_stats[5],
