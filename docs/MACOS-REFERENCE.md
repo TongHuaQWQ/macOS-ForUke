@@ -79,3 +79,66 @@ against after the storage round:
 5. `launchd` starts and keeps starting recovery services;
 6. from there, WindowServer is the next wall (HID + display), and it is a userspace service failure, not
    a kernel one.
+
+## What the official device page's development record says about macOS
+
+`https://unixnu.com/zh/devices/sheng` carries one 开发经验 block per area (`{#configuration}`,
+`{#firmware}`, `{#cpu}`, `{#storage}`, `{#image}`, `{#diagnostics}`, `{#arm64e-os}` …). The items below are
+the ones that bear on this port; the right column is where uke stands, so the next person can tell a
+settled question from an open one.
+
+### Configuration and identity
+
+| Official lesson | uke |
+| --- | --- |
+| OS-profile source pins select the public macOS 26.5 families **without claiming binary ABI compatibility**. | Same stance: `profiles/os/macos-27.3-uke` pins `xnu-12377.121.6` as the closest public source to the 26C5035r kernelcache; the pin is a source identity, not an ABI proof. |
+| Source storage/input archives are built separately and are not selected for boot in the minimal configuration. | `uke-macos_defconfig` follows exactly this: storage archives were absent until the policy directory existed. |
+| Tables merge ARM64 → SoC → OS → device, and **arrays replace** inherited selections, so every required component and fragment has to be listed again. | This is why `[components] include` has to repeat everything, and why dropping `ShengUfs` from it really removed the driver. |
+
+### Firmware and boot
+
+| Official lesson | uke |
+| --- | --- |
+| The firmware DTB is an input to boot-image assembly; XNU consumes the separately generated ADT. | `[bootimg]`/`[device_tree]` vs `[payload.adt]` — and `grep _FVH boot.img` shows the FV while the ADT rides in the payload, exactly as described. |
+| A configured menu entry needs a payload FAT containing `EFI/UniXNU/unixnu.toml`; when entries are missing, check the ramdisk block device. | Verified every round: `mdir -i vendor_boot.img@@4096 ::/EFI/UniXNU/` is how the flashed arguments are read back. |
+| No extracted binaries live in any repository. | `board.toml [ipsw.sha256]` + `[firmware.image]` pins, nothing extracted committed. |
+
+### CPU and interrupts
+
+| Official lesson | uke |
+| --- | --- |
+| GIC register ranges must use the **translated physical addresses** from the hardware tree. | This is the same ground `work/re/docs/2026-11-14-gic-geometry-cliffs.md` covers (GICD `0x17100000`, GICR `0x17180000`, stride `0x40000` derived from `GICR_TYPER.VLPIS`). |
+| Enabled CPU count and MPIDR affinities must be checked together. | The `cpu_start (cpu 0..7)` sequence is the check we have been reading off the panel. |
+
+### Storage and root volume
+
+| Official lesson | uke |
+| --- | --- |
+| An idle AHB branch may report `CLK_OFF` with hardware gating enabled — **check enable and gating bits together**. | Directly relevant: the firmware's USB dump prints `UKE-PIPE: cbcr=80000001 enable=1 halted=1`, which is this situation, not a fault. |
+| SMMU bypass still has address-width constraints; validate every DMA range and context-bank assignment. | Open for our USB/DMA path. |
+| The signed root-policy **headers** ship in `scripts/policies/<profile>` and the kernel archives pass `--policy-dir`; the **full block tables stay local inputs of the userdata image**. | Implemented here: `scripts/policies/26C5035r` is committed, the 130 MiB of tables travel as `[userdata] objects` (`OS.vroot` …) and are deliberately not in git. |
+
+### Image assembly (the most macOS-specific block)
+
+| Official lesson | uke |
+| --- | --- |
+| A run mounted the OS root and SystemCryptex, then **stopped because the payload omitted its Data seed**; the payload now refuses `CONFIG_XNU_OWNER_DATA_MOUNT` without a seed. | `scripts/unixnu/payload.py:53` carries that refusal, and it is exactly why `[payload.runtime]` is parked at `enabled = false` until a kernel is built with the matching `CONFIG_XNU_OWNER_DATA_VOLUME_UUID`. |
+| Fileset adapters carry `N_ABS` branches without split-segment records; XnuPrelink retargets them after placement and rejects destinations outside retained code. | `kits/XnuPrelink` is in this board's archive list for the same reason. |
+| A packaged image panicked at `corecrypto_kext_start` because the recipe **omitted `--lto`** — and "packaging success with `--allow-missing` does not establish boot compatibility". | `CONFIG_XNU_BUILD_LTO=y` stays on in `uke-macos_defconfig`; a packaging success is not treated as boot evidence anywhere in this port. |
+| The payload carries `kernel.macho.adt`; the boot image carries the firmware FDT. Keep the two inputs named explicitly. | `[payload.adt]` vs `[bootimg]`/`[device_tree]`, and the round's verification reads both separately. |
+
+### Diagnostics
+
+| Official lesson | uke |
+| --- | --- |
+| **A source implementation, a host check and a device observation establish different completion levels.** | The discipline this port needed and did not always follow: b256 was flashed on source review + a host format check, and a host *compile-and-run* check (now `tools/check-adv-log.py` self-test 7) is what would have caught it. |
+| Keep an unresolved cause explicit and record the next measurement that can distinguish it. | Each round's notes say what the next boot must show, rather than asserting a cause. |
+| Their logs carry tagged rows (`[adsp]`, `[audio]`, `[battery]`, `[dpu vig0]`, `[gpu wptr]` …) so a log read can be filtered by subsystem. | Adopted for the kernel log channel: `UKE-ADVLOG`, `UKE usb: beat #N stage=`, `lck-gate:`, `ucle-stall-probe:` are all greppable prefixes. |
+
+### arm64e
+
+| Official lesson | uke |
+| --- | --- |
+| SM8550 implements FEAT_PAuth and signatures are created on the device, so **the PAC algorithm need not match Apple's**. | Same SoC class, same conclusion. |
+| Public XNU programs PAC keys only for VMAPPLE through HVC; the arm64e profile provides native key programming. | `profiles/arch/arm64e` is what this board builds on. |
+| The macOS dyld cache is arm64e and contains SME code, which SM8550 does not have. | A userspace-stage ceiling to expect, not a kernel one. |
