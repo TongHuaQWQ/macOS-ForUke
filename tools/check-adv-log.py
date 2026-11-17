@@ -21,8 +21,11 @@ builds it, and over the four refusals that keep a bad header from being walked.
 import argparse
 import pathlib
 import re
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -163,6 +166,124 @@ def read_dts_end(path):
     return high_base + high_size
 
 
+HOST_STUBS = r"""
+/* Minimal stand-ins for the kernel ABI so tools/check-adv-log.py can compile the real writer on the
+   host and walk what it produces. Nothing here is arm64-alignment-checked, which is exactly why the
+   generated records are handed back to the Python walk instead of being inspected in C. */
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+typedef uintptr_t vm_offset_t;
+typedef unsigned int uint32_t_compat;
+typedef void *thread_t;
+typedef int kern_return_t;
+typedef int wait_result_t;
+typedef uintptr_t vm_size_t;
+#define NULL ((void *)0)
+#define KERN_SUCCESS 0
+#define BASEPRI_KERNEL 80
+#define MSG_MAGIC 0x063061
+struct msgbuf { int msg_magic; int msg_size; int msg_bufx; unsigned char *msg_bufc; };
+static struct msgbuf gMsgbuf;
+static struct msgbuf *msgbufp = &gMsgbuf;
+static unsigned char gWindow[0x40000];
+static unsigned char gText[4096];
+static char gLog[8192];
+static size_t gLogUsed;
+
+vm_offset_t ml_io_map_wcomb(vm_offset_t phys, size_t size)
+{
+	(void)phys; (void)size;
+	return (vm_offset_t)gWindow;
+}
+
+void IOLog(const char *fmt, ...)
+{
+	(void)fmt;
+}
+
+void IOSleep(unsigned ms)
+{
+	(void)ms;
+}
+
+int kernel_thread_start_priority(void *fn, void *arg, int pri, thread_t *out)
+{
+	(void)fn; (void)arg; (void)pri;
+	*out = (thread_t)1;
+	return KERN_SUCCESS;
+}
+
+void thread_deallocate(thread_t thread)
+{
+	(void)thread;
+}
+
+#define UKE_HOST_SIM 1
+#include "UkeAdvLogger.c"
+
+int main(void)
+{
+	unsigned i;
+
+	/* Prime msgbuf with a plausible ring and let the writer create the header and append. */
+	for (i = 0; i < sizeof(gText); i++) {
+		gText[i] = (unsigned char)('a' + (i % 26));
+	}
+	for (i = 0; i < 64; i++) {
+		gText[i] = (unsigned char)('A' + (i % 26));
+	}
+	gMsgbuf.msg_magic = MSG_MAGIC;
+	gMsgbuf.msg_size = (int)sizeof(gText);
+	gMsgbuf.msg_bufx = 64;
+	gMsgbuf.msg_bufc = gText;
+
+	if (!uke_adv_open()) {
+		fprintf(stderr, "open refused\n");
+		return 2;
+	}
+	uke_adv_append("UKE-ADVLOG: writer alive\n", sizeof("UKE-ADVLOG: writer alive\n") - 1);
+	uke_adv_append("ArmCpu: 42 timer interrupts, 0 IPIs\n", sizeof("ArmCpu: 42 timer interrupts, 0 IPIs\n") - 1);
+	uke_adv_pump();
+	fwrite(gWindow, 1, sizeof(gWindow), stdout);
+	return 0;
+}
+"""
+
+
+def host_sim():
+    """Compile the real UkeAdvLogger.c with stubs and walk what it wrote."""
+    compiler = shutil.which('gcc') or shutil.which('clang')
+    if not compiler:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        (work / 'sim.c').write_text(HOST_STUBS)
+        shutil.copy(ROOT / 'package' / 'UkeAdvLogger.c', work / 'UkeAdvLogger.c')
+        # Empty stand-ins for the kernel headers the writer includes; the stubs above supply every type
+        # and function it actually uses.
+        for header in ('sys/appleapiopts.h', 'mach/vm_types.h', 'kern/debug.h', 'kern/sched.h',
+                       'kern/startup.h', 'kern/thread.h', 'machine/machine_routines.h',
+                       'sys/msgbuf.h', 'IOKit/IOLib.h'):
+            target = work / 'stubs' / header
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('/* host stand-in */\n')
+        binary = work / 'sim'
+        build = subprocess.run([compiler, '-std=gnu11', '-O1', '-w', '-I', str(work / 'stubs'),
+                                '-o', str(binary), str(work / 'sim.c')], capture_output=True, text=True)
+        if build.returncode:
+            print(build.stderr[-2000:])
+            raise SystemExit('FAIL: the writer does not compile on the host')
+        result = subprocess.run([str(binary)], capture_output=True)
+        if result.returncode:
+            raise SystemExit(f'FAIL: the host simulation exited {result.returncode}: {result.stderr[:300]}')
+        messages = walk(result.stdout)
+    return messages
+
+
 def self_tests():
     ok = 0
 
@@ -235,6 +356,18 @@ def self_tests():
     assert messages == ['firmware line'], messages
     print('ok   self-test 6 v1 entry   a firmware ALMS entry is walked')
     ok += 1
+
+    # 7: the real C compiles and its output walks: the only test that covers the writer itself.
+    messages = host_sim()
+    if messages is None:
+        print('skip self-test 7 host-sim  no host compiler')
+    else:
+        first = messages[0] if messages else None
+        assert first == 'UKE-ADVLOG: writer alive\n', messages[:2]
+        assert any('ArmCpu: 42 timer interrupts' in m for m in messages), messages[:3]
+        assert messages[-1].startswith('ABCDEFGHIJKLMNOPQRSTUVWXYZ'), messages[-1][:40]
+        print(f'ok   self-test 7 host-sim  compiled the writer; {len(messages)} records walked back')
+        ok += 1
 
     return ok
 
