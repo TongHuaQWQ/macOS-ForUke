@@ -5916,12 +5916,19 @@ proves it: `native/native.macho` from run `43913735659` defines `_uke_usb_probe`
 (force-load worked) and unreachable. My earlier claim that this hook is unconditional was wrong: I read the
 hunk body and not the guard above it.
 
-The same guard explains a much older puzzle: the `zzzzzzzzzzzzzzzzz-uke-bsd-init-hook` and
-`zzzzzzzzzzzzzzzzzz-qcom-usb-debug-*` hunks are guarded by `#if XNU_QCOM_USB_DEBUG`, and nothing in
-`scripts/build-xnu-4k-baseline.sh` turns `CONFIG_XNU_QCOM_USB_DEBUG` into that define (it reaches the build
-only as an environment variable, `kernel.py:xnu_env`). Those hooks have been dead code in every round;
-the CDC-ACM console's output came from its archive, not from them. Whether to wire that define is a
-separate question — it would switch on code nobody has compiled in months.
+Two corrections to that first reading, both from disassembling the b251 kernel rather than trusting the
+patch text:
+
+- `offline-legacy-start.patch` is not in either core series at all (`patches/xnu/series`,
+  `patches/xnu-12377/series`), so the display late probe was never compiled in — not merely gated. The
+  diagnosis is therefore stronger than "the guard is off", which is why the fix does not try to turn that
+  guard on.
+- `#if XNU_QCOM_USB_DEBUG` *is* live. `qcom_usb_start_worker_once()` is inlined into `bsd_autoconf` in
+  `b251-usbdwc3`'s native kernel (a compare-and-swap once-guard, states 0–4, `QCOM USB WORKER start
+  failed`), so `CONFIG_XNU_QCOM_USB_DEBUG=y` does reach the compiler by a path this repository does not
+  own — `scripts/build-xnu-4k-baseline.sh` does not name it and no device patch defines it. I first
+  recorded the opposite here; the disassembly is the evidence, and it also means the bsd-init hook that
+  patch adds has been running, with its output going to the pram path rather than to the panel.
 
 ### 96b. `IOSleep` cannot return on this machine
 
