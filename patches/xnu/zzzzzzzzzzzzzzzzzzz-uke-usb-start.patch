@@ -1,26 +1,25 @@
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1109,8 +1109,33 @@
- 	lock_trace = 1;
- }
+@@ -1110,6 +1110,32 @@
  
 +/*
 + * uke-usb-start: the board entry of the official USB route (drivers/QcomDwc3, package/UsbProbe.cpp).
 + *
-+ * Called from bsd_autoconf() and not, as the driver's own guide's reference board does, from
-+ * native_legacy_display_late_probe(): that caller sits behind XNU_NATIVE_LEGACY_DISPLAY, which this
-+ * board's configuration leaves off, so b251-usbdwc3 shipped with libQcomDwc3.a force-loaded and
-+ * unreachable -- the built kernel carried _uke_usb_probe and no _native_legacy_display_late_probe at
-+ * all. bsd_autoconf() is where the qcom-usb-debug worker also starts, for a reason that matters more
-+ * here than the exact point: this kernel has never returned from IOKitBSDInit(), so a board service
-+ * called after it would never start.
++ * Called from bsd_autoconf() and not, as the driver guide's reference board does, from
++ * native_legacy_display_late_probe(): that caller is compiled only with XNU_NATIVE_LEGACY_DISPLAY, which
++ * this board's configuration leaves off, so b251-usbdwc3 shipped with libQcomDwc3.a force-loaded and
++ * unreachable -- the built kernel carried _uke_usb_probe and no _native_legacy_display_late_probe at all.
++ * bsd_autoconf() is also where the qcom-usb-debug worker starts, and for the reason that decides this
++ * placement: this kernel has never returned from IOKitBSDInit(), so a board service called after it would
++ * never run.
 + *
 + * The weak definition is the "stub archive supplies a weak no-op" pattern this board already uses for
 + * sheng_gpu_power_probe (package/LegacyDisplayProbe.cpp), placed in the kernel instead of an archive
 + * because it has to hold for *every* configuration: the bootstrap configuration links without any
-+ * archives, and a reference to a missing pac-signed import is a hard link failure there. Where
-+ * build/qcom-dwc3/libQcomDwc3.a is linked, its strong definition wins and this stub is never entered;
-+ * a config without it still links, and says so if it ever runs.
++ * archives, and an unresolved pac-signed import is a hard link failure there (the error
++ * zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch records). Where build/qcom-dwc3/libQcomDwc3.a is linked its
++ * strong definition wins and this stub is never entered; a configuration without it still links, and says
++ * so if it ever runs.
 + */
 +__attribute__((weak)) void
 +uke_usb_probe(void)
