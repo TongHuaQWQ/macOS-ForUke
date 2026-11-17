@@ -802,7 +802,10 @@ chip_id = "207"
 owned_memory_size = "0x100000000"     # 4 GiB of this unit's 5 GiB high run (0x8C0000000..0xA0000000).
                                       # Ladder if DarwinBoot reports Out of Resources or the VM misbehaves:
                                       # 0xC0000000 (3 GiB) -> 0x80000000 (2 GiB). 12 GB reference used 4.75 GiB.
-root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+# 84581E99 is the OS volume of 26C5035r, the image this unit installs; 04769D26 was the OS volume of
+# iPadOS 17.7.11 21H461, which is not on this unit (see docs/MACOS-REFERENCE.md on the storage
+# branch). Inert in a round with no block driver, but it is a wrong value and it costs nothing.
+root_match_volume_uuid = "84581E99-85BE-4957-AC53-2947E887B3E4"
 # mount(8) phase 1 requires a boot manifest hash to name /private/preboot/<hash>.
 # uke has no Apple personalization manifest, so this is an explicit bring-up
 # owner boot-set identity (SHA-384 of "UkeBringup.BootSet.v1\0"), not Apple data.
