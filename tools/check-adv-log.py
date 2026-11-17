@@ -295,6 +295,144 @@ def host_sim():
     return messages
 
 
+# A freestanding stand-in for the kernel ABI, used only to compile the writer for aarch64 and look at
+# the instructions it produces. Separate from HOST_STUBS because this one needs no libc at all.
+ASM_STUBS = r"""
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long uint64_t;
+typedef unsigned long size_t;
+typedef unsigned long uintptr_t;
+typedef unsigned long vm_offset_t;
+typedef unsigned long vm_size_t;
+typedef void *thread_t;
+typedef int kern_return_t;
+typedef int wait_result_t;
+typedef _Bool bool;
+#define true 1
+#define false 0
+#define NULL ((void *)0)
+#define KERN_SUCCESS 0
+#define BASEPRI_KERNEL 80
+#define MSG_MAGIC 0x063061
+struct msgbuf { int msg_magic; int msg_size; int msg_bufx; unsigned char *msg_bufc; };
+static struct msgbuf *msgbufp;
+void *memcpy(void *dst, const void *src, size_t n);
+
+vm_offset_t ml_io_map_wcomb(vm_offset_t phys, vm_size_t size);
+void IOLog(const char *fmt, ...);
+void IOSleep(unsigned ms);
+int kernel_thread_start_priority(void *fn, void *arg, int pri, thread_t *out);
+void thread_deallocate(thread_t thread);
+
+#define UKE_HOST_SIM 1
+#include "UkeAdvLogger.c"
+"""
+
+
+# Store mnemonics, and how many bytes each one touches: an access is safe under SCTLR_EL1.A only when the
+# offset it uses is a multiple of its own width.
+STORE_WIDTHS = {
+    'strb': 1, 'sturb': 1,
+    'strh': 2, 'sturh': 2,
+    'str': 4, 'stur': 4,          # widened below when the data register is xN
+    'stp': 16, 'stnp': 16,
+}
+STORE_LINE = re.compile(
+    r'\A\s*(?P<mn>stur|sturb|sturh|str|strb|strh|stp|stnp)\s+(?P<rest>.*?)\[(?P<addr>[^\]]*)\]')
+IMMEDIATE = re.compile(r'#(?P<value>-?(?:0x[0-9a-fA-F]+|\d+))')
+DATA_REG = re.compile(r'\A\s*(?P<reg>[wx](?:\d+|zr))')
+
+
+def unaligned_stores(assembly):
+    """Every store in an aarch64 assembly listing whose immediate offset is not a multiple of its width.
+
+    A byte store can never be unsafe; anything wider is safe only on a naturally aligned address. This is
+    exactly the property b256 and b257 violated: `stur wzr,[x22,#0x6]` and `stur xzr,[x22,#0x22]`, which
+    is what the optimiser made of the byte-wise source."""
+    bad = []
+    for line in assembly.splitlines():
+        match = STORE_LINE.match(line)
+        if not match:
+            continue
+        # [x0] / [x0, x1] / [x0, #0x22] / [x0, #0x22]! : only a literal immediate can be misaligned.
+        immediate = IMMEDIATE.search(match.group('addr'))
+        if immediate is None:
+            continue
+        value = int(immediate.group('value'), 0)
+        mnemonic = match.group('mn')
+        reg = DATA_REG.match(match.group('rest'))
+        if reg is None:
+            continue
+        width = STORE_WIDTHS[mnemonic]
+        if mnemonic in ('str', 'stur') and reg.group('reg').startswith('x'):
+            width = 8
+        elif mnemonic in ('stp', 'stnp') and reg.group('reg').startswith('w'):
+            width = 8
+        if value % width:
+            bad.append((value, width, line.strip()))
+    return bad
+
+
+def assembly_gate():
+    """Compile the writer for aarch64 and prove its window accesses are byte-sized.
+
+    The point is not to inspect the code by eye: b257's source was byte stores and the *compiler* turned
+    them back into one wide store, so the source text cannot answer the question. -mstrict-align is what
+    makes the backend refuse, and this gate is what notices if that flag ever falls out of the build."""
+    clang = shutil.which('clang')
+    if not clang:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(tmp)
+        stubs = work / 'stubs'
+        stubs.mkdir()
+        (work / 'asm_unit.c').write_text(ASM_STUBS)
+        shutil.copy(ROOT / 'package' / 'UkeAdvLogger.c', work / 'UkeAdvLogger.c')
+        for header in ('sys/appleapiopts.h', 'mach/vm_types.h', 'kern/debug.h', 'kern/sched.h',
+                       'kern/startup.h', 'kern/thread.h', 'machine/machine_routines.h',
+                       'sys/msgbuf.h', 'IOKit/IOLib.h',
+                       # -nostdinc, so the C library headers the writer includes are stand-ins as well:
+                       # every type it needs is declared in ASM_STUBS above.
+                       'stdint.h', 'stdbool.h', 'stddef.h', 'string.h'):
+            target = stubs / header
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('/* freestanding stand-in */\n')
+        flags = [clang, '-target', 'aarch64-none-elf', '-nostdinc', '-I', str(stubs), '-I', str(work),
+                 '-std=gnu11', '-O2', '-w', '-mgeneral-regs-only', '-S']
+
+        built = work / 'writer.s'
+        result = subprocess.run([*flags, '-mstrict-align', '-o', str(built), str(work / 'asm_unit.c')],
+                                capture_output=True, text=True)
+        if result.returncode:
+            print(result.stderr[-2000:])
+            raise SystemExit('FAIL: the writer does not compile for aarch64')
+        bad = unaligned_stores(built.read_text())
+
+        # The negative control: the pre-fix shape, compiled without the flag, has to be caught. If this
+        # does not trip, the gate is blind and the run above proved nothing.
+        (work / 'control.c').write_text(
+            'typedef unsigned char uint8_t;\n'
+            'void control(uint8_t *base) {\n'
+            '\tunsigned i;\n'
+            '\tbase[0x06] = 0; base[0x07] = 0; base[0x08] = 0; base[0x09] = 0;\n'
+            '\tfor (i = 0; i < 8; i++) { base[0x22 + i] = 0; }\n'
+            '}\n')
+        control = work / 'control.s'
+        result = subprocess.run([*flags, '-o', str(control), str(work / 'control.c')],
+                                capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit('FAIL: the negative control does not compile')
+        caught = unaligned_stores(control.read_text())
+    # The gate compiles on its own, so it cannot see whether the real build keeps the flag. Check that
+    # the file is listed with it, which is the half of the guarantee the compiler cannot provide.
+    build = (ROOT / 'scripts' / 'build-boot-log.py').read_text()
+    writer_line = [line for line in build.splitlines() if "'UkeAdvLogger.c'" in line]
+    flagged = bool(writer_line) and '-mstrict-align' in writer_line[0]
+    return bad, caught, flagged
+
+
 def self_tests():
     ok = 0
 
@@ -378,6 +516,26 @@ def self_tests():
         assert any('ArmCpu: 42 timer interrupts' in m for m in messages), messages[:3]
         assert messages[-1].startswith('ABCDEFGHIJKLMNOPQRSTUVWXYZ'), messages[-1][:40]
         print(f'ok   self-test 7 host-sim  compiled the writer; {len(messages)} records walked back')
+        ok += 1
+
+    # 8: the instructions, not the source. b257 proved that byte stores in the source can come out of the
+    # optimiser as one wide, misaligned store, which panics under SCTLR_EL1.A.
+    gate = assembly_gate()
+    if gate is None:
+        print('skip self-test 8 asm-align  no clang to cross-compile with')
+    else:
+        bad, caught, flagged = gate
+        if bad:
+            for offset, width, line in bad[:6]:
+                print(f'     unaligned {width}-byte store at offset 0x{offset:x}: {line}')
+            raise SystemExit(f'FAIL: {len(bad)} store(s) in the writer are not naturally aligned')
+        if not caught:
+            raise SystemExit('FAIL: the negative control was not caught, so the gate proves nothing')
+        if not flagged:
+            raise SystemExit('FAIL: scripts/build-boot-log.py does not compile UkeAdvLogger.c with '
+                             '-mstrict-align, so the optimiser may merge the byte stores again')
+        print(f'ok   self-test 8 asm-align  no wide store in the writer\'s aarch64 code, -mstrict-align is '
+              f'in the build, and the pre-fix shape is caught ({len(caught)} stores)')
         ok += 1
 
     return ok

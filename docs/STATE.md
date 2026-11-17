@@ -7,9 +7,9 @@
 | 项 | 值 |
 |---|---|
 | 目标 | Xiaomi Pad 7（uke / SM7675 "Cliffs"）上跑 macOS 26.5.2（25F84），4 KiB 页 + arm64e/PAC 自建 XNU |
-| 当前卡点 | 内核侧 DWC3 **CDC-ACM 日志串口**枚举不起来（主机报 `-71` / `-110`），日志目前只能靠**面板二维码** |
-| 当前镜像 | `work/flash/vendor_boot_round-b105-ep0arm.img`（sha `d7352c07…`）+ `boot-round-b105-ep0arm.img`（固件，sha `6bab1734…`，自 b92b 起未变） |
-| 索引 | `work/flash/INDEX.md`（每轮镜像、sha、用途）；恢复原厂：`fastboot flash vendor_boot_a device/uke-backup/uke-backup/vendor_boot_a.img` |
+| 当前卡点 | 内核在写 Advanced Logger 窗口时 panic（`unaligned kernel data abort`，见 §93：编译器把字节写合并成宽存储）；日志通道因此暂无输出 |
+| 当前镜像 | b258（内核不再写 `0x9FFE00000`）与 b259（`volatile` + `-mstrict-align`，带汇编闸门）；索引见 `work/flash/INDEX.md` |
+| 索引 | `work/flash/INDEX.md`（每轮镜像、sha、用途）；刷写用 `bash work/flash/apply.sh <round>`，恢复原厂用 `bash work/flash/restore-os4.sh`（OS4 在 `device/uke-backup/os4/`，`uke-backup/` 那份是 OS3 不要刷） |
 | 正在做的事 | §89–§92：ep0 三个阶段由驱动**自己武装**、`SET_ADDRESS` 地址立即写、轮询不再以错误自杀、`CONNECTDONE` 重新分配 transfer resource、看门狗不碰已挂起的传输 |
 | 下一轮要看 | 面板 `S=`（控制阶段）、`ER=`（吞掉的错误数）、`LS=`（链路状态）、`TA/TB`（最后一条被拒命令，`TB` 的 bit12..15 = `CmdStatus`）；主机是否出现 `cdc_acm … ttyACM0` |
 | 情报库 | `work/analysis/porting-kb/`（移植知识，含 `linux-dwc3` 源码副本）、`work/analysis/hw-intel/`（9 个分项 + `README.md` 排序后的行动清单，7300 行） |
@@ -5547,3 +5547,53 @@ report; and `platform_error` is documented in this tree (`osfmk/arm64/sleh.c`, `
 reachable only for `FSC_SYNC_PARITY` (`0x18`), yet b127 reached it with `0x10`. That contradiction is
 unresolved and is recorded as `PROBLEMS.md` row 21 — it did not affect the diagnosis, but it is the kind
 of thing that quietly invalidates one later.
+
+---
+
+## §93 2026-11-17 深夜：b256/b257 的 panic 真因是**编译器合并了字节写**，不是刷写
+
+两轮都以同一条 panic 收尾（面板照片，两次都在 `pc 0xfffffff00c4370xx`）：
+
+```
+unaligned kernel data abort, at pc 0xfffffff00c43708c, lr …c437088
+esr 0x0000000096000061   (write + alignment fault, DFSC 0x21)
+far 0xfffffff8e8fe006    (x0 = 0xfffffff8e8fe000 → 故障地址正是 x0+6)
+```
+
+把两轮的 CI 产物按 `tools/../analysis/symbolize-panic.py --disasm` 反汇编，对应位置是：
+
+| 轮次 | 指令 |
+|---|---|
+| b256 | `stur xzr,[x22,#0xe]`（packed 结构体，已知） |
+| b257 | `stur wzr,[x22,#0x6]`、`strh wzr,[x22,#0xa]`、`stur xzr,[x22,#0x22]`、`stur xzr,[x22,#0x2a]`… |
+
+b257 的源码已经是纯字节写（`uke_adv_put8/16/32/64`，`base[offset] = value`），但 **clang 把相邻的
+非 volatile 字节写重新合并成了宽存储**。ARMv8 对 Normal memory 允许非对齐访问，编译器没有理由把它们拆开——
+`SCTLR_EL1.A` 是运行时设置，优化器看不见。所以"改成字节写"这条修复在编译期就被抵消了。
+
+**结论：两个条件缺一不可**
+
+1. 窗口指针与访问器全部 `volatile`（语言层面禁止合并/重排）；
+2. `scripts/build-boot-log.py` 用 `-mstrict-align` 编 `UkeAdvLogger.c`（后端层面禁止生成宽访问）。
+
+**新增闸门**：`tools/check-adv-log.py` 自测 8 把 writer 编成 aarch64 汇编，逐条检查"不是自然对齐的宽存储"，
+并用**修复前的写法**（不带宽标志编译）做反例，要求它被抓到——否则这道闸门等于什么都没证明。
+反例没被抓到过一次（正则把立即数吞了、`xzr/wzr` 没被识别），修好后两侧都通过。现在 8 个自测全绿：
+
+```
+ok   self-test 8 asm-align  no wide store in the writer's aarch64 code, -mstrict-align is in the build,
+                            and the pre-fix shape is caught (2 stores)
+```
+
+**顺带纠正两个判断**
+
+* 我先前把 b257 的 panic 归因于"内核还在创建 ALOG 头"，其实 b257 的创建代码是有的、字节写的，
+  真因是编译器合并；b258 已经整段删掉创建路径（`0x9FFE00000` 是平台保留区，`EfiReservedMemoryType`）。
+* 用户刷写没有问题。同一对命令在同两个分区刷回原厂 OS4，一次成功、Android 17 正常开机
+  （`sys.boot_completed=1`）；b256/b257 两次都是"刷完第一次启动、内核真的跑起来了"，才在写日志时炸。
+  `work/flash/apply.sh` / `work/flash/restore-os4.sh` 已把"两个分区都要刷 + 先断电 10 秒"固化下来。
+
+**下一步（内核日志通道）**：写死 `0x9FFE00000` 这条路已经判死。要复活日志，需要固件把它
+`AllocateReservedPages` 拿到的缓冲区地址交给内核（`make-uke-adt.py` 生成的是固定常量，所以要么让固件在
+把 ADT 交给 payload 前改写它，要么另找一块 XNU 不会分配、且固件肯 reserve 的 DRAM 洞）。
+在拿到安全交接之前，writer 保持"只追加、无头则停"的行为。

@@ -16,12 +16,19 @@
 // owned_memory_size a gibibyte lower so XNU's VM never hands the window out. tools/check-adv-log.py
 // fails when the DSC, this file and the device tree disagree.
 //
-// ALIGNMENT, and why there is no struct below. XNU runs arm64 with SCTLR_EL1.A set, so a misaligned
-// access faults, while the firmware's record layout puts a UINT64 TimeStamp at offset 10 and 32-bit
-// fields at 12 and 20. A packed struct therefore cannot be used on this buffer: the first version of this
-// file did, the compiler emitted `stur xzr, [x22, #0xe]` for the header clear, and b256 panicked with
-// "unaligned kernel data abort" (esr 0x96000061 = write + alignment fault, FAR ending in 0xe). Every
-// access now goes through memcpy at an explicit byte offset, which is alignment-agnostic by construction.
+// ALIGNMENT, and why there is neither a struct nor a plain pointer below. XNU runs arm64 with
+// SCTLR_EL1.A set, so a misaligned access faults, while the firmware's record layout puts a UINT64
+// TimeStamp at offset 10 and 32-bit fields at 6 and 20. The first version of this file used a packed
+// struct: b256 died with `stur xzr,[x22,#0xe]` (esr 0x96000061, write + alignment fault, FAR ending in
+// 0xe). The second version used byte stores through a plain uint8_t* - and b257 died anyway, because the
+// optimiser is allowed to merge adjacent non-volatile byte stores into one wide store, and it did:
+// `stur wzr,[x22,#0x6]`, `strh wzr,[x22,#0xa]`, `stur xzr,[x22,#0x22]`, FAR ending in 6. ARMv8 permits
+// unaligned access to normal memory, so the backend has no reason to keep the bytes apart - SCTLR_EL1.A
+// is a runtime setting it cannot see. Two things fix it and both are required: the window is accessed
+// through volatile pointers (the language forbids merging or reordering those), and this file is built
+// with -mstrict-align (scripts/build-boot-log.py), so the backend cannot invent a wide access either.
+// tools/check-adv-log.py compiles the file for aarch64 and fails if any store into the window is wider
+// than the alignment of the offset it uses; that gate is what the first two versions lacked.
 //
 // The record layout is AdvLoggerPkg's, not ours: an ADVANCED_LOGGER_INFO header at the base with 'ALOG',
 // then entries appended from LogBufferOffset. We write version 2 entries ('ALM2', major 2 minor 1, phase
@@ -91,7 +98,7 @@ _Static_assert(UKE_ALI_BYTES == 88, "ADVANCED_LOGGER_INFO is 88 bytes");
 _Static_assert((UKE_ALI_BYTES % 8) == 0, "the log area has to start 8-byte aligned");
 _Static_assert(UKE_ALM_BYTES == 24, "ADVANCED_LOGGER_MESSAGE_ENTRY_V2 is 24 bytes");
 
-static uint8_t *ukeAdvWindow;         /* mapped virtual address of the info header */
+static volatile uint8_t *ukeAdvWindow;  /* mapped virtual address of the info header */
 static uint32_t ukeAdvLimit;          /* LogBufferOffset + LogBufferSize */
 static uint64_t ukeAdvStamp;
 static size_t ukeAdvLast;             /* msgbuf index already published */
@@ -105,20 +112,20 @@ static bool ukeAdvStarted;
 // misaligned, and even memcpy of a 4-byte value to an unaligned address may be lowered to a single `str w`.
 // With SCTLR_EL1.A set, only byte accesses are safe on this buffer. arm64 is little-endian.
 static void
-uke_adv_put8(uint8_t *base, size_t offset, uint8_t value)
+uke_adv_put8(volatile uint8_t *base, size_t offset, uint8_t value)
 {
 	base[offset] = value;
 }
 
 static void
-uke_adv_put16(uint8_t *base, size_t offset, uint16_t value)
+uke_adv_put16(volatile uint8_t *base, size_t offset, uint16_t value)
 {
 	base[offset + 0] = (uint8_t)(value);
 	base[offset + 1] = (uint8_t)(value >> 8);
 }
 
 static void
-uke_adv_put32(uint8_t *base, size_t offset, uint32_t value)
+uke_adv_put32(volatile uint8_t *base, size_t offset, uint32_t value)
 {
 	base[offset + 0] = (uint8_t)(value);
 	base[offset + 1] = (uint8_t)(value >> 8);
@@ -127,7 +134,7 @@ uke_adv_put32(uint8_t *base, size_t offset, uint32_t value)
 }
 
 static void
-uke_adv_put64(uint8_t *base, size_t offset, uint64_t value)
+uke_adv_put64(volatile uint8_t *base, size_t offset, uint64_t value)
 {
 	unsigned byte;
 
@@ -137,7 +144,7 @@ uke_adv_put64(uint8_t *base, size_t offset, uint64_t value)
 }
 
 static uint32_t
-uke_adv_get32(const uint8_t *base, size_t offset)
+uke_adv_get32(const volatile uint8_t *base, size_t offset)
 {
 	return ((uint32_t)base[offset + 0]) |
 	       ((uint32_t)base[offset + 1] << 8) |
@@ -149,7 +156,7 @@ static bool
 uke_adv_open(void)
 {
 	vm_offset_t va;
-	uint8_t *window;
+	volatile uint8_t *window;
 	uint32_t offset, size, current;
 
 	if (ukeAdvWindow != NULL) {
@@ -164,7 +171,7 @@ uke_adv_open(void)
 		ukeAdvRefused = true;
 		return false;
 	}
-	window = (uint8_t *)va;
+	window = (volatile uint8_t *)va;
 	if (uke_adv_get32(window, UKE_ALI_OFF_SIGNATURE) != UKE_ALOG_SIGNATURE) {
 		// The writer used to lay a header down here when it found none, and that is what broke b256/b257:
 		// 0x9FFE00000 is NOT free memory. This unit's firmware memory map reports
@@ -209,7 +216,7 @@ uke_adv_append(const char *text, size_t length)
 {
 	size_t total, tail;
 	uint32_t offset;
-	uint8_t *entry;
+	volatile uint8_t *entry;
 
 	if ((ukeAdvWindow == NULL) || (text == NULL) || (length == 0)) {
 		return;
@@ -235,7 +242,10 @@ uke_adv_append(const char *text, size_t length)
 	uke_adv_put16(entry, UKE_ALM_OFF_PHASE, UKE_AL_PHASE_RUNTIME);
 	uke_adv_put16(entry, UKE_ALM_OFF_LENGTH, (uint16_t)length);
 	uke_adv_put16(entry, UKE_ALM_OFF_MESSAGE_OFFSET, UKE_ALM_BYTES);
-	memcpy(entry + UKE_ALM_BYTES, text, length);
+	// The message text is the one wide copy: UKE_ALM_BYTES and every offset are 8-byte aligned by
+	// construction, so a vector memcpy cannot produce a misaligned access here. Casting the volatile
+	// qualifier away is deliberate and confined to this copy.
+	memcpy((void *)(entry + UKE_ALM_BYTES), text, length);
 	// Zero the alignment tail: a stale byte here is what a reader would take for the next signature.
 	for (tail = length; tail < total - UKE_ALM_BYTES; tail++) {
 		uke_adv_put8(entry, UKE_ALM_BYTES + tail, 0);

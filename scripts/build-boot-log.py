@@ -53,7 +53,14 @@ sources = [
     ('BootWatchdogPolicy.c', KERN_EXEC_RECORD, 'BootWatchdogPolicy.o', []),
     ('CrashLogProbe.c', KERN_EXEC_RECORD, 'CrashLogProbe.o', []),
     # Appends the message buffer to the firmware's Advanced Logger window (fixed address, no storage).
-    ('UkeAdvLogger.c', STARTUP_RECORD, 'UkeAdvLogger.o', []),
+    #
+    # -mstrict-align is a correctness flag here, not a tuning one. XNU runs arm64 with SCTLR_EL1.A set,
+    # so any misaligned access faults, while the firmware's record layout puts DebugLevel at offset 6 and
+    # TimeStamp at 10. b257 wrote those fields with byte stores and the compiler re-merged them into
+    # `stur wzr,[x22,#0x6]` / `stur xzr,[x22,#0x22]`: legal on ARMv8 for normal memory, fatal under
+    # SCTLR_EL1.A, and the boot died with esr 0x96000061 and FAR ending in 6. The source uses volatile
+    # byte accesses as well, so both the language and the backend refuse to invent a wide store.
+    ('UkeAdvLogger.c', STARTUP_RECORD, 'UkeAdvLogger.o', ['-mstrict-align']),
 ]
 report = {'userdata_log': USERDATA_LOG}
 objects = []
