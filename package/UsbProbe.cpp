@@ -34,6 +34,7 @@
 #include <libkern/OSKextLib.h>
 #include <pexpert/pexpert.h>
 #include <kern/thread.h>
+#include <kern/debug.h>
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" bool qcom_dwc3_bring_up(void);
 extern "C" void qcom_dwc3_publish(void);
@@ -74,7 +75,18 @@ static void worker(void *, wait_result_t) {
     uke_delay_ms(250);
     const bool broughtUp = qcom_dwc3_bring_up();
     trace(broughtUp ? "bring-up" : "bring-up-failed");
-    if (!broughtUp || mode < 4) { report_forever(broughtUp ? "up" : "up-failed"); }
+    if (mode == 6) {
+        // The freeze, and this port's own established way to read a number off the panel: the console keeps
+        // only its last screenful, so any early line scrolls away before a photograph can catch it. The panic
+        // text stays on screen (and one line of it survives in the firmware's 128-byte pram record), so the
+        // bring-up verdict is readable no matter what the console does afterwards. ~108 characters, which is
+        // the length this port's panic line is designed to be.
+        panic("UKE usb: stage=%d gsnpsid=%08x gdsc=%x/%x smmu=%08x rep=%08x qmp=%08x rpmh=%u irq=%u",
+              (int)native_usb_stats[0], (unsigned)native_usb_stats[1], (unsigned)native_usb_stats[5],
+              (unsigned)native_usb_stats[6], (unsigned)native_usb_stats[7], (unsigned)native_usb_stats[8],
+              (unsigned)native_usb_stats[33], (unsigned)native_usb_stats[9], (unsigned)native_usb_stats[11]);
+    }
+    if (!broughtUp || mode < 4 || mode == 6) { report_forever(broughtUp ? "up" : "up-failed"); }
     // AppleUSBXDCI has no personality of its own, so nothing else ever loads it: its constructors and
     // metaclasses, and those of IOUSBDeviceFamily below it, run on this load.
     OSReturn loaded = kOSReturnError;

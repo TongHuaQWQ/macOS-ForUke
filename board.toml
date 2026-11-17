@@ -681,8 +681,15 @@ kernel_args = [
   # Names, not sheng-log-*: the pram writer's sheng-log=1 is upstream's switch, these two belong to
   # the freestanding UFS writer in package/UfsLog.cpp. They are short on purpose -- the command line
   # is capped at 1000 bytes and 949 were already in use.
-  "uke-log-first=2961408",
-  "uke-log-last=61949946",
+  # b253: the window moves to slot B's boot_b, the same proven choice dev-b227c's board makes for the
+  # same reason (dev-b227c/board.toml, round b249): slot A is the active slot, so boot_b is the inactive
+  # copy and the writer cannot land in live f2fs. 256566 is boot_b's first 4 KiB block, and the 32 MiB
+  # window is its tail. The point of turning the writer on is that the video console keeps only its last
+  # screenful: a 16 KiB record every 2 s survives a crash and gives the full early log, which no
+  # photograph of the panel can. Read it back with work/analysis/read-uke-log.py after booting TWRP.
+  "sheng-log=1",
+  "uke-log-first=256566",      # boot_b first 4 KiB block (slot B is inactive)
+  "uke-log-last=281141",       # 256566 + 24576 - 1: the 32 MiB window is boot_b's tail
   # The old probe driver (package/uke_usb.c) is now inert, on purpose. Three of its switches would
   # each stop the boot before QcomXnuUsbDebug's worker runs: uke_usb_sync=1 panics inside its
   # STARTUP by design ("uke_usb_sync=1's whole purpose"), uke_usb_hook=1 reaches
@@ -691,7 +698,6 @@ kernel_args = [
   # beacon into pram before returning, which is the one piece of evidence worth keeping.
   # uke_usb=0 alone disables the old probe driver (it returns before touching anything), so sync/hook/
   # panic are dropped rather than carried as zeros - the 1000-byte command line is full.
-  "uke_usb=0",
   # ON again for the b204 channel round, and this time the firmware fills the hole that made every
   # earlier attempt impossible: UkeUsbLogDxe powers the USB30 GDSC, releases the block reset and ungates
   # the three high-speed branches before hand-off (PcdUkeUsbPowerOn), because nothing else in this boot
@@ -719,7 +725,7 @@ kernel_args = [
   # No log-sys: that group belongs to package/BootLog.c, which this port does not carry; UsbProbe.cpp logs
   # the table itself. Nor any IOSleep: this kernel's timer never interrupts, so the driver's delays spin on
   # the timebase (uke_delay_ms in package/QcomDwc3Platform.c).
-  "usb=1",
+  "usb=6",
   # Text on the panel again, and it is the other deliberate change of this round. The USB bring-up's
   # evidence is its own console lines (qcom-dwc3: and the UKE usb: stage table), which the graphics
   # console does not draw; the diagnostic card that made that trade acceptable is off in this round
@@ -740,11 +746,9 @@ kernel_args = [
   # numbers: FSR 00000400 = the SMMU recorded no fault, GW 0 = the core never posted an event.
   # What the card costs is console lines (it repaints every second to stay on top), which is why it
   # stayed off in the rounds that were reading kernel text instead. Set to 0 for those.
-  "qcom-usb-qr=1",
   # The panel now paints the request and a QR of it without panicking (STATE 82/84), so the diagnostic
   # panic stays off: with it on, the first control request stops the machine and enumeration can never
   # be tested. qcom-usb-panic=0 overrides the compiled-in default of 2.
-  "qcom-usb-panic=0",
   "sheng-pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",
