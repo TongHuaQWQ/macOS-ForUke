@@ -674,8 +674,18 @@ kernel_args = [
   # Names, not sheng-log-*: the pram writer's sheng-log=1 is upstream's switch, these two belong to
   # the freestanding UFS writer in package/UfsLog.cpp. They are short on purpose -- the command line
   # is capped at 1000 bytes and 949 were already in use.
-  "uke-log-first=2961408",
-  "uke-log-last=61949946",
+  #
+  # boot_b, not the userdata tail (2026-11-17). These are absolute 4096-byte blocks and the pair is the
+  # whole of slot B's boot partition, read from this unit's own GPT (gpt/sde-primary.bin):
+  #   boot_b = sde39, first=256566 last=281141, 24,576 blocks (96 MiB), sysfs start 2052528 x 512 B
+  # so the window the writer opens, last+1-8192 = 272950..281141, sits inside an INACTIVE slot.
+  # The previous values (2961408 / 61949946, i.e. the userdata partition from [userdata]) put the same
+  # 32 MiB in the tail of userdata, which on this unit is live /data: dm-60 covers the same 58,988,539
+  # blocks, so a successful write would have dropped 32 MiB of msgbuf into user data. The device side
+  # measured that overlap and had already moved the window here; this file now agrees with them.
+  # A write is therefore not harmless to slot B: if slot B is ever made bootable, reflash it.
+  "uke-log-first=256566",
+  "uke-log-last=281141",
   # The old probe driver (package/uke_usb.c) is now inert, on purpose. Three of its switches would
   # each stop the boot before QcomXnuUsbDebug's worker runs: uke_usb_sync=1 panics inside its
   # STARTUP by design ("uke_usb_sync=1's whole purpose"), uke_usb_hook=1 reaches
