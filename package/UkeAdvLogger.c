@@ -52,6 +52,14 @@
 #include <IOKit/IOLib.h>
 
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+// uke_mark (package/UkeLastLog.c) stamps 31 characters into a slot of a fixed physical page that the
+// firmware prints on the NEXT boot ("UKEMARK: no kernel boot marks in ..." is it saying the slots were
+// empty). That is the only channel this writer can use to report its own fate: IOLog goes to msgbuf,
+// msgbuf is what this writer is trying to publish, and publishing is the thing under test. Slot 7 is the
+// one the boot ladder leaves spare. Same archive, so a direct call links.
+extern void uke_mark(unsigned int slot, const char *text);
+
+#define UKE_ADV_MARK_SLOT 7
 
 // One owner of the geometry: these must equal uke.dsc's PcdAdvancedLoggerBase and
 // PcdAdvancedLoggerPages * 4096 (tools/check-adv-log.py enforces it, and that the window is the reserved
@@ -197,6 +205,35 @@ uke_adv_geometry_ok(volatile uint8_t *window, uint32_t *offset_out, uint32_t *li
 	return true;
 }
 
+// "ADV:<tag> <8 hex> <8 hex>", no printf: this runs before anything guarantees a formatting library, and
+// uke_mark only takes 31 printable characters plus a terminator.
+static void
+uke_adv_mark(const char *tag, uint32_t first, uint32_t second)
+{
+	char text[32];
+	const char hex[] = "0123456789abcdef";
+	unsigned at = 0;
+	int shift;
+
+	text[at++] = 'A';
+	text[at++] = 'D';
+	text[at++] = 'V';
+	text[at++] = ':';
+	while ((*tag != '\0') && (at < 12)) {
+		text[at++] = *tag++;
+	}
+	text[at++] = ' ';
+	for (shift = 28; shift >= 0; shift -= 4) {
+		text[at++] = hex[(first >> shift) & 0xfu];
+	}
+	text[at++] = ' ';
+	for (shift = 28; shift >= 0; shift -= 4) {
+		text[at++] = hex[(second >> shift) & 0xfu];
+	}
+	text[at] = '\0';
+	uke_mark(UKE_ADV_MARK_SLOT, text);
+}
+
 static bool
 uke_adv_open(void)
 {
@@ -212,12 +249,19 @@ uke_adv_open(void)
 		return false;
 	}
 	// 1. The address the firmware printed in its own log.
+	uke_adv_mark("open 0b112e000", (uint32_t)(UKE_ADV_BASE >> 32), (uint32_t)UKE_ADV_BASE);
 	va = ml_io_map_wcomb((vm_offset_t)UKE_ADV_BASE, (vm_size_t)UKE_ADV_BYTES);
-	if (va != 0) {
+	if (va == 0) {
+		uke_adv_mark("NOMAP", (uint32_t)(UKE_ADV_BASE >> 32), (uint32_t)UKE_ADV_BASE);
+	} else {
 		window = (volatile uint8_t *)va;
 		if (uke_adv_geometry_ok(window, &offset, &limit)) {
 			goto found;
 		}
+		// The read signature is the whole diagnosis: 0x474F4C41 means the header is there and the
+		// geometry is what this writer disagrees with; anything else means the address is wrong.
+		uke_adv_mark("NOHEAD", uke_adv_get32(window, UKE_ALI_OFF_SIGNATURE),
+		    uke_adv_get32(window, UKE_ALI_OFF_SIZE));
 		IOLog("UkeAdvLogger: no usable ALOG header at 0x%llx (read 0x%08x)\n",
 		    (unsigned long long)UKE_ADV_BASE, uke_adv_get32(window, UKE_ALI_OFF_SIGNATURE));
 	}
@@ -230,6 +274,8 @@ uke_adv_open(void)
 		for (scanned = 0; scanned + UKE_ADV_BYTES <= UKE_ADV_SCAN_BYTES; scanned += UKE_ADV_SCAN_STEP) {
 			window = (volatile uint8_t *)va + scanned;
 			if (uke_adv_geometry_ok(window, &offset, &limit)) {
+				uke_adv_mark("SCAN", (uint32_t)((UKE_ADV_SCAN_BASE + scanned) >> 32),
+				    (uint32_t)(UKE_ADV_SCAN_BASE + scanned));
 				IOLog("UkeAdvLogger: found the firmware buffer at 0x%llx by scan\n",
 				    (unsigned long long)(UKE_ADV_SCAN_BASE + scanned));
 				goto found;
@@ -241,6 +287,7 @@ uke_adv_open(void)
 	}
 	// Standing down is a result, not a failure: it means this booting image has no firmware buffer to
 	// append to, and inventing one in memory this kernel does not own is what cost us b256 and b257.
+	uke_adv_mark("NONE", 0, 0);
 	IOLog("UkeAdvLogger: standing down; the log channel needs the firmware's own buffer\n");
 	ukeAdvRefused = true;
 	return false;
@@ -255,6 +302,7 @@ found:
 	// Tell the exporter that the buffer outlived ExitBootServices and is in permanent RAM.
 	uke_adv_put8(window, UKE_ALI_OFF_PERMANENT_RAM, 1);
 	uke_adv_put8(window, UKE_ALI_OFF_AT_RUNTIME, 1);
+	uke_adv_mark("OK", current, size);
 	IOLog("UkeAdvLogger: appending at offset=%u size=%u current=%u of %u\n",
 	    offset, size, current, UKE_ADV_BYTES);
 	return true;

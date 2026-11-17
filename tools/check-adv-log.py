@@ -243,6 +243,16 @@ void thread_deallocate(thread_t thread)
 	(void)thread;
 }
 
+/* The writer stamps its own fate into a firmware-readable slot (uke_mark in UkeLastLog.c) so the next
+   boot can report it; on the host the stamp is just recorded, which lets the simulation assert that the
+   writer says what it thinks it is doing. */
+static char gMark[64];
+void uke_mark(unsigned int slot, const char *text)
+{
+	(void)slot;
+	snprintf(gMark, sizeof(gMark), "%s", text);
+}
+
 #define UKE_HOST_SIM 1
 #include "UkeAdvLogger.c"
 
@@ -278,6 +288,7 @@ int main(void)
 	uke_adv_append("ArmCpu: 42 timer interrupts, 0 IPIs\n", sizeof("ArmCpu: 42 timer interrupts, 0 IPIs\n") - 1);
 	uke_adv_pump();
 	fwrite(gWindow, 1, sizeof(gWindow), stdout);
+	fprintf(stderr, "MARK:%s\n", gMark);
 	return 0;
 }
 """
@@ -310,7 +321,11 @@ def host_sim():
         if result.returncode:
             raise SystemExit(f'FAIL: the host simulation exited {result.returncode}: {result.stderr[:300]}')
         messages = walk(result.stdout)
-    return messages
+        mark = ''
+        for line in result.stderr.decode('utf-8', 'replace').splitlines():
+            if line.startswith('MARK:'):
+                mark = line[5:]
+    return messages, mark
 
 
 # A freestanding stand-in for the kernel ABI, used only to compile the writer for aarch64 and look at
@@ -525,15 +540,19 @@ def self_tests():
     ok += 1
 
     # 7: the real C compiles and its output walks: the only test that covers the writer itself.
-    messages = host_sim()
-    if messages is None:
+    sim = host_sim()
+    if sim is None:
         print('skip self-test 7 host-sim  no host compiler')
     else:
+        messages, mark = sim
         first = messages[0] if messages else None
         assert first == 'UKE-ADVLOG: writer alive\n', messages[:2]
         assert any('ArmCpu: 42 timer interrupts' in m for m in messages), messages[:3]
         assert messages[-1].startswith('ABCDEFGHIJKLMNOPQRSTUVWXYZ'), messages[-1][:40]
-        print(f'ok   self-test 7 host-sim  compiled the writer; {len(messages)} records walked back')
+        assert mark, 'the writer stamped nothing into the mark slot'
+        assert mark.startswith('ADV:OK'), mark
+        print(f'ok   self-test 7 host-sim  compiled the writer; {len(messages)} records walked back; '
+              f'stamp "{mark}"')
         ok += 1
 
     # 8: the instructions, not the source. b257 proved that byte stores in the source can come out of the

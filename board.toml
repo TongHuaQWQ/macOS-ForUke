@@ -635,6 +635,14 @@ kernel_args = [
   # is the boot-arg (TUNABLE(bool, allow_printf_from_interrupts_disabled_context, "nointr_consio")).
   # Passing it keeps the boot going so the next panic is the interesting one instead of this noise.
   "nointr_consio=1",
+  # b261: make the FIRST platform error panic instead of being swallowed. The 2026-11-18 00:37 boot
+  # printed "ArmDTPlatformIO: platform error ... (ignored)" without end, and the kernel never reset, so
+  # the DRAM the diagnostics live in was only recovered by a long press - which loses it. ArmDTPlatformIO
+  # returns false when this is set, and the machine layer then panics, which resets through PSCI and keeps
+  # DRAM: the next firmware boot can then export the Advanced Logger buffer, kernel lines included.
+  # Paid for by dropping uke-log-first/uke-log-last: that userdata window never produced a record (the dump
+  # was 517 non-zero bytes out of 32 MiB), and the QR channel is the one that now works.
+  "uke-platform-error-panic=1",
   # 0 for this round, and stated here rather than injected by the build script. configs/uke-macos_defconfig
   # still has CONFIG_XNU_NATIVE_UFS off, so this kernel carries no UFS driver and
   # drivers/NativeUfs/NativeUfs.cpp:2089 returns false on a 0 argument anyway - the value itself changes
@@ -690,8 +698,6 @@ kernel_args = [
   # blocks, so a successful write would have dropped 32 MiB of msgbuf into user data. The device side
   # measured that overlap and had already moved the window here; this file now agrees with them.
   # A write is therefore not harmless to slot B: if slot B is ever made bootable, reflash it.
-  "uke-log-first=256566",
-  "uke-log-last=281141",
   # The old probe driver (package/uke_usb.c) is now inert, on purpose. Three of its switches would
   # each stop the boot before QcomXnuUsbDebug's worker runs: uke_usb_sync=1 panics inside its
   # STARTUP by design ("uke_usb_sync=1's whole purpose"), uke_usb_hook=1 reaches

@@ -68,17 +68,29 @@ bool ArmDTPlatformIO::handlePlatformError (vm_offset_t far)
   char text[192];
 
   PE_parse_boot_argn ("uke-platform-error-panic", &strict, sizeof (strict));
+
+  // A repeated platform error is a STORM, not an event: the 2026-11-18 00:37 boot printed this line
+  // continuously, and every line costs ~90 bytes of the firmware's 256 KiB Advanced Logger buffer that
+  // the kernel log has to share. The first eight are printed in full because that is where the fault
+  // address and caller first appear; after that one line in 256 keeps the channel alive and the buffer
+  // usable. The count itself is never lost: it is in every line that is printed.
+  const unsigned long kPrintAll = 8;
+  const unsigned long kEvery = 256;
+  bool announce = (total <= kPrintAll) || ((total % kEvery) == 0);
+
   snprintf (text, sizeof (text), "ArmDTPlatformIO: platform error #%lu far=0x%llx pc=0x%llx",
       total, (unsigned long long) far, pc);
-  IOLog ("%s%s\n", text, (strict != 0) ? " (panicking as asked)" : " (ignored)");
-  // Stage it for the next boot as well: with the log retrieval channel not yet
-  // working, the pram record is how this line survives this boot.
+  if (announce) {
+    IOLog ("%s%s\n", text, (strict != 0) ? " (panicking as asked)" : " (ignored)");
+  }
+  // Stage it for the next boot as well, again only when it is announced: uke_mark is a DRAM store per
+  // call, and a storm would rewrite the same slot thousands of times a second for no information.
   /* An indirect call through a volatile pointer, not a direct one: the reference kernel this build
    * links ArmDTPlatform into is RELEASE, where uke_stage_last_panic is compiled out, so the weak
    * symbol resolves to 0 and a direct branch to it is "out of range" at link time
    * (run 42235545609). Loading the address first turns that into a null check. */
   void (*volatile stage) (const char *) = uke_stage_last_panic;
-  if (stage != nullptr) {
+  if (stage != nullptr && announce) {
     stage (text);
   }
 
