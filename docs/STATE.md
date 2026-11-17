@@ -5841,3 +5841,56 @@ reviewed _kalloc_type_impl: recorded 0xfffffff007364b28 is stale after a layout 
 
 — and refuses, listing the candidate pools, when several combinations survive or none does. The
 candidate lists are printed either way, so the next round's log says what this kernel actually offers.
+
+### 95m. Sixth CI round: green — `b251-usbdwc3` is packaged and flashing it is the next step
+
+Run `43913735659` on `88b8de4` is the first round of this route that produced a kernel.
+
+```
+bindings: 299 (298 original-class imports, all covered)
+QcomDwc3: 299 original bindings, 7 objects, 582896 bytes, sha 63a3eb3dc8cabe2c
+…
+reviewed _kalloc_type_impl: recorded 0xfffffff007364b28 is stale after a layout change;
+  bound 0xfffffff007368b28 by the recorded distance to the other reviewed function
+reviewed _kfree_type_var_impl: … bound 0xfffffff007369020 …
+functions: 14062/23976   data: 2619   kext-facing targets named: 3719/3856
+unresolved closure references: 0; stubbed functions: 0
+wrote kernel.macho (139952128 bytes) sha256 bf1fc616bebc044ca4c2aacc18d8a214c6318131173cd471b6b909df2fdcc9c3
+```
+
+The distance rule in 95l picked the same addresses an independent check confirms: in the artifact's own
+`native/native.macho`, `0xfffffff007368b28` carries `_kalloc_type_impl` **and**
+`_kalloc_type_impl_external` and `_kalloc_type_impl_internal` (a global, the real family), while the
+rejected candidate `0xfffffff007551388` carries `_kalloc_type_impl` as a *local* symbol — a private
+clone. A future round can use symbol binding as the first discriminator; the distance rule already
+worked, so it was left alone rather than re-tested through a 35-minute round.
+
+Packaged as **b251-usbdwc3**:
+
+| image | bytes | sha256 (first 16) |
+|---|---|---|
+| `work/flash/vendor_boot_round-b251-usbdwc3.img` (payload: kernel + ADT) | 85,782,528 | `c8f0e3eb53d66659` |
+| `work/flash/boot-round-b251-usbdwc3.img` (firmware, unchanged) | 1,159,168 | `97315c632acfa31f` |
+
+Boot arguments in the packaged payload, read back out of `payload.json`: `usb=1` present,
+`-uketextconsole` present, `qcom-usb-debug=1` absent, command line **971 of 1000 bytes**.
+
+Flash, then read:
+
+```
+fastboot flash vendor_boot_a work/flash/vendor_boot_round-b251-usbdwc3.img
+fastboot boot            work/flash/boot-round-b251-usbdwc3.img
+```
+
+on the panel, with `-uketextconsole`, the two lines this round exists for:
+
+```
+UKE usb: bring-up stage=N gsnpsid=33313130 …
+UKE usb: helper dsts=… dcfg=… gctl=… gusb2phycfg=… retimer=… qmp=… role=… vbus=…
+```
+
+`stage=9` is hardware-ready; a negative value names the step that failed (`-9` xDCI kext load, `-10`
+preModLoad, `-11` postModLoad). Then on a Mac: `ioreg -p IOUSB -l -w0 | grep -E 'idVendor|idProduct|Device
+Speed'`. §95e has the branch table for each reading, and §95f the four risks: the prelink data budget did
+not bite this round (the collection emitted with nothing stubbed), the two DWC3 owners stayed linked and
+only one is switched on, the QMP table is still SM8550's, and the retimer was not re-derived for cliffs.
