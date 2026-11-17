@@ -55,6 +55,17 @@ static void trace(const char *where) {
           (unsigned)native_usb_stats[18], (unsigned)native_usb_stats[32], (unsigned)native_usb_stats[33],
           (unsigned)native_usb_stats[44], (unsigned)native_usb_stats[10]);
 }
+// The video console keeps only its last screenful, and this board has no other channel until USB itself
+// works. A thread that re-states the bring-up verdict every few seconds therefore does two things at once:
+// it makes the numbers readable from a photograph at any moment, and its silence is itself a result (the
+// kernel stopped, not the console).
+static void report_forever(const char *where) {
+    for (unsigned beat = 1;; ++beat) {
+        IOLog("UKE usb: alive #%u (%s)\n", beat, where);
+        trace(where);
+        uke_delay_ms(5000);
+    }
+}
 static void worker(void *, wait_result_t) {
     unsigned mode = 0;
     PE_parse_boot_argn("usb", &mode, sizeof mode);
@@ -63,7 +74,7 @@ static void worker(void *, wait_result_t) {
     uke_delay_ms(250);
     const bool broughtUp = qcom_dwc3_bring_up();
     trace(broughtUp ? "bring-up" : "bring-up-failed");
-    if (!broughtUp || mode < 4) { thread_terminate(current_thread()); return; }
+    if (!broughtUp || mode < 4) { report_forever(broughtUp ? "up" : "up-failed"); }
     // AppleUSBXDCI has no personality of its own, so nothing else ever loads it: its constructors and
     // metaclasses, and those of IOUSBDeviceFamily below it, run on this load.
     OSReturn loaded = kOSReturnError;
@@ -95,12 +106,14 @@ static void worker(void *, wait_result_t) {
     qcom_dwc3_publish();
     trace("published");
     if (mode >= 5) { qcom_dwc3_diag(true); }
-    thread_terminate(current_thread());
+    report_forever("published");
 }
 extern "C" void uke_usb_probe(void) {
     unsigned enabled = 0;
     if (!PE_parse_boot_argn("usb", &enabled, sizeof enabled) || !enabled) {
-        // Silent would be indistinguishable from "the call site did not run"; one line costs nothing.
+        // Never silent: "the call site did not run" and "the argument did not arrive" look identical from
+        // the outside, and both have cost a round already.
+        IOLog("UKE usb: disabled (usb= not parsed or 0)\n");
         return;
     }
     thread_t thread = nullptr;

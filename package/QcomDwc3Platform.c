@@ -73,7 +73,14 @@ void sm8550_apps_smmu_unlock (void)
  * section 3), and IOSleep() is a wait with a timeout on exactly that timer -- a thread that calls it
  * never wakes. IODelay() spins on the timebase instead, which advances whether or not an interrupt
  * arrives, so every delay in the driver goes through here. Bounded by the caller, never by a timer. */
+extern volatile uint32_t native_usb_stats[54];
+
 void uke_delay_ms (uint32_t milliseconds)
 {
-    if (milliseconds != 0) { IODelay (milliseconds * 1000u); }
+    if (milliseconds == 0) { return; }
+    /* Re-stated on every wait, not logged once: the video console keeps only its last screenful, and the
+     * bring-up runs long before the interesting late-boot output exists. A line per wait keeps "which
+     * stage is this boot stuck in" inside that window. */
+    IOLog ("UKE usb: wait %u ms at stage %d\n", (unsigned)milliseconds, (int32_t)native_usb_stats[0]);
+    IODelay (milliseconds * 1000u);
 }
