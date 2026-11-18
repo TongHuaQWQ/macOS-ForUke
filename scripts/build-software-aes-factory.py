@@ -39,8 +39,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/software-aes'
-sys.path.insert(0, str(ROOT / 'kits/XnuPrelink'))
+sys.path.insert(0, str(ROOT / 'scripts'))
 from kernel_target import TRIPLE  # noqa: E402
+
+# The core's own compiler driver: compile_command() builds the command from a kernel compile record and is
+# the only place that knows the recorded flags have to lose -flto (an LTO member is bitcode, and the
+# objcopy below cannot read it - b279 died exactly there) and gain -mgeneral-regs-only. Hand-filtering the
+# argument list missed the -flto half.
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location('source_compile', ROOT / 'scripts/build-sheng-source-drivers.py')
+source_compile = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(source_compile)
 
 
 def run(command, **kwargs):
@@ -70,24 +80,11 @@ def main():
 extern "C" IOService *native_software_aes_create(void) { return new NativeAES; }
 ''')
 
-    arguments, command, index = record['arguments'], [], 0
-    while index < len(arguments):
-        value = arguments[index]
-        if value == record['file']:
-            command.append(str(generated))
-        elif value in ('-o', '-MF', '-MT', '-MJ'):
-            if value == '-o':
-                command.extend(['-o', str(OUT / 'NativeAES-factory.o')])
-            index += 1
-        elif value == '-Xclang' and index + 1 < len(arguments) and arguments[index + 1].startswith('-W'):
-            index += 1
-        elif not value.startswith('-W'):
-            command.append(value)
-        index += 1
-    command += ['-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-unnecessary-virtual-specifier',
-                '-Wno-missing-designated-field-initializers', '-Wno-c99-designator', '-Wno-reorder-init-list',
-                '-Wno-deprecated-enum-enum-conversion', '-I', str(source.parent),
-                '-I', str(ROOT / '.cache/xnu-work/osfmk')]
+    object_file = OUT / 'NativeAES-factory.o'
+    command = source_compile.compile_command(record, generated, object_file, [],
+                                             ['-I', str(source.parent),
+                                              '-I', str(ROOT / '.cache/xnu-work/osfmk'),
+                                              '-Wno-missing-designated-field-initializers'])
     result = subprocess.run([str(item) for item in command], cwd=record['directory'],
                             capture_output=True, text=True)
     (OUT / 'factory-compile.log').write_text(result.stdout + result.stderr)
@@ -97,7 +94,7 @@ extern "C" IOService *native_software_aes_create(void) { return new NativeAES; }
     objcopy = shutil.which('llvm-objcopy') or '/opt/homebrew/opt/llvm/bin/llvm-objcopy'
     late = OUT / 'NativeAES.late.o'
     run([objcopy, '--remove-section=__DATA,__mod_init_func',
-         '--globalize-symbol=__GLOBAL__sub_I_NativeAES.cpp', OUT / 'NativeAES-factory.o', late])
+         '--globalize-symbol=__GLOBAL__sub_I_NativeAES.cpp', object_file, late])
     archive.unlink()
     run(['xcrun', 'ar', 'rcs', archive, late, bindings])
 
