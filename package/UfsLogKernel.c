@@ -211,6 +211,27 @@ ufs_log_start(const char **why)
       }
       return 0;
     }
+    /* A buffer the controller cannot address is worse than no buffer.
+     *
+     * b266 allocated this window with IOBufferMemoryDescriptor, which has no address constraint, so it
+     * landed above 4 GiB - the only memory this port owns. The UFS HCI capability register (offset 0,
+     * bit 24) says whether the controller can address 64-bit descriptors at all; NativeUfs has made this
+     * exact check since the root volume work (drivers/NativeUfs/NativeUfs.cpp:1141) and this transport
+     * never did. Without it, a 32-bit controller truncates the DMA address and the log writes land
+     * somewhere in low DRAM - which is what the next firmware boot looked like: an ASSERT inside
+     * ArmCpuDxe with nothing but 0x0000000B13xxxxx values on the panel, i.e. the firmware's own region,
+     * not anything this driver meant to touch.
+     *
+     * Refusing here keeps the log dark but leaves the machine intact, and the panel says why. */
+    if ((gUfsLogDmaPhys + (uint64_t)UFSLOG_DMA_BYTES > 0x100000000ULL) &&
+        ((ufslog_read32(gUfsLogHc, 0) & 0x01000000U) == 0)) {
+      gUfsLogWhy = "dma buffer above 4 GiB, controller is 32-bit";
+      gUfsLogDma = NULL;
+      if (why != NULL) {
+        *why = gUfsLogWhy;
+      }
+      return 0;
+    }
     if (gUfsLogLock == NULL) {
       gUfsLogLock = IOLockAlloc();
       if (gUfsLogLock == NULL) {
