@@ -4,7 +4,11 @@ name = "IOStorageFamily"
 kind = "refer"
 git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
 ref = "main"
-commit = "7edb88fbae296fb7c8ce2f64e115e116e566d51c"
+commit = "e45fbe30a7879e0b16e26dddb78538f1b00e0bff"
+# NOT synced with the reference board on purpose: scripts/prepare-storage-headers.py validates the public
+# IOStorageFamily revision against the one its patched header set was measured on, and refuses any other
+# ("Unexpected public IOStorageFamily revision", run 44319702546). The storage headers are this port's ABI
+# contract with the 26 train, so the pin moves only when that script is re-measured.
 
 # The SM7675 (cliffs) SoC layer, shared with future boards. Local until the
 # repository is published; the commit pin replaces the local override then.
