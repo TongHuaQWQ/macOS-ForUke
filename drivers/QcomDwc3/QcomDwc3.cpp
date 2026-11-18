@@ -29,7 +29,8 @@ int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint
 int armcpu_spi_mask(uint32_t, bool);
 bool sm8550_gcc_update32(volatile uint32_t *, uint32_t, uint32_t);
 // [0] stage (negative: the step that failed), [1] GSNPSID, [2] GUID-free hardware parameter 0, [3] parameter 3, [4] parameter 7,
-// [5] GDSC USB30, [6] GDSC PHY, [7] SMMU slot | bank << 16, [8] repeater status, [9] RPMh rails found, [10] VBUS override state,
+// [5] GDSC USB30, [6] GDSC PHY, [7] SMMU slot | bank << 16, [8] repeater status | poll tries << 8 | SPMI APID << 16,
+// [9] RPMh rails found, [10] VBUS override state,
 // [11] interrupts, [12] powerOn calls, [13] powerOff calls, [14] controllerReset result, [15] DSTS at power on, [16] DCFG after
 // reset, [17] GCTL after reset, [18] GUSB2PHYCFG after reset, [19] start result, [20] power state request result, [21] kext load result,
 // with usb=2, every 2 s: [22] GSBUSCFG0, [23] GSBUSCFG1, [24] GUCTL1, [25] SMMU global fault, [26] DSTS, [27] DALEPENA,
@@ -202,16 +203,26 @@ bool repeater(bool init, bool host) {
     if (ok) {
         s.obs = obs.va; s.chn = chn.va;
         if (init) {
+            // eusb2_repeater_reset(enable) -> init(): out of reset, then the twelve tuning bytes of the mode in
+            // use. This port is a device, so the device sequence is the one that matters (QcomEusb2Phy.h has the
+            // DT lines); the host variant is here because the DT has it and a role change re-selects it.
+            const uint8_t *tune = host ? kQcomRepeaterTuneHost : kQcomRepeaterTuneDevice;
             ok = spmiWrite(s, kQcomRepeaterEnable, kQcomRepeaterEnableBit);
-            for (const auto &t : kQcomRepeaterTune) ok = ok && spmiWrite(s, t.offset, t.value);
+            for (uint8_t i = 0; i < kQcomRepeaterTuneBytes; ++i)
+                ok = ok && spmiWrite(s, (uint8_t)(kQcomRepeaterTuneFirst + i), tune[i]);
         }
         const uint8_t force = host ? 1u << 6 : 0;   // F_CLK_19P2M_EN, V_CLK_19P2M_EN
         ok = ok && spmiWrite(s, kQcomRepeaterForceEn5, force) && spmiWrite(s, kQcomRepeaterForceVal5, force);
         if (init) {
-            IODelay(50);
-            uint8_t status = 0;
-            ok = ok && spmiRead(s, kQcomRepeaterStatus, &status);
-            native_usb_stats[8] = status | (uint32_t)s.apid << 16;
+            // eusb2_repeater_init() ends by polling +0x08 for bit 7, five times, 10-20 us apart, and treats a
+            // timeout as non-fatal (it only logs). Here the count is kept, because "the repeater never came up"
+            // and "it came up and the link is still wrong" are different rounds.
+            uint8_t status = 0, tries = 0;
+            for (; tries < 5; ++tries) {
+                if (spmiRead(s, kQcomRepeaterStatus, &status) && (status & kQcomRepeaterOk)) {++tries; break;}
+                IODelay(20);
+            }
+            native_usb_stats[8] = status | (uint32_t)tries << 8 | (uint32_t)s.apid << 16;
             ok = ok && (status & kQcomRepeaterOk);
         }
     }
