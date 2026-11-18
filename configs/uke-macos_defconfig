@@ -211,5 +211,30 @@ CONFIG_XNU_QCOM_USB_DEBUG=y
 # have been a duplicate symbol at the link. The same weak-fallback pattern is used in
 # package/GpuPowerProbe.cpp:73-88 and by build-sheng-source-storage.py's weak_defaults().
 CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a"
+# The source storage runtime and where its root-policy tables travel. These keys are the official ones —
+# Allenwdk/UniXNU-uke sets exactly this set for this device (configs/uke_ipados27_defconfig:20-23) — and
+# they reach the scripts through xnu_env(), which turns every CONFIG_XNU_* into the XNU_* variable of the
+# same name:
+#
+#   * XNU_SOURCE_STORAGE=1 declares the arm64e source runtime, so the build's own guards accept this
+#     archive set (build-xnu-4k-baseline.sh:247/323/333/758 are the four refusals that key on it).
+#   * XNU_SOURCE_STORAGE_TABLES=userdata is what makes build-sheng-source-storage.py ship the 544-byte
+#     signed header instead of the full manifest: the OS table alone is 108 MiB against a 96 MiB
+#     vendor_boot. The tables arrive as the [userdata] objects "<window>.vroot". board.toml also carries
+#     [root] tables_in_userdata, which sets the very same variable — the board key is the newer, more
+#     explicit spelling, and the two agree by construction.
+#   * XNU_SOURCE_STORAGE_POLICIES lists the windows that have a policy directory. macOS has three: the OS
+#     volume, the SystemOS cryptex and the App cryptex.
+#
+# What this does NOT change is the link: CONFIG_XNU_NATIVE_UFS above already makes
+# build-xnu-4k-baseline.sh:678-683 force-load $ROOT/build/sheng-ufs/libShengUfs.a, and
+# build-sheng-source-storage.py copies the archive it builds to exactly that path ("Keep the catalog's
+# archive output stable for the resolved-tree copier"). So libShengSourceStorage.a must NOT be added to
+# XNU_EXTRA_LD_ARCHIVES here: the same archive would be force-loaded twice and every symbol in it would
+# collide. Allenwdk's defconfig lists it because that board leaves NATIVE_UFS off and gets the archive
+# only that way.
+CONFIG_XNU_SOURCE_STORAGE=y
+CONFIG_XNU_SOURCE_STORAGE_TABLES="userdata"
+CONFIG_XNU_SOURCE_STORAGE_POLICIES="OS,SystemOS,App"
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n

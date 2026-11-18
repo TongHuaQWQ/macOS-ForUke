@@ -5734,3 +5734,64 @@ else:
 （`_load_init_program` 引用，由后面才建的 `kits/sheng` 提供）。它们和 `_corecrypto_kext_start`/`_mockfs_*` 同类，
 属于"没有归档时的预期"，不是失败——但下一轮要确认它们在**第二遍链接**里被解析掉，若仍报缺，就是
 `kits/sheng` 的归档没进 `EXTRA_LD_ARCHIVES`。
+
+## §96 按官方接法（Allenwdk/UniXNU-uke + UniXNU-sheng）对齐存储这一环，找出还缺的两处
+
+用户点名的三处参考：文档 <https://unixnu.com/zh/devices/sheng#arm64e-os>、**同设备主线** `Allenwdk/UniXNU-uke`、
+官方 `UniXNU/UniXNU-sheng`。逐项对照之后，我们的接法有两处"自己手搓"和一处**真缺**。
+
+### 96.1 官方怎么接（原文即证据）
+
+| 机制 | 官方位置 | 原文 |
+|---|---|---|
+| 表走 userdata | `Allenwdk/UniXNU-uke:configs/uke_ipados27_defconfig:22` | `CONFIG_XNU_SOURCE_STORAGE_TABLES="userdata"` |
+| 声明用源运行时 | 同文件 `:21` | `CONFIG_XNU_SOURCE_STORAGE=y` |
+| 选哪些窗口有 policy | 同文件 `:23` | `CONFIG_XNU_SOURCE_STORAGE_POLICIES="OS,SystemOS"` |
+| bundle 进 payload | `Allenwdk/UniXNU-uke:board.toml:230` | `root_policies = "{tree}/build/sheng-source-storage/root-policies.bin"` |
+| 适配器排序 | `UniXNU/UniXNU-sheng:board.toml:20` | `"component:ShengUfs", "build-sheng-source-storage.py --policy-dir scripts/policies/ipados-27.0.1-24A446"`，注释写明"so the source storage archive and root-policies.bin the defconfigs link no longer depend on a leftover of an earlier build" |
+| 仓里提交哪些 policy 文件 | `UniXNU-sheng:scripts/policies/*/{OS,SystemOS}/` | 每窗口只有 `manifest.header.bin`（544 B）+ `trusted-key.bin`（395 B）+ `verification.json`，并用 `.gitignore:40` 的 `!policies/**/*.bin` 抵消全局 `*.bin` 忽略 —— **和我们做的一模一样** |
+
+关键点：`CONFIG_XNU_*` 通过 `xnu_env()` 原样变成 `XNU_*` 环境变量，所以官方**根本不需要**改核心去读
+`board.toml [root]`。我们原来的 `[root] tables_in_userdata`（§95 那条核心提交）是自造的同义机制。
+
+### 96.2 我们缺的两处
+
+1. **`[payload] root_policies` 从来没配过**（`grep root_policies board.toml` 为空）。后果不是构建失败而是
+   **静默**：`payload.py:145` 拿不到路径 → 不复制 `Payloads/kernel.macho.vroot` → 内核手里没有任何策略可以
+   校验根卷。即便 b277 链接变绿、刷上去能认出 UFS，也一定在验根那一步失败。这条现在补上了，路径与官方一致。
+2. **适配器没有作为 `[kernel] archives` 条目出现**，只靠 `build-arm-driver.py` 在 arm64e 上的 fallback 调用
+   （不带 `--policy-dir`，顺序隐含在 `component:ShengUfs` 里面）。已按官方写成
+   `"build-sheng-source-storage.py --policy-dir scripts/policies/26C5035r"`，紧跟 `component:ShengUfs`。
+
+同时把 defconfig 的三个官方键补上（`SOURCE_STORAGE` / `_TABLES` / `_POLICIES`），其中 `_TABLES` 与
+`[root] tables_in_userdata` 指向同一个环境变量，两边取值一致。
+
+### 96.3 一个**别照抄**的地方：`libShengSourceStorage.a` 不能塞进 `EXTRA_LD_ARCHIVES`
+
+第一版我照抄了官方 defconfig 的 `CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,…libShengSourceStorage.a …"`，
+然后核对了链接器那一侧：
+
+```
+build-xnu-4k-baseline.sh:678-683
+  if [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
+    UFS_ARCHIVE=$ROOT/build/sheng-ufs/libShengUfs.a
+    test -f "$UFS_ARCHIVE"                                   # 缺了就在这里早失败
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$UFS_ARCHIVE"
+```
+
+而 `build-sheng-source-storage.py` 最后一段正是把产物复制到那个路径（注释写着 "Keep the catalog's archive
+output stable for the resolved-tree copier"）。**我们开着 `CONFIG_XNU_NATIVE_UFS=y`，这个归档本来就已被
+force-load**；再往 `XNU_EXTRA_LD_ARCHIVES` 加一次就是同一个归档被 force-load 两遍、符号全撞。
+官方之所以要写，是因为它的 `uke_ipados27_defconfig` **没开** `NATIVE_UFS`，只能靠配置项带进来。
+所以这一处保留我们的写法，并在 defconfig 里把原因写清楚。
+
+同理，b276 bootstrap 里那两条 `_native_verified_block_root_authorized` / `_native_verified_block_volume_device`
+不是问题：它们在 `drivers/NativeUfs/NativeUfs.cpp:1854/1860`，随上面那个归档进第二遍链接；bootstrap 故意不
+force-load 任何归档，所以那一步报 undefined 是预期（和 `_corecrypto_kext_start`、`_mockfs_*` 同一类）。
+
+### 96.4 `check-core-contract.py` 扩到覆盖板子自己的一半
+
+新增检查（都按 `board.toml`/defconfig **实际声明**触发）：`SOURCE_STORAGE=y`、`SOURCE_STORAGE_TABLES`、
+`[payload] root_policies`、`[kernel] archives` 里那条适配器条目及其 `--policy-dir` 目录、三份 policy 文件齐全、
+以及"同一个归档别被 force-load 两遍"。反证：`--defconfig uke-storage_defconfig` 立刻报出缺 `SOURCE_STORAGE` 与
+`_TABLES` 两条，退出码 1。

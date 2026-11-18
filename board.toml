@@ -256,6 +256,15 @@ archives = [
   # CONFIG_XNU_NATIVE_UFS and, for the same round, native-ufs-root=1 in kernel_args finally points at a
   # driver that is in the kernel.
   "component:ShengUfs",
+  # The source runtime itself, the way the official boards run it: UniXNU-sheng's [kernel] archives name
+  # "build-sheng-source-storage.py --policy-dir scripts/policies/<profile>" directly after
+  # component:ShengUfs — "so the source storage archive and root-policies.bin the defconfigs link no
+  # longer depend on a leftover of an earlier build" (unixnu.com/zh/devices/sheng#arm64e-os). Without
+  # the entry the adapter still runs, because build-arm-driver.py delegates to it on arm64e, but that
+  # fallback passes no --policy-dir and leaves the order implicit. The archive it writes is
+  # {tree}/build/sheng-source-storage/libShengSourceStorage.a, which CONFIG_XNU_EXTRA_LD_ARCHIVES
+  # force-loads — the same wiring Allenwdk/UniXNU-uke uses on this device.
+  "build-sheng-source-storage.py --policy-dir scripts/policies/26C5035r",
   # WITHOUT build-arm-driver.py NativeUfs --unverified: the classic driver above, superseded.
   # WITHOUT build-ufs-original-bindings.py: it binds IOBlockStorageDevice from a *prelinked* candidate
   # and insists the plan's original_sha256 equals kernelcache.release.ipad7 (f18b4df8… in the script),
@@ -519,6 +528,13 @@ dram_size = "0x13FE00000"            # XNU VM DRAM: this unit's whole high run (
 dram_base = "0x8C0000000"            # high DRAM range 0x8C0000000-0xA0000000; the ADT writes /chosen/dram-base
 skip_setup_tool = "scripts/seed-data-skip-setup.py"   # used by --skip-setup
 panic_screen = true                  # native XNU panic output; Font.h is vendored in scripts/
+# The signed root-policy bundle build-sheng-source-storage.py writes: with
+# XNU_SOURCE_STORAGE_TABLES=userdata only the 544-byte header of each policy travels here, as
+# Payloads/kernel.macho.vroot, and payload.py:155-158 refuses a bundle whose header count or length does
+# not match the file. The hash tables themselves ride in the userdata image as the "<window>.vroot" data
+# objects. Same key, same path and same reason as Allenwdk/UniXNU-uke's board.toml on this device; a
+# missing one is silent — the kernel then has no policy to authenticate the root against.
+root_policies = "{tree}/build/sheng-source-storage/root-policies.bin"
 # The pin below is the StaticTrustCache of the 25F84 image, so it does not belong to the 26C5035r one this
 # board now declares. Commented out rather than carried: payload.py only applies the list to a trust cache
 # passed with --trust-cache, so leaving the old value would reject the new image's cache while removing it

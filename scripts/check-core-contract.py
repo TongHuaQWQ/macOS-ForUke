@@ -22,6 +22,7 @@ driven by what board.toml actually declares, so a board that does not use these 
     python3 scripts/check-core-contract.py [--core ../UniXNU]
 """
 import argparse
+import os
 import re
 import sys
 import tomllib
@@ -34,15 +35,32 @@ def read(path):
     return path.read_text() if path.is_file() else None
 
 
+def defconfig_values(path):
+    """The CONFIG_XNU_* keys of a defconfig, as the kernel step's xnu_env() would see them."""
+    values = {}
+    for line in read(path).splitlines() if path.is_file() else []:
+        line = line.strip()
+        if not line.startswith('CONFIG_XNU_') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        value = value.split('#')[0].strip()
+        values[key[len('CONFIG_'):]] = value.strip('"')
+    return values
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--core', type=Path, default=Path('../UniXNU'),
                         help='the UniXNU checkout the kernel workflow uses')
+    parser.add_argument('--defconfig', default=os.environ.get('UKE_DEFCONFIG', 'uke-macos_defconfig'),
+                        help='the configuration the workflow builds (default: UKE_DEFCONFIG)')
     args = parser.parse_args()
     core = args.core.resolve()
     board = tomllib.loads((ROOT / 'board.toml').read_text())
     feeds = tomllib.loads((ROOT / 'feeds.toml').read_text()) if (ROOT / 'feeds.toml').is_file() else {}
-    root, userdata = board.get('root', {}), board.get('userdata', {})
+    root, userdata, payload = board.get('root', {}), board.get('userdata', {}), board.get('payload', {})
+    archives = board.get('kernel', {}).get('archives', [])
+    config = defconfig_values(ROOT / 'configs' / f'{args.defconfig}')
     problems = []
 
     def require(condition, message):
@@ -91,13 +109,55 @@ def main():
                 'scripts/prepare-storage-headers.py: prepare() must be prepare(source, revision, out), the '
                 'signature build-sheng-source-storage.py calls')
 
+    # The board's own half of the same handoff. Each item is a way the build can be silently wrong for a
+    # whole round instead of failing: the official boards set all of them together (Allenwdk/UniXNU-uke
+    # configs/uke_ipados27_defconfig:20-27 with board.toml:230), so every one is checked together here.
+    header_only = root.get('tables_in_userdata') or config.get('XNU_SOURCE_STORAGE_TABLES') == 'userdata'
+    if header_only:
+        require(config.get('XNU_SOURCE_STORAGE') == 'y',
+                f'configs/{args.defconfig}: [root] tables_in_userdata wants the source runtime, but '
+                'CONFIG_XNU_SOURCE_STORAGE=y is missing')
+        require(config.get('XNU_SOURCE_STORAGE_TABLES') == 'userdata',
+                f'configs/{args.defconfig}: CONFIG_XNU_SOURCE_STORAGE_TABLES="userdata" is missing; that key '
+                'is the official spelling (Allenwdk/UniXNU-uke configs/uke_ipados27_defconfig:22)')
+        bundle = payload.get('root_policies')
+        require(bundle is not None and 'sheng-source-storage/root-policies.bin' in bundle,
+                '[payload] root_policies is missing or does not name '
+                '{tree}/build/sheng-source-storage/root-policies.bin: the kernel then carries no policy to '
+                'authenticate the root against (payload.py:145-158 ships it as kernel.macho.vroot)')
+        entry = next((item for item in archives if 'build-sheng-source-storage.py' in item), None)
+        require(entry is not None,
+                '[kernel] archives names no build-sheng-source-storage.py entry; the official boards put it '
+                'right after component:ShengUfs with --policy-dir (unixnu.com/zh/devices/sheng#arm64e-os)')
+        if entry is not None:
+            directory = re.search(r'--policy-dir\s+(\S+)', entry)
+            require(directory is not None,
+                    f'[kernel] archives: "{entry}" passes no --policy-dir')
+            if directory is not None:
+                policy_dir = ROOT / directory.group(1)
+                require(policy_dir.is_dir(),
+                        f'[kernel] archives: {directory.group(1)} does not exist')
+                for window in (config.get('XNU_SOURCE_STORAGE_POLICIES') or 'OS,SystemOS').split(','):
+                    for name in ('manifest.header.bin', 'trusted-key.bin', 'verification.json'):
+                        require((policy_dir / window / name).is_file(),
+                                f'{directory.group(1)}/{window}/{name}: missing (the adapter reads all three)')
+        # One force_load of the storage archive, not two: CONFIG_XNU_NATIVE_UFS already links
+        # $ROOT/build/sheng-ufs/libShengUfs.a, which is where the adapter copies its output.
+        extra = config.get('XNU_EXTRA_LD_ARCHIVES', '')
+        if config.get('XNU_NATIVE_UFS') == 'y':
+            require('libShengSourceStorage.a' not in extra,
+                    f'configs/{args.defconfig}: libShengSourceStorage.a is in CONFIG_XNU_EXTRA_LD_ARCHIVES '
+                    'while CONFIG_XNU_NATIVE_UFS=y already force-loads the same archive through '
+                    'build-xnu-4k-baseline.sh:678-683; every symbol in it would collide')
+
     if problems:
-        print('the core checkout cannot build this board:')
+        print('the build inputs do not agree with what this board declares:')
         for problem in problems:
             print(f'  - {problem}')
-        print('\nThe core is checked out by ref, so push the contract there (or pin that ref) before a round.')
+        print('\nThe core is checked out by ref, so push the contract there (or pin that ref) before a round; '
+              'the board items are in this checkout.')
         return 1
-    print(f'core contract {core}: ok for this board')
+    print(f'core contract {core}: ok for this board ({args.defconfig})')
     return 0
 
 
