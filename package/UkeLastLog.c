@@ -642,15 +642,27 @@ void
 uke_panic_flush(const char *message)
 {
 	static volatile int flushing;
+	static volatile int published;
 	const char prefix[] = "UKE PANIC: ";
 	size_t used = sizeof(prefix) - 1;
-	if (flushing || message == NULL || gPanicBase == 0 || gPanicSize < 8 + used) {
+
+	if (message == NULL) {
+		return;
+	}
+	/* FIRST, and before every guard: the pram slot path needs neither gPanicBase nor gPanicSize, and both
+	 * of those are zero on a board whose panic_region is off - which is this one. The first version of this
+	 * had the publish call after the guard, so it never ran and the next firmware boot printed
+	 * "pram slot 0x37F100: \"P@D\"" instead of the panic text (log/uke-20190100-000141.log). The first
+	 * panic wins; a recursive one must not overwrite the record that matters. */
+	if (!published) {
+		published = 1;
+		uke_panic_publish(message);
+	}
+	if (flushing || gPanicBase == 0 || gPanicSize < 8 + used) {
 		return;
 	}
 	flushing = 1;
 	ukePanicStaged = 1;
-	/* Before anything that can bail out below: this path needs neither gPanicBase nor a size. */
-	uke_panic_publish(message);
 	__asm__ volatile("dsb sy" ::: "memory");
 	uke_panic_settle();
 	const size_t capacity = (size_t)gPanicSize - 8;
