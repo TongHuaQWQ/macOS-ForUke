@@ -4,20 +4,23 @@
 
 ## 0. 现在在哪（每次会话先看这 30 行）
 
-> 更新时间 **2026-11-18 02:0x**。这一节的旧内容（b105/ep0 那批）已经翻过去了，那一整段历史在 §89–§92。
+> 更新时间 **2026-11-19 01:1x**。这一节的旧内容（b105/ep0 那批）已经翻过去了，那一整段历史在 §89–§92；
+> b256 之后的轮次见 §93–§95。
 
 | 项 | 值 |
 |---|---|
-| 目标 | Xiaomi Pad 7（uke / SM7675 "Cliffs"）跑 macOS 26.5.2（25F84，profile `macos-27.3-uke`），4 KiB 页 + arm64e/PAC 自建 XNU |
-| **当前卡点** | **只有 CPU0 在跑**：`dts/uke.dts` 缺 8 个 `unixnu,cluster-type`，`processor_bootstrap()` 拒绝其余核（详见 `docs/ROADMAP-20261118.md` P2） |
-| 刚修掉的 | **平台错误风暴**（`esr 0x96000010`）——成因是我们自己给 ArmCpu 加的 GICR SGI 帧回读，b262/b263 已删（§94）|
-| 当前分支 | `ci-b263-clustertype`（b262 的 GIC 修复 + dts 的 8 个 cluster-type）|
+| 目标 | Xiaomi Pad 7（uke / SM7675 "Cliffs"）跑 macOS 27.3（26C5035r，profile `macos-27.3-uke`），4 KiB 页 + arm64e/PAC 自建 XNU |
+| **当前卡点** | **根卷挂载**：`native-ufs-root=1` + 26C5035r 的三份签名 policy（OS/SystemOS/App）。签名表放不进启动镜像，所以内核包里只带 544 字节签名头，表以 `<window>.vroot` 数据对象落在 userdata 镜像里（§95）|
+| 已经过的 | b262/b263 风暴 + cluster-type（§94）；b264 不对齐 `memcpy`；b266/b268 userdata 日志 DMA；b269 panic 文本进 pram；b272 `native-ufs-root=1` 链接通过 |
+| 刚修掉的 | **b276 的 `manifest.bin`**：不是缺文件，是核心 `version_env()` 少一行 `XNU_SOURCE_STORAGE_TABLES` 路由（§95）|
+| 当前分支 | `ci-b277-tables`（run `44332124267`），核心 `TongHuaQWQ/UniXNU@macos` = `e10bb7d` |
 | 镜像索引 | `work/flash/INDEX.md`；刷 `bash work/flash/apply.sh <round>`，回原厂 `bash work/flash/restore-os4.sh`（**OS4** 在 `device/uke-backup/os4/`，`uke-backup/` 那份是 OS3 不要刷）|
 | 出镜像 | `python3 work/round.py <RUN_ID> --name <round> --core work/push/UniXNU --device work/push/uke-main-merge --profile macos-27.3-uke`（约 6 分钟）|
 | **参考实现**（别手搓，直接拿）| `work/ref-sheng/`=UniXNU-sheng（**跑 macOS**）、`work/ref-allenwdk/`=Allenwdk/UniXNU-uke（**这台机器跑 iPadOS**）、`work/ref-armcpu/`、`work/ref-senemos/`=Linux 补丁集、`work/ref-vendor-dt/`=厂商 DT |
 | 本轮文档 | `docs/ROADMAP-20261118.md`（问题清单+路线）、`docs/UPSTREAM-REVIEW-20261118.md`（哪些本地覆盖该丢）、`work/re/linux-ref/`（Linux 树交叉核对）|
-| 下一轮验收 | `ArmCpu: N timer interrupts` **N>0**；`IOServiceWait` 不再堆积；`ArmCpu: smp step` 有非 0 值 |
+| 下一轮验收 | `root-policies.bin` 约 1.7 KB（不是 108 MiB）；`kernel.macho` 链接通过；payload 里 `native-ufs-root=1`；真机上 Root device 被 NativeUfs 认出来 |
 | 组件自检 | `bash package/qcom-usb-debug/scripts/check-component.sh`（几十秒，改归档代码前必跑）|
+| 核心契约 | `python3 scripts/check-core-contract.py --core ../UniXNU`（秒级；CI 在检出 UniXNU 后自动跑，把 b274/b275/b276 那类"核心落后一提交"变成秒级报错）|
 | 设备操作铁律 | **不要长按断电**（DRAM 里的诊断全丢）；要在 TWRP 里读日志 |
 | CI 铁律 | `ci-*` 分支一推就构建（~35 分钟），**同一时间只推一个**：推新分支会把在跑的那次顶掉（b262 就是这么被 cancel 的）|
 
@@ -26,6 +29,10 @@
 1. 诊断代码本身会打死启动：读 GICR SGI 帧 → 同步外部中止 → 错误处理器恢复同一条指令 → 无限风暴。
    **写是 posted（丢了也不报错），读必须等应答**，所以"写完回读校验"在这块板子上是反的。
 2. 拍屏/扫二维码能拿到什么，取决于内核跑到了哪一步。内核没到 BSD init 之前，QR 里只有固件日志。
+3. CI 检出的核心是**分支**（`UKE_CORE_REF=macos`）而不是提交：核心落后一提交，本地看得再对，
+   跑起来也是另一份代码。b274（适配器写死的 IOStorageFamily 版本）、b275（`prepare()` 签名）、
+   b276（少一行 env 路由）全是这一类，各花掉一整轮。`scripts/check-core-contract.py` 就是为它们写的，
+   CI 里在检出 UniXNU 之后几秒内跑。
 
 ### 章节索引
 
