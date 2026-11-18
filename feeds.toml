@@ -4,7 +4,7 @@ name = "IOStorageFamily"
 kind = "refer"
 git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
 ref = "main"
-commit = "e45fbe30a7879e0b16e26dddb78538f1b00e0bff"
+commit = "7edb88fbae296fb7c8ce2f64e115e116e566d51c"
 
 # The SM7675 (cliffs) SoC layer, shared with future boards. Local until the
 # repository is published; the commit pin replaces the local override then.
@@ -12,7 +12,7 @@ commit = "e45fbe30a7879e0b16e26dddb78538f1b00e0bff"
 name = "sm7675"
 kind = "soc"
 git = "https://github.com/Allenwdk/UniXNU-sm7675-common"
-commit = "98618c197e789acfd7ac6755ad23bf7e04881780"
+commit = "e5c8d35c32381613e72d37b5dfdc3d65c923b39e"
 local = "../UniXNU-sm7675-common"
 
 # Board-pinned component variants: the A732 GPU fork and the overlay-present
@@ -25,19 +25,19 @@ git = "https://github.com/Allenwdk/NativeAdreno.git"
 # The branch gpucomp37 was built from: the local A732 commits rebased onto
 # upstream perf/gpu-smoothness (stall handling, retired-BO reaper, WPTR fence
 # checks). f1a2aee is the older m9f-era tip and renders on the CPU here.
-commit = "c9509066f5cf0f958a22077f214c15837d54191a"
+commit = "03ec4bc645a023da0db86816ddb87e90d449d8e3"
 
 [[source]]
 name = "GopFramebuffer"
 kind = "driver"
 git = "https://github.com/Allenwdk/NativeMobileDisplay.git"
-commit = "cd8a7b2d7f73d3e28a69201b5e448c8883c9ce26"
+commit = "eadd64adce942f0521a5f6f1985959d902092e4a"
 
 [[source]]
 name = "AdrenoMetal"
 kind = "driver"
 git = "https://github.com/Allenwdk/AdrenoMetal.git"
-commit = "739de5b622cee3b441f07826d6d4fface0a1fc19"
+commit = "75e182072332863bd65df9806b446668057ac75d"
 
 [[source]]
 name = "ShengUfs"
@@ -68,15 +68,13 @@ local = "drivers/ArmDTPlatform"
 [[source]]
 name = "ArmCpu"
 kind = "driver"
-local = "drivers/ArmCpu"
-git = "https://github.com/TongHuaQWQ/ArmCpu.git"
-commit = "6288238"
+git = "https://github.com/Allenwdk/ArmCpu.git"
+# Synced 2026-11-18 with the branch this board actually runs iPadOS with. The local fork
+# (drivers/ArmCpu, TongHuaQWQ/ArmCpu@6288238) is gone: it had added three GICR SGI-frame reads on the boot
+# path - the "platform error" storm of b170..b261 - and had removed cluster, cpufreq, idle and edge support
+# that this driver still carries. docs/UPSTREAM-REVIEW-20261118.md §1 and §2.
+commit = "87212886526392ed4b25ea1ce7345a6fe82508d8"
 
-
-# The prelink kit as a board copy, for the same reason as the drivers above: feeds resolve
-# first-wins and a git pin cannot override the core's kits/XnuPrelink submodule. The copy carries the
-# reviewed anchors this board needs in fixtures/fileset-25F84-symbols.json; without a writable copy the
-# anchors have nowhere to live, because the matcher reads them from Path(__file__).parent/'fixtures'.
 [[source]]
 name = "XnuPrelink"
 kind = "kit"
