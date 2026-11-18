@@ -75,3 +75,18 @@ csr_check(uint32_t mask)
 
 	return ((config & mask) == mask) ? 0 : UKE_EPERM;
 }
+
+// The native UFS root gate. scripts/unixnu/payload.py:71-74 refuses to write a payload when the command
+// line carries native-ufs-root=1 and the kernel does not define _sheng_pmgr_run - the unchanged target
+// AMFI panics with "No PMGR" without it. The real integration (package/ShengPlatformPower.cpp, built by
+// scripts/build-platform-power.py) is not usable on this train: it inherits ApplePMGR AON slot addresses
+// recorded against kernelcache.release.ipad7 and refuses any other kernelcache, and the no-reference
+// fallback path of that script cannot even import (ModuleNotFoundError: native_prelink, run 44304175080).
+//
+// So this is the stub that script would have archived, defined where the kernel already links it: weak, so
+// the real bridge wins the moment the archive becomes usable, and empty, because nothing in this arch
+// series calls it yet (the call site is zzz-boot-progress.patch, which is not in the series).
+__attribute__((weak)) void
+sheng_pmgr_run(void)
+{
+}

@@ -212,12 +212,7 @@ archives = [
   # carry across kernelcaches, so re-pinning the hash would bind the wrong ones. CONFIG_XNU_SHENG_PMGR
   # stays on, and its call site (zzz-boot-progress.patch) is not in this arch series, so the define is
   # inert here and nothing needs the archive to link.
-  # Our own build-platform-power.py, NOT the sheng one: the sheng script binds ApplePMGR AON slot
-  # addresses recorded against kernelcache.release.ipad7 and refuses any other kernelcache ("Recorded
-  # bindings are for another kernelcache"). Our copy archives a no-op sheng_pmgr_run when it has no
-  # reference kernel, which is exactly what the payload gate wants: scripts/unixnu/payload.py:71-74
-  # demands the symbol exists once native-ufs-root=1, and nothing in this train calls it yet.
-  "build-platform-power.py",
+  # "build-sheng-platform-power.py",
   "build-libpthread-kernel.py",
   # "component:ShengHidInput",
   "component:AppleKeyStoreState",
