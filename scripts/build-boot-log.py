@@ -62,6 +62,29 @@ sources = [
     # byte accesses as well, so both the language and the backend refuse to invent a wide store.
     ('UkeAdvLogger.c', STARTUP_RECORD, 'UkeAdvLogger.o', ['-mstrict-align']),
 ]
+
+# The storage runtime compiles three of these files itself, into the same kernel link.
+#
+# build-sheng-source-storage.py puts libShengSourceStorage.a into the link (through
+# build-xnu-4k-baseline.sh:678-683, since CONFIG_XNU_NATIVE_UFS is on), and for a board with its own
+# writer it adds UkeLastLog.c and CrashLogProbe.c to it, plus BootWatchdogPolicy.c — the same units this
+# script compiles from the same sources. Two force-loaded archives that both define those symbols are a
+# duplicate-symbol link error, so the archive keeps only what the storage runtime does not build:
+# MissingKernelSymbols.c and UkeAdvLogger.c. That split is uke's own: Allenwdk/UniXNU-uke ships no
+# build-boot-log.py step at all and lets the storage runtime own the writer.
+#
+# The report the adapter writes is the evidence the storage runtime ran for this build (it is written at
+# the very end of the adapter, after the archive is in place), and archive order guarantees it exists by
+# the time this step runs: board.toml [kernel] archives names build-sheng-source-storage.py before
+# build-boot-log.py. Without it — any configuration that does not select the source runtime — every file
+# here is compiled, as before.
+STORAGE_REPORT = ROOT / 'build/sheng-source-storage/report.json'
+OWNED_BY_STORAGE = {'UkeLastLog.c', 'BootWatchdogPolicy.c', 'CrashLogProbe.c'}
+if STORAGE_REPORT.is_file():
+    skipped = [name for name, _, _, _ in sources if name in OWNED_BY_STORAGE]
+    sources = [entry for entry in sources if entry[0] not in OWNED_BY_STORAGE]
+    print(f'the storage runtime owns {", ".join(skipped)}; '
+          f'libUkeLastLog.a keeps {", ".join(name for name, _, _, _ in sources)}')
 report = {'userdata_log': USERDATA_LOG}
 objects = []
 for name, record, obj_name, extra in sources:

@@ -35,6 +35,10 @@ extern uint64_t sane_size;
 extern void uke_crash_log_start(void);
 extern void uke_adv_log_start(void);
 extern void pe_print_last_panic_again(void);
+#if defined(UKE_SOURCE_STORAGE_LOG)
+/* Defined by the BootLogDefaults.c the storage adapter generates when this file is the writer. */
+extern volatile uint32_t boot_log_rounds;
+#endif
 
 /* The fixed page the boot marks go to (see uke_mark below); also UkePramLog.h's KERNEL stamp. */
 #define UKE_MARK_BASE   0x9FFDFD000ull
@@ -46,6 +50,16 @@ extern void pe_print_last_panic_again(void);
 // The userdata (UFS) half is built only when the configuration asks for it
 // (build-boot-log.py passes -DUKE_LOG_USERDATA=1 when CONFIG_XNU_LOG_USERDATA=y). Without it only the
 // pram record is written, which is the half the firmware reads back on the next boot.
+//
+// The storage runtime compiles this same file as the board's log writer
+// (build-sheng-source-storage.py: UkeLastLog.c replaces BootLog.c and the unit gets
+// -DUKE_SOURCE_STORAGE_LOG=1). In that build native_ufs_log_open/write/sync come from the source UFS
+// driver instead of the freestanding transport, so the userdata half is on by construction — that is
+// exactly what UKE_LOG_USERDATA gates. Allenwdk/UniXNU-uke's UkeLastLog.c carries no such guard at all
+// for the same reason.
+#if defined(UKE_SOURCE_STORAGE_LOG) && !defined(UKE_LOG_USERDATA)
+#define UKE_LOG_USERDATA 1
+#endif
 #ifndef UKE_LOG_USERDATA
 #define UKE_LOG_USERDATA 0
 #endif
@@ -541,6 +555,14 @@ uke_ufs_publish(void)
 	}
 	(void)native_ufs_log_sync();
 	ukeUfsSeq++;
+#if defined(UKE_SOURCE_STORAGE_LOG)
+	/* The source storage runtime's BootLogDefaults.c owns this counter when this file is the writer
+	 * (build-sheng-source-storage.py compiles UkeLastLog.c with -DUKE_SOURCE_STORAGE_LOG and drops
+	 * BootLog.c, because uke's writer is this one). bsd_init and the board page read it as "a record
+	 * has reached the medium", so it counts successful writes only. Allenwdk/UniXNU-uke's own
+	 * UkeLastLog.c carries the same increment for the same reason. */
+	boot_log_rounds++;
+#endif
 	ukeUfsCursor = (ukeUfsCursor + UKE_UFS_RECORD_BLOCKS) % ukeUfsBlocks;
 	ukeUfsCursor -= ukeUfsCursor % UKE_UFS_RECORD_BLOCKS;
 }

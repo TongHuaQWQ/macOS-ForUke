@@ -149,6 +149,26 @@ def main():
                     f'configs/{args.defconfig}: libShengSourceStorage.a is in CONFIG_XNU_EXTRA_LD_ARCHIVES '
                     'while CONFIG_XNU_NATIVE_UFS=y already force-loads the same archive through '
                     'build-xnu-4k-baseline.sh:678-683; every symbol in it would collide')
+        # The runtime compiles device/drivers/ShengUfs/NativeUfs.cpp with -DNATIVE_UFS_SOURCE_API=1, and
+        # that is a different driver from the classic bring-up one. The two are separate directories in
+        # the official same-device repository; ours must not point the feed at the classic driver, which
+        # also defines the verified-block helpers SourceRootBinding.cpp brings.
+        feed = next((entry.get('local') for entry in feeds.get('source', [])
+                     if entry.get('name') == 'ShengUfs'), None)
+        require(feed is not None, 'feeds.toml: no local ShengUfs source; the runtime has no driver to compile')
+        if feed is not None:
+            driver = read(ROOT / feed / 'NativeUfs.cpp') or ''
+            require('NATIVE_UFS_SOURCE_API' in driver,
+                    f'feeds.toml: ShengUfs points at {feed}, which is not the source-API driver (no '
+                    'NATIVE_UFS_SOURCE_API); build-sheng-source-storage.py compiles this path with that define')
+
+    # SourceStorage.cpp publishes SoftwareAES unconditionally, so the archive that builds it has to be in
+    # the link. This board builds build/software-aes/libSoftwareAES.a but never loaded it until now.
+    if (ROOT / 'package/SourceStorage.cpp').is_file() and config.get('XNU_NATIVE_AES') != 'y':
+        require('libSoftwareAES.a' in config.get('XNU_EXTRA_LD_ARCHIVES', ''),
+                f'configs/{args.defconfig}: package/SourceStorage.cpp calls native_software_aes_create() and '
+                'friends, but neither CONFIG_XNU_NATIVE_AES=y nor a libSoftwareAES.a in '
+                'CONFIG_XNU_EXTRA_LD_ARCHIVES provides them')
 
     if problems:
         print('the build inputs do not agree with what this board declares:')

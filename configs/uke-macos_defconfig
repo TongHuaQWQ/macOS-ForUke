@@ -210,7 +210,15 @@ CONFIG_XNU_QCOM_USB_DEBUG=y
 # only definition and still applies. Before this, two -force_loads with two strong definitions would
 # have been a duplicate symbol at the link. The same weak-fallback pattern is used in
 # package/GpuPowerProbe.cpp:73-88 and by build-sheng-source-storage.py's weak_defaults().
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a"
+# The second archive is what package/SourceStorage.cpp needs: it publishes SoftwareAES itself
+# (source_software_aes_init / native_software_aes_create / native_aes_kat_status...), unconditionally, so the
+# source storage runtime cannot link without it. The archive is already built in this configuration --
+# board.toml [kernel] archives runs build-software-aes-bindings.py, whose default output is
+# build/software-aes/libSoftwareAES.a -- it was simply never force-loaded. Allenwdk/UniXNU-uke lists its
+# equivalent (build/software-aes-27/libSoftwareAES27.a) in the same key for the same reason. This is NOT
+# CONFIG_XNU_NATIVE_AES: that switch would also turn on the NativeAES subclass path whose vtable binding
+# this configuration deliberately leaves alone (see the note above).
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a -Wl,-force_load,{tree}/build/software-aes/libSoftwareAES.a"
 # The source storage runtime and where its root-policy tables travel. These keys are the official ones —
 # Allenwdk/UniXNU-uke sets exactly this set for this device (configs/uke_ipados27_defconfig:20-23) — and
 # they reach the scripts through xnu_env(), which turns every CONFIG_XNU_* into the XNU_* variable of the

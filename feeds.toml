@@ -48,7 +48,14 @@ commit = "75e182072332863bd65df9806b446668057ac75d"
 [[source]]
 name = "ShengUfs"
 kind = "driver"
-local = "drivers/NativeUfs"
+# The *source-API* UFS driver, which is a different driver from drivers/NativeUfs: the official
+# same-device repository ships both, and build-sheng-source-storage.py compiles this one
+# (device/drivers/ShengUfs/NativeUfs.cpp) with -DNATIVE_UFS_SOURCE_API=1. drivers/NativeUfs is the
+# classic bring-up driver (native-ufs-allow-unverified) and stays in the tree for the freestanding log
+# transport's headers; pointing this entry at it made the adapter compile the classic driver under the
+# source-API flags, which is also why the two verified-block helpers it defines collided with the
+# SourceRootBinding.cpp the runtime brings.
+local = "drivers/ShengUfs"
 
 [[source]]
 name = "ShengNovatekTouch"
