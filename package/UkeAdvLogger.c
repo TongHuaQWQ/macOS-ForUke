@@ -129,6 +129,25 @@ _Static_assert(UKE_ALI_BYTES == 88, "ADVANCED_LOGGER_INFO is 88 bytes");
 _Static_assert((UKE_ALI_BYTES % 8) == 0, "the log area has to start 8-byte aligned");
 _Static_assert(UKE_ALM_BYTES == 24, "ADVANCED_LOGGER_MESSAGE_ENTRY_V2 is 24 bytes");
 
+
+// NEVER call memcpy here. The kernel's memcpy copies eight bytes at a time and does not check
+// alignment, because on arm64 a misaligned access to Normal memory is normally permitted - but this
+// kernel runs with SCTLR_EL1.A set, so it is not. b263 died inside `_memcpy + 0xb4` (`str x6,[x3],#8`)
+// with esr 0x96000061 and a FAR ending in 0xb2, called from the Advanced Logger's message copy, whose
+// source is a byte offset into msgbuf. A volatile byte loop is the only form the compiler may not widen:
+// plain `d[i] = s[i]` is merged back into wide stores, exactly like the packed-struct bug of b256.
+static void
+uke_byte_copy(void *destination, const void *source, size_t count)
+{
+	volatile unsigned char *to = (volatile unsigned char *)destination;
+	const volatile unsigned char *from = (const volatile unsigned char *)source;
+	size_t index;
+
+	for (index = 0; index < count; index++) {
+		to[index] = from[index];
+	}
+}
+
 static volatile uint8_t *ukeAdvWindow;  /* mapped virtual address of the info header */
 static uint32_t ukeAdvLimit;          /* LogBufferOffset + LogBufferSize */
 static uint64_t ukeAdvStamp;
@@ -341,10 +360,9 @@ uke_adv_append(const char *text, size_t length)
 	uke_adv_put16(entry, UKE_ALM_OFF_PHASE, UKE_AL_PHASE_RUNTIME);
 	uke_adv_put16(entry, UKE_ALM_OFF_LENGTH, (uint16_t)length);
 	uke_adv_put16(entry, UKE_ALM_OFF_MESSAGE_OFFSET, UKE_ALM_BYTES);
-	// The message text is the one wide copy: UKE_ALM_BYTES and every offset are 8-byte aligned by
-	// construction, so a vector memcpy cannot produce a misaligned access here. Casting the volatile
-	// qualifier away is deliberate and confined to this copy.
-	memcpy((void *)(entry + UKE_ALM_BYTES), text, length);
+	// The destination is 8-byte aligned (offset is, UKE_ALM_BYTES is 24) but the SOURCE is not: it is a
+	// byte offset into msgbuf. memcpy is not safe in this kernel for that reason - see uke_byte_copy.
+	uke_byte_copy((void *)(entry + UKE_ALM_BYTES), text, length);
 	// Zero the alignment tail: a stale byte here is what a reader would take for the next signature.
 	for (tail = length; tail < total - UKE_ALM_BYTES; tail++) {
 		uke_adv_put8(entry, UKE_ALM_BYTES + tail, 0);

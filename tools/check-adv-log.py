@@ -466,6 +466,33 @@ def assembly_gate():
     return bad, caught, flagged
 
 
+# The kernel's memcpy copies eight bytes at a time without checking alignment. That is fine on arm64 in
+# general and fatal here, because this kernel runs with SCTLR_EL1.A set: b263 died inside `_memcpy + 0xb4`
+# (`str x6,[x3],#8`) with esr 0x96000061 and a FAR ending in 0xb2, on a message copy whose source is a
+# byte offset into msgbuf. Every copy in the boot-log writers must stay a volatile byte loop.
+MEMCPY_ALLOWED = {
+    ('package/UkeLastLog.c', 'memcpy(ukeUfsBuffer, "UKELLOG1", 8)'),          # both operands aligned
+    ('package/UkeLastLog.c', 'memcpy(ukePanicText, (const char *)(header + 2), copy)'),  # aligned start
+}
+
+
+def unaligned_copies():
+    """Every memcpy in the boot-log writers that is not on the reviewed, aligned allowlist."""
+    found = []
+    for name in ('package/UkeAdvLogger.c', 'package/UkeLastLog.c'):
+        path = ROOT / name
+        if not path.is_file():
+            continue
+        for line in path.read_text(errors='ignore').splitlines():
+            stripped = line.strip()
+            if not stripped.startswith('memcpy(') or stripped.startswith('//'):
+                continue
+            if (name, stripped.rstrip(';')) in MEMCPY_ALLOWED:
+                continue
+            found.append((name, stripped))
+    return found
+
+
 def self_tests():
     ok = 0
 
@@ -574,6 +601,17 @@ def self_tests():
         print(f'ok   self-test 8 asm-align  no wide store in the writer\'s aarch64 code, -mstrict-align is '
               f'in the build, and the pre-fix shape is caught ({len(caught)} stores)')
         ok += 1
+
+    # 9: no memcpy in the writers. The three alignment bugs so far (packed struct, merged byte stores,
+    # memcpy) all came from assuming a wide access is harmless; this is the one that can be checked by
+    # reading the source instead of disassembling a panic.
+    copies = unaligned_copies()
+    if copies:
+        for name, line in copies:
+            print(f'     {name}: {line}')
+        raise SystemExit(f'FAIL: {len(copies)} memcpy call(s) in the boot-log writers; use uke_byte_copy')
+    print('ok   self-test 9 no-memcpy  the writers copy byte-wise (SCTLR_EL1.A makes memcpy unsafe)')
+    ok += 1
 
     return ok
 

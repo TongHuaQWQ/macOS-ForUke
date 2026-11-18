@@ -106,6 +106,25 @@ struct uke_log_header {
 	uint32_t reserved;
 } __attribute__((packed));
 
+
+// NEVER call memcpy here. The kernel's memcpy copies eight bytes at a time and does not check
+// alignment, because on arm64 a misaligned access to Normal memory is normally permitted - but this
+// kernel runs with SCTLR_EL1.A set, so it is not. b263 died inside `_memcpy + 0xb4` (`str x6,[x3],#8`)
+// with esr 0x96000061 and a FAR ending in 0xb2, called from the Advanced Logger's message copy, whose
+// source is a byte offset into msgbuf. A volatile byte loop is the only form the compiler may not widen:
+// plain `d[i] = s[i]` is merged back into wide stores, exactly like the packed-struct bug of b256.
+static void
+uke_byte_copy(void *destination, const void *source, size_t count)
+{
+	volatile unsigned char *to = (volatile unsigned char *)destination;
+	const volatile unsigned char *from = (const volatile unsigned char *)source;
+	size_t index;
+
+	for (index = 0; index < count; index++) {
+		to[index] = from[index];
+	}
+}
+
 static uint32_t ukeLogSequence;
 static uint64_t ukeLogLastTick;
 #if UKE_LOG_USERDATA
@@ -153,9 +172,9 @@ uke_ramoops_append(struct uke_ramoops_buffer *buffer, size_t capacity,
 	if (first > count) {
 		first = count;
 	}
-	memcpy(buffer->data + start, src, first);
+	uke_byte_copy(buffer->data + start, src, first);
 	if (count > first) {
-		memcpy(buffer->data, src + first, count - first);
+		uke_byte_copy(buffer->data, src + first, count - first);
 	}
 	size += count;
 	if (size > capacity) {
@@ -294,9 +313,9 @@ uke_log_record_write(void)
 	if (first > cap) {
 		first = cap;
 	}
-	memcpy(text, m->msg_bufc + start, first);
+	uke_byte_copy(text, m->msg_bufc + start, first);
 	if (cap > first) {
-		memcpy(text + first, m->msg_bufc, cap - first);
+		uke_byte_copy(text + first, m->msg_bufc, cap - first);
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
 
@@ -445,9 +464,9 @@ uke_snapshot(uint8_t *out, size_t capacity)
 	if (first > cap) {
 		first = cap;
 	}
-	memcpy(out, m->msg_bufc + start, first);
+	uke_byte_copy(out, m->msg_bufc + start, first);
 	if (cap > first) {
-		memcpy(out + first, m->msg_bufc, cap - first);
+		uke_byte_copy(out + first, m->msg_bufc, cap - first);
 	}
 	return cap;
 }
@@ -565,8 +584,8 @@ uke_panic_flush(const char *message)
 		length = capacity - used;
 	}
 	uint32_t *header = (uint32_t *)(uintptr_t)gPanicBase;
-	memcpy((char *)(header + 2), prefix, used);
-	memcpy((char *)(header + 2) + used, message, length);
+	uke_byte_copy((char *)(header + 2), prefix, used);
+	uke_byte_copy((char *)(header + 2) + used, message, length);
 	header[1] = (uint32_t)(used + length);
 	__asm__ volatile("dsb sy" ::: "memory");
 	header[0] = UKE_PANIC_SAVE_MAGIC;
