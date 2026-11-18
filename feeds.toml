@@ -81,11 +81,18 @@ local = "drivers/ArmDTPlatform"
 [[source]]
 name = "ArmCpu"
 kind = "driver"
+# Synced 2026-11-18 with the branch this board actually runs iPadOS with: the GICR SGI-frame reads that
+# caused the "platform error" storm of b170..b261 are not in it, and it still carries cluster, cpufreq,
+# idle and edge support (docs/UPSTREAM-REVIEW-20261118.md §1 and §2).
+#
+# `local` wins over `git`, and that is the point: feeds.py resolves the core's own submodules first, so a
+# `git` pin here never takes effect for a component the core carries. Two earlier rounds silently built
+# UniXNU/ArmCpu@93a5030 while this entry claimed the commit below. b278 is the round that showed what
+# that costs: the source UFS runtime calls armcpu_spi_mask() from NativeUfs.cpp's hostEnableInterrupt(),
+# 93a5030 does not define it, and the kernel link stopped on "_armcpu_spi_mask". drivers/ArmCpu is this
+# commit, verbatim — no local edits.
+local = "drivers/ArmCpu"
 git = "https://github.com/Allenwdk/ArmCpu.git"
-# Synced 2026-11-18 with the branch this board actually runs iPadOS with. The local fork
-# (drivers/ArmCpu, TongHuaQWQ/ArmCpu@6288238) is gone: it had added three GICR SGI-frame reads on the boot
-# path - the "platform error" storm of b170..b261 - and had removed cluster, cpufreq, idle and edge support
-# that this driver still carries. docs/UPSTREAM-REVIEW-20261118.md §1 and §2.
 commit = "87212886526392ed4b25ea1ce7345a6fe82508d8"
 
 [[source]]

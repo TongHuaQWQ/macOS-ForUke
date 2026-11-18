@@ -90,3 +90,14 @@ __attribute__((weak)) void
 sheng_pmgr_run(void)
 {
 }
+
+// The Adreno preflight flag. package/SourceStorage.cpp declares it `weak_import` and only *reads* it
+// ("GPU external preflight ready=%u before root startup"), because on a board with the GPU archive the
+// Adreno driver publishes how far its firmware preflight got. This configuration builds no GPU archive
+// (CONFIG_XNU_NATIVE_ADRENO is off and the A732 firmware pins are not on a public runner), and the
+// kernel link does not honour weak_import for a static image: b278 stopped on
+// "_native_adreno_preflight_ready referenced from native_source_storage_start in SourceStorage.o".
+//
+// Zero is the honest answer — no preflight ran — and the definition stays weak so the GPU archive's own
+// variable wins the moment this board builds one.
+__attribute__((weak)) volatile uint32_t native_adreno_preflight_ready = 0;

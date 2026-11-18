@@ -181,6 +181,13 @@ zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch
 # unlike the STARTUP() route the board's own driver uses. Runtime is opt-in: qcom-usb-debug=1.
 zzzzzzzzzzzzzzzzzz-qcom-usb-debug-console.patch
 zzzzzzzzzzzzzzzzzz-qcom-usb-debug-worker.patch
+# The board's own writer and the source storage runtime register classes through uke_kext_class_begin/
+# uke_kext_class_end (package/UkeClassRegistration.h, from Allenwdk/UniXNU-uke). Without this patch those
+# two symbols do not exist anywhere in the kernel and the link stops on them — and registering the board
+# classes without taking sKextLock first is the lock-order deadlock of STATE §75 (preModLoad from the boot
+# probe against an OSKext::load holding sKextLock). Same patch as the reference's
+# patches/xnu-12377/uke-kext-registration-lock-order.patch, unmodified.
+zzzzzzzzzzzzzzzzzzz-uke-kext-registration-lock-order.patch
 
 # uke-boot-marks.patch is NOT applied: its uke_mark() calls ml_io_map() at _arm_init+0x34,
 # which is before arm_vm_init() at +0x768, so the bootstrap pmap is not up yet. The official entry

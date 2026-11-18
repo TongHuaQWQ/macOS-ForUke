@@ -2,8 +2,10 @@
 #include <IOKit/IOCPU.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOLocks.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSSymbol.h>
+#include <libkern/libkern.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 
@@ -39,16 +41,58 @@ volatile uint32_t armcpu_irq_phase = 0,armcpu_irq_id = 1023;
 volatile uint64_t armcpu_irq_long_drains = 0;
 volatile uint32_t armcpu_irq_drain_most = 0;
 volatile uint32_t armcpu_quiesce_calls = 0,armcpu_halt_calls = 0;
-// Secondary-CPU bring-up evidence (sheng-smp=1). Step values: 1 nub started, 2 registered, 3 start thread running,
+// Secondary-CPU bring-up evidence (smp=1). Step values: 1 nub started, 2 registered, 3 start thread running,
 // 4 PSCI CPU_ON issued, 5 entered initCPU on the new core, 6 GIC redistributor ready, 7 running.
 volatile uint32_t armcpu_smp_requested = 0, armcpu_smp_running = 0, armcpu_smp_conduit = 0;
 volatile uint32_t armcpu_smp_step[8], armcpu_smp_mpidr[8], armcpu_smp_seen_mpidr[8], armcpu_smp_fail[8], armcpu_boot_mpidr = 0;
 // System registers seen on each secondary core at initCPU entry: CurrentEL, SCTLR_EL1, TCR_EL1, MAIR_EL1 (low words), MIDR_EL1.
 volatile uint32_t armcpu_smp_sys[8][5], armcpu_boot_sys[5];
 volatile int32_t armcpu_smp_psci_rc[8];
+// 1 once the scheduler was told that every core is registered and started (ml_cpu_init_completed, boot-arg armcpu-edge=1). Until then
+// it keeps its start-up state: no thread moves between the clusters.
+volatile uint32_t armcpu_cpu_init_completed = 0;
+// PSCI as the firmware answers it, asked once with boot-arg diag=1: 0 how far the questions went (0 not asked, 1 version only, 2 all),
+// 1 PSCI_VERSION, 2 PSCI_FEATURES of CPU_SUSPEND (negative: absent; bit 0 OS-initiated mode, bit 1 extended state IDs),
+// 3 PSCI_FEATURES of PSCI_SET_SUSPEND_MODE (0: present).
+volatile int32_t armcpu_psci[4];
 }
 
 #define ARMCPU_SMP_SLOTS 8
+
+// Wake and idle statistics of one logical core, on cache lines of its own: the core writes them on every interrupt and every IPI it
+// sends. The counts are always kept. The times need boot-arg diag=1: the kernel then calls idleNotify around every WFI and each IPI
+// stamps its target, so the rows say what ends a core's idle periods, how long they last, what a send costs the sender and how long
+// the target takes to handle it, awake or out of idle. The last idle range is the one a core power-down state (PSCI CPU_SUSPEND) could
+// use: such a state has a minimum residency of several milliseconds.
+struct ArmCpuCoreStats {
+  uint64_t idleSince;          // counter at the idle entry, 0 while not idle
+  uint32_t wakeOpen;           // 1 from an idle exit until this core takes an interrupt
+  uint32_t deviceInterrupts;   // shared peripheral interrupts taken
+  uint32_t idlePeriods[4];     // idle periods under 100 us, under 1 ms, under 8 ms, longer
+  uint64_t idleTicks[4];       // counter ticks spent in them
+  uint32_t wokenBy[4];         // idle periods ended by the timer, an IPI, a device interrupt, no interrupt of this core
+  uint32_t sent;               // IPIs this core sent
+  uint32_t sentDeferred;       // those of them the scheduler asked to defer
+  uint32_t cancelled;          // deferred IPIs the scheduler asked this core to take back
+  uint32_t sendMost;           // counter ticks of the slowest timed send
+  uint32_t sendsTimed;         // sends to another core while the times are kept
+  uint64_t sendTicks;          // counter ticks of all timed sends
+  uint64_t sentAt;             // counter at the oldest IPI sent to this core that it has not handled; 0 none. Atomic.
+  uint32_t taken[2][4];        // IPIs handled under 50 us, under 200 us, under 1 ms, later after the send: [0] awake, [1] out of idle
+  uint32_t takenMost[2];       // counter ticks of the slowest
+  uint32_t timerLate[2][4];    // timer interrupts taken under 50 us, under 200 us, under 1 ms, later after their deadline: [0] awake, [1] out of idle
+  uint32_t timerLateMost[2];   // counter ticks of the latest
+} __attribute__ ((aligned (128)));
+static ArmCpuCoreStats gCore[ARMCPU_SMP_SLOTS];
+static volatile uint32_t gCoreSeen = 0;   // logical cores that registered, one bit each
+static bool gStats = false;               // boot-arg diag=1
+static uint64_t gCounterHz = 0;           // CNTFRQ_EL0
+// Boot-arg armcpu-idle-latency-us: the time a core needs to leave idle, given to the kernel as the processor's power gate latency.
+// The kernel then spins through a delay shorter than this instead of blocking the thread on a timer (ml_delay_should_spin), sets an
+// idle core's timer this much ahead of the deadline and waits out the rest awake (SetIdlePop, rtclock_intr), and does not enter WFI
+// for a deadline closer than this. 0, the default, registers no latency: every delay of a thread blocks and a timer is taken as late
+// as the core takes to leave idle. The rows of armcpu_stats_row measure that time (timer late, in idle).
+static uint32_t gIdleLatencyNs = 0;
 
 class ArmCpu : public IOCPU {
   OSDeclareDefaultStructors (ArmCpu)
@@ -77,6 +121,7 @@ class ArmCpu : public IOCPU {
   void enableGic (void);
   void interrupt (void);
   static void dispatch (void *target, void *, void *, int);
+  static void idleNotify (cpu_id_t cpu, boolean_t enter, uint64_t *timeout);
 public:
   IOService *probe (IOService *provider, SInt32 *score) override;
   bool start (IOService *provider) override;
@@ -85,6 +130,8 @@ public:
   void haltCPU (void) override;
   kern_return_t startCPU (vm_offset_t, vm_offset_t) override;
   void signalCPU (IOCPU *target) override;
+  void signalCPUDeferred (IOCPU *target) override;
+  void signalCPUCancel (IOCPU *target) override;
   uint64_t signalTarget (void) const { return affinity; }
   void enableCPUTimeBase (bool enabled) override;
   const OSSymbol *getCPUName (void) override;
@@ -92,8 +139,12 @@ public:
 
 OSDefineMetaClassAndStructors (ArmCpu, IOCPU)
 
-// Redistributor ISENABLER0: SGIs 0..15 (only SGI 0 is used by the kernel; the others let the self-SGI probe tell which INTIDs the GIC accepts) and PPI 27.
-static const uint32_t kSgiPpiEnable = 0xffffU | (1U << 27);
+// PPI 27 is the virtual timer. The full SGI mask is only needed for the
+// SGI transport's diagnostic sweep. Keep SGI 0 available in either mode.
+static uint32_t localInterruptEnableMask (void)
+{
+  return (1U << 27) | (gSpiIpi ? 1U : 0xffffU);
+}
 
 static const uint32_t kIpiSpiBase = 1008;   // INTIDs 1008..1015 stand for 'IPI to logical core 0..7'
 
@@ -145,6 +196,45 @@ static uint64_t counter (void)
   return value;
 }
 
+// Which of four ranges a duration falls in: under a, under b, under c, longer.
+static unsigned range (uint64_t ticks, uint64_t a, uint64_t b, uint64_t c)
+{
+  return ticks < a ? 0 : ticks < b ? 1 : ticks < c ? 2 : 3;
+}
+
+// The first interrupt a core takes after an idle exit is what ended that idle period: 0 timer, 1 IPI, 2 device.
+static inline void wokenBy (ArmCpuCoreStats &core, unsigned source)
+{
+  if (core.wakeOpen != 0) { core.wakeOpen = 0; core.wokenBy[source] = core.wokenBy[source] + 1; }
+}
+
+// The delay from the oldest unhandled send to this core until its handler runs, for a core that was awake or came out of idle.
+static inline void ipiTaken (ArmCpuCoreStats &core, bool fromIdle)
+{
+  if (!gStats) { return; }
+  const uint64_t sent = __atomic_exchange_n (&core.sentAt, 0ULL, __ATOMIC_ACQ_REL);
+  if (sent == 0) { return; }
+  const uint64_t ticks = counter () - sent;
+  const unsigned which = fromIdle ? 1 : 0, slot = range (ticks, gCounterHz / 20000, gCounterHz / 5000, gCounterHz / 1000);
+  core.taken[which][slot] = core.taken[which][slot] + 1;
+  if (ticks > core.takenMost[which]) { core.takenMost[which] = ticks > 0xffffffffULL ? 0xffffffffU : static_cast<uint32_t> (ticks); }
+}
+
+// How long after its deadline this core takes the timer interrupt, awake or out of idle. CNTV_TVAL_EL0 is the deadline minus the
+// counter as a signed 32-bit value and goes on counting down after the timer fired, so here it is the delay, negated. The timer is
+// one per core and one-shot: the kernel writes each next deadline (ml_set_decrementer).
+static inline void timerTaken (ArmCpuCoreStats &core, bool fromIdle)
+{
+  if (!gStats) { return; }
+  uint64_t value;
+  __asm__ volatile ("mrs %0, cntv_tval_el0" : "=r" (value));
+  const int64_t left = static_cast<int32_t> (static_cast<uint32_t> (value));
+  const uint64_t ticks = left < 0 ? static_cast<uint64_t> (-left) : 0;
+  const unsigned which = fromIdle ? 1 : 0, slot = range (ticks, gCounterHz / 20000, gCounterHz / 5000, gCounterHz / 1000);
+  core.timerLate[which][slot] = core.timerLate[which][slot] + 1;
+  if (ticks > core.timerLateMost[which]) { core.timerLateMost[which] = static_cast<uint32_t> (ticks); }
+}
+
 // Polls until the bits clear. The limit counts polls as well as time: the counter runs on while the host has this vCPU's thread
 // descheduled, so a time limit alone (it was 100 ms) can fail a wake that had no chance to complete.
 static bool waitClear (uintptr_t base, unsigned offset, uint32_t mask)
@@ -190,17 +280,45 @@ static bool gSmpWanted = false;
 // the boot nub, or a late secondary once the boot CPU is registered, finishes them.
 static class ArmCpu *volatile gPending[ARMCPU_SMP_SLOTS];
 static volatile uint32_t gBootRegistered = 0;
-static bool gRemoteGic = false; // sheng-smp-gic=1: the boot CPU prepares a new core's redistributor before CPU_ON
+static bool gRemoteGic = false; // smp-gic=1: the boot CPU prepares a new core's redistributor before CPU_ON
 
 // Shared peripheral interrupts (GICv3 SPIs, INTID 32..1019). A driver attaches a handler for one INTID; the line is set to
 // Group 1 non-secure, priority 0xa0, the given trigger and routed to the boot CPU (GICD_IROUTER, affinity routing is on),
 // then enabled. The handler runs in the primary interrupt context, before the EOI, and must clear a level source.
 // An SPI without a handler is counted and disabled instead of being acknowledged forever.
-#define ARMCPU_SPI_SLOTS 16
+// 16 slots ran out when Wi-Fi attached its 32 MSI vectors: the 15th attach returned
+// kIOReturnNoResources. Room for every SPI this port registers (touch, GPU, Wi-Fi).
+#define ARMCPU_SPI_SLOTS 64
 struct ArmCpuSpi {uint32_t id; void (*handler) (void *); void *context; volatile uint64_t count;};
 static ArmCpuSpi gSpi[ARMCPU_SPI_SLOTS];
+static uint64_t gSpiRoutes[1024];
 static volatile uint32_t gSpiUsed = 0;
 static uint64_t gBootAffinity = 0;
+static IOLock *gSpiRegistrationLock;
+static IOLock *spiRegistrationLock (void)
+{
+  IOLock *lock = __atomic_load_n (&gSpiRegistrationLock, __ATOMIC_ACQUIRE);
+  if (lock != nullptr) { return lock; }
+  IOLock *candidate = IOLockAlloc ();
+  if (candidate == nullptr) { return nullptr; }
+  if (!__atomic_compare_exchange_n (&gSpiRegistrationLock, &lock, candidate, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    IOLockFree (candidate); return lock;
+  }
+  return candidate;
+}
+static bool spiDispatch (uint32_t intid)
+{
+  bool handled = false;
+  if (intid < 32 || intid >= 1024) { return false; }
+  uint64_t routes = __atomic_load_n (&gSpiRoutes[intid], __ATOMIC_ACQUIRE);
+  while (routes) {
+    const uint32_t slot = __builtin_ctzll (routes); routes &= routes - 1;
+    ArmCpuSpi &spi = gSpi[slot];
+    spi.count = spi.count + 1;
+    spi.handler (spi.context); handled = true;
+  }
+  return handled;
+}
 extern "C" {
 volatile uint64_t armcpu_spi_unhandled = 0;
 volatile uint32_t armcpu_spi_unhandled_id = 0;
@@ -219,9 +337,9 @@ IOService *ArmCpu::probe (IOService *provider, SInt32 *score)
   memcpy (&id, reg->getBytesNoCopy (), sizeof (id));
   if (ml_get_cpu_number (id) != ml_get_boot_cpu_number ()) {
     unsigned smp = 0;
-    PE_parse_boot_argn ("sheng-smp", &smp, sizeof (smp));
+    PE_parse_boot_argn ("smp", &smp, sizeof (smp));
     if (smp == 0 || ml_get_cpu_number (id) < 0 || ml_get_cpu_number (id) >= ARMCPU_SMP_SLOTS) {
-      return nullptr; // Secondary startup is opt-in (sheng-smp=1).
+      return nullptr; // Secondary startup is opt-in (smp=1).
     }
   }
   return IOCPU::probe (provider, score);
@@ -338,75 +456,16 @@ bool ArmCpu::wakeRedistributor (bool local)
   for (unsigned offset = 0x400; offset < 0x420; offset += 4) {
     write32 (sgi, offset, 0x80808080);
   }
-  if (!local) { write32 (sgi, 0x100, kSgiPpiEnable); }
+  if (!local) { write32 (sgi, 0x100, localInterruptEnableMask ()); }
   __asm__ volatile ("dsb sy" ::: "memory");
   return waitClear (redist, 0, 8);
 }
 
 bool ArmCpu::prepareGic (void)
 {
-  // Silent failures here look exactly like "the driver never matched", so each step reports itself.
-  if (!mapGic ()) {
-    kprintf ("ArmCpu: mapGic failed (dist=%p redist=%p size=%llu)\n", (void *) dist,
-        (void *) redistBase, (unsigned long long) redistSize);
-    return false;
-  }
-  if (!initDistributor ()) {
-    kprintf ("ArmCpu: initDistributor failed\n");
-    return false;
-  }
-  if (!wakeRedistributor (true)) {
-    kprintf ("ArmCpu: wakeRedistributor failed (redist=%p typer probe %08x/%08x)\n",
-        (void *) redist, armcpu_gic_typer_probe[0], armcpu_gic_typer_probe[1]);
-    return false;
-  }
+  if (!mapGic () || !initDistributor () || !wakeRedistributor (true)) { return false; }
   gGicShared = 1;
-  // The "gic ready" line that used to read GICR_IGROUPR0/ISENABLER0 back here is GONE, and it was the
-  // single reason every round since b170 ended in an "ignored" platform error storm: reading the
-  // redistributor's SGI frame (redist + 0x10000 + 0x80) takes a synchronous external abort
-  // (esr 0x96000010, DFSC 0x10, far ending in 0x080), the handler resumed the faulting instruction, and
-  // the same read aborted again forever. b261's panic-on-platform-error turned that into one readable
-  // panic: pc 0xfffffff00c411a0c == this block.
-  //
-  // The writes above (sgi + 0x180/0x80/0xd00/0x280/0x400..) are kept: they are identical to the driver
-  // this board runs iPadOS with (Allenwdk/ArmCpu@8721288 `wakeRedistributor`), which never reads those
-  // registers back. Writes to a frame that does not answer are posted and dropped; a read must wait for
-  // the response. That asymmetry is the whole bug.
-  //
-  // Do not re-add the read. If a future round needs the post-wake state, read it through ICC_*_EL1 system
-  // registers or from a core that has already started, not from the SGI frame on the boot CPU.
   return true;
-}
-
-// One snapshot of the interrupt plumbing, read on the calling core. A timer that never fires and a timer
-// that fires into a closed CPU interface look identical from the outside; these registers separate them:
-// DAIF.I says whether IRQs are masked, ICC_SRE/PMR/IGRPEN1 say whether the interface is open, ISR_EL1 says
-// whether an interrupt is already pending, and CNTV_CTL/CVAL say whether the virtual timer that PPI 27
-// reports has been enabled and given a deadline.
-static void dumpIrqState (const char *tag)
-{
-  uint64_t mpidr, daif, isr, sre, pmr = 0, igrp = 0, ctlr = 0, cntv, cval, tval, pct, freq;
-  __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (mpidr));
-  __asm__ volatile ("mrs %0, daif" : "=r" (daif));
-  __asm__ volatile ("mrs %0, isr_el1" : "=r" (isr));
-  __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (sre));
-  __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (freq));
-  __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (pct));
-  __asm__ volatile ("mrs %0, cntv_ctl_el0" : "=r" (cntv));
-  __asm__ volatile ("mrs %0, cntv_cval_el0" : "=r" (cval));
-  __asm__ volatile ("mrs %0, cntv_tval_el0" : "=r" (tval));
-  if ((sre & 1) != 0) {
-    __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (pmr));
-    __asm__ volatile ("mrs %0, icc_igrpen1_el1" : "=r" (igrp));
-    __asm__ volatile ("mrs %0, icc_ctlr_el1" : "=r" (ctlr));
-  }
-  kprintf ("ArmCpu: %s daif=%#llx I=%u F=%u isr=%#llx sre=%#llx pmr=%#llx igrpen1=%#llx ctlr=%#llx\n",
-      tag, (unsigned long long) daif, (unsigned) ((daif >> 7) & 1), (unsigned) ((daif >> 6) & 1),
-      (unsigned long long) isr, (unsigned long long) sre, (unsigned long long) pmr,
-      (unsigned long long) igrp, (unsigned long long) ctlr);
-  kprintf ("ArmCpu: %s cntv_ctl=%#llx cval=%llu tval=%llu pct=%llu freq=%llu mpidr=%#llx\n",
-      tag, (unsigned long long) cntv, (unsigned long long) cval, (unsigned long long) tval,
-      (unsigned long long) pct, (unsigned long long) freq, (unsigned long long) mpidr);
 }
 
 void ArmCpu::enableGic (void)
@@ -426,7 +485,7 @@ void ArmCpu::enableGic (void)
   __asm__ volatile ("msr icc_bpr1_el1, %0" :: "r" (value) : "memory");
   if (!secondary) { gBootAffinity = affinity & 0xff00ffffffULL; }
   if (!secondary || !gRemoteGic) {
-    write32 (redist + 0x10000, 0x100, kSgiPpiEnable);
+    write32 (redist + 0x10000, 0x100, localInterruptEnableMask ());
     write32 (dist, 0, read32 (dist, 0) | 0x12U);
   }
   value = 1;
@@ -436,11 +495,12 @@ void ArmCpu::enableGic (void)
     __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (pmr));
     __asm__ volatile ("mrs %0, icc_igrpen1_el1" : "=r" (ig));
     __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (sre));
-    // The three redistributor-SGI-frame reads that used to fill [0], [1] and [4] are gone for the same
-    // reason as the one in prepareGic: this board aborts on a read of redist+0x10000+0x{80,100,d00}
-    // (esr 0x96000010, DFSC 0x10). enableGic() runs on every core, so leaving them in would have turned
-    // the first CPU into the same endless "platform error ... (ignored)" storm the moment the panic
-    // switch was off. [0], [1] and [4] now report 0xffffffff = "not sampled" instead of a lie.
+    // LOCAL EDIT (b262, kept across this upstream sync): this board aborts on a read of the redistributor's
+    // SGI frame, redist+0x10000+0x{80,100,d00} (esr 0x96000010, DFSC 0x10 = synchronous external abort), and
+    // resume-after-fault turns it into an endless "platform error ... (ignored)" storm -- b170..b261. Writes
+    // into that frame are posted and never fault, which is why the enable sequence below is safe while these
+    // three reads are not. enableGic() runs on every core, so the primary is not the only victim.
+    // [0], [1] and [4] report 0xffffffff = "not sampled" instead of a value this board cannot obtain.
     armcpu_gic_boot[0] = 0xffffffffU;
     armcpu_gic_boot[1] = 0xffffffffU;
     armcpu_gic_boot[2] = read32 (dist, 0);
@@ -468,6 +528,13 @@ bool ArmCpu::start (IOService *provider)
   unsigned diagnostic = 0;
   PE_parse_boot_argn("armcpu-diagnostics", &diagnostic, sizeof(diagnostic));
   diagnosePower=diagnostic==1;
+  unsigned stats = 0;
+  PE_parse_boot_argn ("diag", &stats, sizeof (stats));
+  __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (gCounterHz));
+  gStats = stats == 1 && gCounterHz != 0;
+  unsigned idleLatencyUs = 0;
+  PE_parse_boot_argn ("armcpu-idle-latency-us", &idleLatencyUs, sizeof (idleLatencyUs));
+  gIdleLatencyNs = idleLatencyUs > 4000000U ? 4000000000U : idleLatencyUs * 1000U;
   uint32_t physical;
   OSData *reg = OSDynamicCast (OSData, provider->getProperty ("reg"));
   memcpy (&physical, reg->getBytesNoCopy (), sizeof (physical));
@@ -498,31 +565,21 @@ bool ArmCpu::start (IOService *provider)
   info.log_id = logicalId;
   info.cluster_id = static_cast<uint32_t> (ml_get_cluster_number (physical));
   info.cluster_type = clusterType (physical);
+  info.powergate_latency = gIdleLatencyNs;
+  if (gStats) { info.processor_idle = &ArmCpu::idleNotify; }
+  __atomic_fetch_or (&gCoreSeen, 1U << (logicalId & 7), __ATOMIC_RELEASE);
   setCPUNumber (info.log_id);
   unsigned smp = 0;
-  PE_parse_boot_argn ("sheng-smp", &smp, sizeof (smp));
+  PE_parse_boot_argn ("smp", &smp, sizeof (smp));
   gSmpWanted = smp != 0;
   unsigned remote = 0;
-  PE_parse_boot_argn ("sheng-smp-gic", &remote, sizeof (remote));
+  PE_parse_boot_argn ("smp-gic", &remote, sizeof (remote));
   gRemoteGic = remote != 0;
   armcpu_smp_requested = gSmpWanted ? 1 : 0;
   unsigned cpuCount = static_cast<unsigned> (ml_get_max_cpu_number ()) + 1;
   controller = new IOCPUInterruptController;
   if ((controller == nullptr) || (controller->initCPUInterruptController (cpuCount, 1) != kIOReturnSuccess)) {
     panic ("ArmCpu: CPU interrupt controller allocation failed");
-  }
-  //
-  // registerCPUInterruptController() sets the IOPlatformInterruptController property and then calls
-  // registerService() before handing the controller to getPlatform()->registerInterruptController(). That
-  // first call publishes nothing unless the object is already on the service plane: IOService::registerService
-  // walks up gIOServicePlane, and a controller that was only constructed with new is not a registry member, so
-  // it logs "not registry member at registerService()" and returns before setProperty/registerService do any
-  // publishing. Attach it to this CPU nub so the property lands on a published object and service matching can
-  // find it (IOPlatformExpert::setCPUInterruptProperties matches on that property). Neither failure is fatal:
-  // the registerInterruptController() call after it is what lookUpInterruptController() uses, so this keeps the
-  // CPU path running if the attach is refused.
-  if (!controller->attach (this)) {
-    kprintf ("ArmCpu: IOCPUInterruptController attach failed; its IOPlatformInterruptController property stays unpublished\n");
   }
   controller->registerCPUInterruptController ();
   controller->enableCPUInterrupt (this);
@@ -537,43 +594,6 @@ bool ArmCpu::start (IOService *provider)
   if (status != KERN_SUCCESS) { panic ("ArmCpu: CPU %u registration failed: %d", logicalId, status); }
   armcpu_registered = 1;
   if (!bootInitialized) { initCPU (true); }
-  //
-  // A bounded, self-contained test of the interrupt path, run here in the kext's own thread: spin 10 ms of
-  // the architectural counter with interrupts open and report how many PPI 27 interrupts the handler saw.
-  // The counter is the timebase the timer itself uses, so this needs nothing the kernel has not already set
-  // up, and zero after 10 ms places the failure in the interrupt path rather than in whoever waits on a
-  // deadline.
-  //
-  // One line, always: with the log retrieval channel (pram -> UKE-LOG disk over USB) this is machine
-  // readable, so it does not need the panel.
-  {
-    uint64_t start, now;
-    __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (start));
-    do { __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now)); } while ((now - start) < 200000U);
-    kprintf ("ArmCpu: %llu timer interrupts, %llu IPIs in the first 10 ms after registration\n",
-        (unsigned long long) armcpu_timer_interrupts, (unsigned long long) armcpu_ipi_interrupts);
-    //
-    // armcpu-probe=1 restores the old photograph-first behaviour: dump the whole state, hold 15 s so it can
-    // be photographed, and panic so nothing else scrolls it away. That is only useful while the log cannot
-    // be retrieved -- it deliberately never reaches registerService(), so it stops the boot by design.
-    int probe = 0;
-    PE_parse_boot_argn ("armcpu-probe", &probe, sizeof (probe));
-    if (probe == 1) {
-      dumpIrqState ("after 10 ms");
-      kprintf ("ArmCpu: holding 15 s so these lines can be photographed\n");
-      {
-        uint64_t start2, now2;
-        __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (start2));
-        do { __asm__ volatile ("mrs %0, cntpct_el0" : "=r" (now2)); } while ((now2 - start2) < 288000000ULL);
-      }
-      kprintf ("ArmCpu: after the hold %llu timer interrupts\n", (unsigned long long) armcpu_timer_interrupts);
-      dumpIrqState ("after 15 s");
-      kprintf ("ArmCpu: panicking on purpose so these lines stay on the panel (uke diagnostics)\n");
-      panic ("ArmCpu: uke interrupt-path diagnostics -- read the lines above");
-    } else {
-      kprintf ("ArmCpu: armcpu-probe=0, continuing to registerService\n");
-    }
-  }
   registerService ();
   __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);
   drainPending ();
@@ -600,6 +620,9 @@ bool ArmCpu::finishSecondary (void)
   info.log_id = logicalId;
   info.cluster_id = static_cast<uint32_t> (ml_get_cluster_number (static_cast<uint32_t> (affinity)));
   info.cluster_type = clusterType (static_cast<uint32_t> (affinity));
+  info.powergate_latency = gIdleLatencyNs;
+  if (gStats) { info.processor_idle = &ArmCpu::idleNotify; }
+  __atomic_fetch_or (&gCoreSeen, 1U << (logicalId & 7), __ATOMIC_RELEASE);
   perfmon_interrupt_handler_func pmi = nullptr;
   kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
   if (status != KERN_SUCCESS) { armcpu_smp_fail[logicalId] = 4; return false; }
@@ -627,6 +650,7 @@ static bool psciConduit (bool *hvc)
   return ok;
 }
 
+// The callee may change x0 to x17 (SMC calling convention): x0 to x3 carry results, the others are scratch.
 static int64_t psciCall (bool hvc, uint64_t function, uint64_t a, uint64_t b, uint64_t c)
 {
   register uint64_t x0 __asm__ ("x0") = function;
@@ -634,9 +658,9 @@ static int64_t psciCall (bool hvc, uint64_t function, uint64_t a, uint64_t b, ui
   register uint64_t x2 __asm__ ("x2") = b;
   register uint64_t x3 __asm__ ("x3") = c;
   if (hvc) {
-    __asm__ volatile ("hvc #0" : "+r" (x0) : "r" (x1), "r" (x2), "r" (x3) : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+    __asm__ volatile ("hvc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
   } else {
-    __asm__ volatile ("smc #0" : "+r" (x0) : "r" (x1), "r" (x2), "r" (x3) : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+    __asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3) : : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
   }
   return static_cast<int64_t> (x0);
 }
@@ -645,7 +669,8 @@ void ArmCpu::startThread (void *argument, wait_result_t)
 {
   ArmCpu *self = static_cast<ArmCpu *> (argument);
   armcpu_smp_step[self->logicalId] = 3;
-  // Blocks until the new core reaches the scheduler; a core that never arrives only stalls this helper thread.
+  // Kernels that leave the start to the driver block here until the new core reaches the scheduler; a core that never arrives only
+  // stalls this helper thread. Kernels that start a core when it registers return at once.
   processor_start (self->machProcessor);
   // Once every secondary core has started, the scheduler sets up its cluster edges (Edge migration and steal rules).
   static uint32_t started = 0;
@@ -653,7 +678,10 @@ void ArmCpu::startThread (void *argument, wait_result_t)
   // own consistency check, which the kernel now reports instead of asserting.
   unsigned edge = 0;
   PE_parse_boot_argn ("armcpu-edge", &edge, sizeof (edge));
-  if (__atomic_add_fetch (&started, 1U, __ATOMIC_ACQ_REL) + 1 == ml_get_topology_info ()->num_cpus && edge != 0) { ml_cpu_init_completed (); }
+  if (__atomic_add_fetch (&started, 1U, __ATOMIC_ACQ_REL) + 1 == ml_get_topology_info ()->num_cpus && edge != 0) {
+    ml_cpu_init_completed ();
+    armcpu_cpu_init_completed = 1;
+  }
   thread_terminate (current_thread ());
 }
 
@@ -704,7 +732,6 @@ void ArmCpu::initCPU (bool boot)
   enableGic ();
   if (gSpiIpi) { spiIpiConfigure (gDist, logicalId, affinity); }
   enableCPUTimeBase (true);
-  dumpIrqState ("after enableGic");
   setCPUState (kIOCPUStateRunning);
   bootInitialized = true;
   if (gSelfIpi) { signalCPU (this); }
@@ -715,9 +742,32 @@ void ArmCpu::dispatch (void *target, void *, void *, int)
   static_cast<ArmCpu *> (target)->interrupt ();
 }
 
+// The kernel's idle callback (registered with diag=1 only): called with interrupts masked right before a core's WFI and right after
+// it. An idle period that follows one with no interrupt taken in between means the earlier WFI returned without an interrupt for
+// this core. The idle timeout is left alone.
+void ArmCpu::idleNotify (cpu_id_t cpu, boolean_t enter, uint64_t *)
+{
+  ArmCpuCoreStats &core = gCore[static_cast<ArmCpu *> (cpu)->logicalId & 7];
+  const uint64_t now = counter ();
+  if (enter) {
+    if (core.wakeOpen != 0) { core.wakeOpen = 0; core.wokenBy[3] = core.wokenBy[3] + 1; }
+    core.idleSince = now;
+    return;
+  }
+  if (core.idleSince == 0) { return; }
+  const uint64_t ticks = now - core.idleSince;
+  const unsigned slot = range (ticks, gCounterHz / 10000, gCounterHz / 1000, gCounterHz / 125);
+  core.idlePeriods[slot] = core.idlePeriods[slot] + 1;
+  core.idleTicks[slot] = core.idleTicks[slot] + ticks;
+  core.idleSince = 0;
+  core.wakeOpen = 1;
+}
+
 void ArmCpu::interrupt (void)
 {
   unsigned drained=0;
+  ArmCpuCoreStats &core = gCore[logicalId & 7];
+  const bool fromIdle = core.wakeOpen != 0;
   for (;;) {
     armcpu_irq_phase=1;
     uint64_t id;
@@ -735,32 +785,33 @@ void ArmCpu::interrupt (void)
     if ((id & 0xffffff) == 27) {
       armcpu_timer_interrupts = armcpu_timer_interrupts + 1;
       armcpu_core_timer[logicalId & 7] = armcpu_core_timer[logicalId & 7] + 1;
+      timerTaken (core, core.wakeOpen != 0);
+      wokenBy (core, 0);
       armcpu_irq_phase=2;
       rtclock_intr (0);
       armcpu_irq_phase=3;
     } else if ((id & 0xffffff) == 0) {
       armcpu_ipi_interrupts = armcpu_ipi_interrupts + 1;
       armcpu_core_sgi[logicalId & 7] = armcpu_core_sgi[logicalId & 7] + 1;
+      wokenBy (core, 1);
+      ipiTaken (core, fromIdle);
       armcpu_irq_phase=4;
       if (ipi_handler != nullptr) { ipi_handler (); }
       armcpu_irq_phase=5;
     } else if (gSpiIpi && (id & 0xffffff) >= kIpiSpiBase && (id & 0xffffff) < kIpiSpiBase + 8) {
       armcpu_ipi_interrupts = armcpu_ipi_interrupts + 1;
       armcpu_core_sgi[logicalId & 7] = armcpu_core_sgi[logicalId & 7] + 1;
+      wokenBy (core, 1);
+      ipiTaken (core, fromIdle);
       armcpu_irq_phase = 4;
       if (ipi_handler != nullptr) { ipi_handler (); }
       armcpu_irq_phase = 5;
     } else {
       const uint32_t intid = static_cast<uint32_t> (id & 0xffffff);
-      ArmCpuSpi *spi = nullptr;
-      const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
-      for (uint32_t slot = 0; intid >= 32 && slot < used && spi == nullptr; slot++) {
-        if (gSpi[slot].id == intid) { spi = &gSpi[slot]; }
-      }
-      if (spi != nullptr) {
-        armcpu_irq_phase = 7;
-        spi->count = spi->count + 1;
-        spi->handler (spi->context);
+      core.deviceInterrupts = core.deviceInterrupts + 1;
+      wokenBy (core, 2);
+      armcpu_irq_phase = 7;
+      if (spiDispatch (intid)) {
       } else if (intid >= 32 && gDist != 0) {
         armcpu_spi_unhandled = armcpu_spi_unhandled + 1;
         armcpu_spi_unhandled_id = intid;
@@ -784,8 +835,46 @@ void ArmCpu::signalCPU (IOCPU *target)
   uint64_t sgi = ((aff & 0xff00000000ULL) << 16) | ((aff & 0xff0000) << 16) |
                  ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
   armcpu_ipi_sent = armcpu_ipi_sent + 1;
-  if (gSpiIpi) { spiIpiSend (gDist, peer->logicalId & 7); return; }
-  __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+  // The kernel's cpu_signal path calls this on the sending core with interrupts masked, so that core's statistics need no lock and
+  // nothing runs between the two counter reads. The start-up IPI a core sends itself from initCPU is counted but neither stamped
+  // nor timed: the core takes it only when it first unmasks interrupts, which is not a cross-core delay, and on the boot core
+  // initCPU runs in thread context, where the handler could run inside the timed send.
+  ArmCpuCoreStats &core = gCore[logicalId & 7];
+  core.sent = core.sent + 1;
+  const bool timed = gStats && peer != this;
+  uint64_t before = 0;
+  if (timed) {
+    before = counter ();
+    uint64_t none = 0;
+    __atomic_compare_exchange_n (&gCore[peer->logicalId & 7].sentAt, &none, before, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+  }
+  if (gSpiIpi) {
+    spiIpiSend (gDist, peer->logicalId & 7);
+  } else {
+    __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+  }
+  if (timed) {
+    const uint64_t ticks = counter () - before;
+    core.sendsTimed = core.sendsTimed + 1;
+    core.sendTicks = core.sendTicks + ticks;
+    if (ticks > core.sendMost) { core.sendMost = ticks > 0xffffffffULL ? 0xffffffffU : static_cast<uint32_t> (ticks); }
+  }
+}
+
+// The scheduler asks for a deferred IPI when it wakes an idle core for a thread that is not realtime, and takes it back when the
+// sending core runs that thread itself first. The GIC has no delayed signal: the IPI goes out at once and a cancel finds nothing to
+// take back, as IOCPU does by default. Both requests are counted, which says how many wakes a delayed signal would have saved.
+void ArmCpu::signalCPUDeferred (IOCPU *target)
+{
+  ArmCpuCoreStats &core = gCore[logicalId & 7];
+  core.sentDeferred = core.sentDeferred + 1;
+  signalCPU (target);
+}
+
+void ArmCpu::signalCPUCancel (IOCPU *)
+{
+  ArmCpuCoreStats &core = gCore[logicalId & 7];
+  core.cancelled = core.cancelled + 1;
 }
 
 // Diagnostic: sends SGI 0 to the core whose MPIDR affinity is aff (the DT "reg" value, e.g. 0x100 for core 1) exactly as signalCPU
@@ -806,9 +895,8 @@ extern "C" void armcpu_gic_diag (uint64_t aff, uint32_t *out)
     const uint64_t typer = *reinterpret_cast<volatile uint64_t *> (gFrames + offset + 8);
     if (static_cast<uint32_t> (typer >> 32) == target) {
       const uintptr_t redist = gFrames + offset, sgi = redist + 0x10000;
-      // Only the RD_base half and the distributor are read here. The SGI frame (redist+0x10000) aborts on
-      // this board when read - see prepareGic - so [0..2] and [6] stay "not sampled" rather than faulting
-      // inside a diagnostic that was supposed to describe the fault.
+      // LOCAL EDIT (b262): the SGI frame aborts on read here (see enableGic), and a diagnostic that faults is
+      // worse than one that says so. Only the RD_base half and the distributor are read.
       (void) sgi;
       out[0] = 0xffffffffU; armcpu_gic_diag_stage = 2;
       out[1] = 0xffffffffU; armcpu_gic_diag_stage = 3;
@@ -833,6 +921,11 @@ extern "C" void armcpu_gic_diag (uint64_t aff, uint32_t *out)
 // kernel never sees it. out[8], out[9]: CNTVCT ticks of one ICC_SGI1R_EL1 write and of one ICC_PMR_EL1 read (a trapped write costs far more). out: 0 MPIDR, 1 INTIDs pending as Group 1, 2 INTIDs pending as Group 0, 3 ICC_PMR, 4 ICC_IGRPEN1, 5 ICC_SRE, 6 ICC_CTLR, 7 ICC_RPR.
 extern "C" void armcpu_sgi_selfprobe (uint64_t *out)
 {
+  // The SPI transport does not enable the SGI sweep's test interrupts.
+  if (gSpiIpi) {
+    for (unsigned i = 0; i < 10; i++) { out[i] = 0; }
+    return;
+  }
   uint64_t mpidr, daif, v;
   __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (mpidr));
   __asm__ volatile ("mrs %0, daif; msr daifset, #2; isb" : "=r" (daif) :: "memory");
@@ -885,9 +978,11 @@ extern "C" void armcpu_sgi_selfprobe (uint64_t *out)
 
 extern "C" void armcpu_ipi_selftest (uint64_t aff)
 {
+  const int logical = ml_get_cpu_number (static_cast<uint32_t> (aff));
+  if (logical < 0 || logical >= 8) return;
   uint64_t sgi = ((aff & 0xff00000000ULL) << 16) | ((aff & 0xff0000) << 16) | ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
   armcpu_ipi_selftest_sent = armcpu_ipi_selftest_sent + 1;
-  if (gSpiIpi) { spiIpiSend (gDist, static_cast<uint32_t> ((aff >> 8) & 7)); return; }
+  if (gSpiIpi) { spiIpiSend (gDist, static_cast<uint32_t> (logical)); return; }
   __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
 }
 
@@ -934,6 +1029,20 @@ kern_return_t ArmCpu::startCPU (vm_offset_t, vm_offset_t)
   bool hvc = false;
   if (!psciConduit (&hvc)) { armcpu_smp_psci_rc[logicalId] = -1001; return KERN_NOT_SUPPORTED; }
   armcpu_smp_conduit = hvc ? 2 : 1;
+  static volatile uint32_t asked = 0;
+  if (gStats && __atomic_exchange_n (&asked, 1U, __ATOMIC_ACQ_REL) == 0) {
+    // What the firmware offers for idle. These calls change no state: PSCI_VERSION, then from PSCI 1.0 on PSCI_FEATURES of the SMC64
+    // CPU_SUSPEND and of PSCI_SET_SUSPEND_MODE.
+    // PSCI_VERSION is a 32-bit call: its answer is the low half of x0, and a negative one is an error.
+    const int32_t version = static_cast<int32_t> (psciCall (hvc, 0x84000000ULL, 0, 0, 0));
+    armcpu_psci[1] = version;
+    armcpu_psci[0] = 1;
+    if (version >= 0x10000) {
+      armcpu_psci[2] = static_cast<int32_t> (psciCall (hvc, 0x8400000aULL, 0xc4000001ULL, 0, 0));
+      armcpu_psci[3] = static_cast<int32_t> (psciCall (hvc, 0x8400000aULL, 0x8400000fULL, 0, 0));
+      armcpu_psci[0] = 2;
+    }
+  }
   // PSCI 0.2 CPU_ON (SMC64 function id); the entry point is the kernel's physical reset vector page, whose reset
   // code selects this core's cpu_data entry by MPIDR affinity. The context id is unused by that code.
   uint64_t entry = static_cast<uint64_t> (ml_static_vtop (reinterpret_cast<vm_offset_t> (LowResetVectorBase)));
@@ -952,8 +1061,8 @@ const OSSymbol *ArmCpu::getCPUName (void)
 }
 
 // Readback after configuration: bit 0 group 1, bit 1 enabled, bit 2 edge, bits 8..15 priority; IROUTER separately.
-extern "C" IOReturn armcpu_spi_attach (uint32_t intid, bool edge, void (*handler) (void *), void *context,
-                                       uint32_t *readback, uint64_t *router)
+static IOReturn spiAttachUnlocked (uint32_t intid, bool edge, void (*handler) (void *), void *context,
+                                   uint32_t *readback, uint64_t *router)
 {
   if (gDist == 0 || armcpu_gic_ready == 0 || handler == nullptr) { return kIOReturnNotReady; }
   const unsigned interrupts = ((read32 (gDist, 4) & 31) + 1) * 32;
@@ -973,6 +1082,7 @@ extern "C" IOReturn armcpu_spi_attach (uint32_t intid, bool edge, void (*handler
   *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid) = gBootAffinity;
   gSpi[used] = {intid, handler, context, 0};
   __atomic_store_n (&gSpiUsed, used + 1, __ATOMIC_RELEASE);
+  __atomic_fetch_or (&gSpiRoutes[intid], UINT64_C(1) << used, __ATOMIC_RELEASE);
   __asm__ volatile ("dsb sy" ::: "memory");
   write32 (gDist, 0x100 + word, bit); // ISENABLER
   if (readback != nullptr) {
@@ -984,6 +1094,52 @@ extern "C" IOReturn armcpu_spi_attach (uint32_t intid, bool edge, void (*handler
   return kIOReturnSuccess;
 }
 
+extern "C" IOReturn armcpu_spi_attach (uint32_t intid, bool edge, void (*handler) (void *), void *context,
+                                       uint32_t *readback, uint64_t *router)
+{
+  IOLock *lock = spiRegistrationLock ();
+  if (lock == nullptr) { return kIOReturnNoResources; }
+  IOLockLock (lock);
+  IOReturn result = spiAttachUnlocked (intid, edge, handler, context, readback, router);
+  IOLockUnlock (lock); return result;
+}
+
+// Level summary sources acknowledge their own pin/peripheral status. Keep all
+// handlers until platform shutdown, so IRQ dispatch needs no locks or allocation.
+extern "C" IOReturn armcpu_spi_share (uint32_t intid, void (*handler) (void *), void *context)
+{
+  if (gDist == 0 || !armcpu_gic_ready || handler == nullptr || intid < 32 || intid >= 1020) { return kIOReturnBadArgument; }
+  IOLock *lock = spiRegistrationLock ();
+  if (lock == nullptr) { return kIOReturnNoResources; }
+  IOLockLock (lock);
+  const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
+  bool found = false; IOReturn result = kIOReturnSuccess;
+  for (uint32_t slot = 0; slot < used; ++slot) {
+    if (gSpi[slot].id != intid) { continue; }
+    found = true;
+    if (gSpi[slot].handler == handler && gSpi[slot].context == context) { IOLockUnlock (lock); return kIOReturnSuccess; }
+  }
+  if (!found) { result = spiAttachUnlocked (intid, false, handler, context, nullptr, nullptr); }
+  else if (read32 (gDist, 0xc00 + (intid / 16) * 4) & (2U << ((intid % 16) * 2))) { result = kIOReturnBadArgument; }
+  else if (used >= ARMCPU_SPI_SLOTS) { result = kIOReturnNoResources; }
+  else {
+    gSpi[used] = {intid, handler, context, 0};
+    __atomic_store_n (&gSpiUsed, used + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_or (&gSpiRoutes[intid], UINT64_C(1) << used, __ATOMIC_RELEASE);
+  }
+  IOLockUnlock (lock); return result;
+}
+
+// Usable from primary IRQ context; no lock, allocation or serial-engine access.
+extern "C" IOReturn armcpu_spi_mask (uint32_t intid, bool masked)
+{
+  if (!gDist || !armcpu_gic_ready || intid < 32 || intid >= 1020) { return kIOReturnNotReady; }
+  if (!__atomic_load_n (&gSpiRoutes[intid], __ATOMIC_ACQUIRE)) { return kIOReturnNotFound; }
+  write32 (gDist, (masked ? 0x180U : 0x100U) + (intid / 32) * 4, 1U << (intid % 32));
+  __asm__ volatile ("dsb sy" ::: "memory");
+  return kIOReturnSuccess;
+}
+
 extern "C" uint64_t armcpu_spi_count (uint32_t intid)
 {
   const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
@@ -991,4 +1147,75 @@ extern "C" uint64_t armcpu_spi_count (uint32_t intid)
     if (gSpi[slot].id == intid) { return gSpi[slot].count; }
   }
   return 0;
+}
+
+// One text row of the statistics for a board log. Row 0, always there: the IPI totals, whether the scheduler got
+// ml_cpu_init_completed, the idle latency the cores are registered with, and the firmware's PSCI answers. With diag=1 one more row
+// per registered core follows, each list in the order of the ranges of ArmCpuCoreStats:
+//   idle n= periods, ms= time in them | woken by timer, IPI, device interrupt, none
+//   ipi out= sent, def= asked deferred, can= cancel requests, ns= mean and longest send
+//   in awake / in idle: IPIs by the delay from the send to the handler, us= the longest
+// and after those one row per registered core with its timer interrupts by the delay after their deadline, us= the longest.
+// Returns the row's length, 0 past the last row.
+extern "C" unsigned armcpu_stats_row (unsigned index, char *row, unsigned size)
+{
+  if (row == nullptr || size == 0) { return 0; }
+  const uint32_t seen = __atomic_load_n (&gCoreSeen, __ATOMIC_ACQUIRE);
+  if (index == 0) {
+    // Sums of the per-core counters, each written by its own core only. armcpu_ipi_sent and armcpu_ipi_interrupts are shared by
+    // all cores without a lock and lose counts.
+    uint64_t sent = 0, taken = 0, deferred = 0, cancelled = 0;
+    for (unsigned c = 0; c < ARMCPU_SMP_SLOTS; c++) {
+      sent += gCore[c].sent; taken += armcpu_core_sgi[c]; deferred += gCore[c].sentDeferred; cancelled += gCore[c].cancelled;
+    }
+    snprintf (row, size, "[cpu wake] ipi sent=%llu taken=%llu deferred=%llu cancel=%llu | sched init completed=%u | idle latency us=%u | psci ",
+              static_cast<unsigned long long> (sent), static_cast<unsigned long long> (taken),
+              static_cast<unsigned long long> (deferred), static_cast<unsigned long long> (cancelled), armcpu_cpu_init_completed,
+              gIdleLatencyNs / 1000U);
+    const unsigned n = static_cast<unsigned> (strnlen (row, size));
+    if (n + 1 < size) {
+      if (armcpu_psci[0] == 0) {
+        snprintf (row + n, size - n, "not asked");
+      } else if (armcpu_psci[0] == 1) {
+        snprintf (row + n, size - n, "version=%x", static_cast<uint32_t> (armcpu_psci[1]));
+      } else {
+        snprintf (row + n, size - n, "version=%x suspend=%d mode=%d", static_cast<uint32_t> (armcpu_psci[1]), armcpu_psci[2], armcpu_psci[3]);
+      }
+    }
+    return static_cast<unsigned> (strnlen (row, size));
+  }
+  if (!gStats) { return 0; }
+  const unsigned cores = static_cast<unsigned> (__builtin_popcount (seen));
+  const bool timerRow = index > cores;
+  if (timerRow) { index -= cores; }
+  unsigned cpu = ARMCPU_SMP_SLOTS;
+  for (unsigned c = 0, at = 0; c < ARMCPU_SMP_SLOTS; c++) {
+    if ((seen & (1U << c)) != 0 && ++at == index) { cpu = c; break; }
+  }
+  if (cpu == ARMCPU_SMP_SLOTS) { return 0; }
+  const ArmCpuCoreStats &core = gCore[cpu];
+  const uint64_t hz = gCounterHz;
+  if (timerRow) {
+    snprintf (row, size, "[cpu%u timer] late awake %u/%u/%u/%u us=%llu | late in idle %u/%u/%u/%u us=%llu", cpu,
+              core.timerLate[0][0], core.timerLate[0][1], core.timerLate[0][2], core.timerLate[0][3],
+              static_cast<unsigned long long> (core.timerLateMost[0] * 1000000ULL / hz),
+              core.timerLate[1][0], core.timerLate[1][1], core.timerLate[1][2], core.timerLate[1][3],
+              static_cast<unsigned long long> (core.timerLateMost[1] * 1000000ULL / hz));
+    return static_cast<unsigned> (strnlen (row, size));
+  }
+  const uint32_t sent = core.sent, timed = core.sendsTimed;
+  snprintf (row, size, "[cpu%u] idle n=%u/%u/%u/%u ms=%llu/%llu/%llu/%llu woke t=%u i=%u d=%u n=%u | irq t=%u i=%u d=%u | ipi out=%u def=%u can=%u "
+            "ns=%llu/%llu | in awake %u/%u/%u/%u us=%llu | in idle %u/%u/%u/%u us=%llu",
+            cpu, core.idlePeriods[0], core.idlePeriods[1], core.idlePeriods[2], core.idlePeriods[3],
+            static_cast<unsigned long long> (core.idleTicks[0] * 1000 / hz), static_cast<unsigned long long> (core.idleTicks[1] * 1000 / hz),
+            static_cast<unsigned long long> (core.idleTicks[2] * 1000 / hz), static_cast<unsigned long long> (core.idleTicks[3] * 1000 / hz),
+            core.wokenBy[0], core.wokenBy[1], core.wokenBy[2], core.wokenBy[3],
+            armcpu_core_timer[cpu], armcpu_core_sgi[cpu], core.deviceInterrupts, sent, core.sentDeferred, core.cancelled,
+            static_cast<unsigned long long> (timed != 0 ? core.sendTicks * 1000ULL / timed * 1000000ULL / hz : 0),
+            static_cast<unsigned long long> (core.sendMost * 1000000000ULL / hz),
+            core.taken[0][0], core.taken[0][1], core.taken[0][2], core.taken[0][3],
+            static_cast<unsigned long long> (core.takenMost[0] * 1000000ULL / hz),
+            core.taken[1][0], core.taken[1][1], core.taken[1][2], core.taken[1][3],
+            static_cast<unsigned long long> (core.takenMost[1] * 1000000ULL / hz));
+  return static_cast<unsigned> (strnlen (row, size));
 }
