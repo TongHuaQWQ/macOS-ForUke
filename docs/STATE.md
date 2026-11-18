@@ -5671,3 +5671,59 @@ b262 把这三处读全部改成 `0xffffffff = not sampled`（保留写、保留
 2. **b263 = P2**：`dts/uke.dts` 加 8 个 `unixnu,cluster-type`；kernel_args 加 `sheng-smp=1`（并同时加 `smp=1` 兜住两种命名，预算要腾）。验收：`ArmCpu: N timer interrupts` N>0、`sheng-smp` step 行、`IOServiceWait` 不再堆积。
 3. **b264 = 日志**：P2 通了以后 `UkeLastLog` 的 userdata transport 应能 attach；用他们的方法（TWRP + `dd` window / `work/analysis/read-uke-log.py`）读全量内核日志，此后每轮不用拍屏。
 4. **USB 轮**：repeater 表 + 去 panic 参数，看 `dctl/dsts/halted`。
+
+## §95 2026-11-19：b276 的 `manifest.bin` 结案 —— 缺的不是文件，是**核心里的一行 env 路由**
+
+### 95.1 真因（一条 traceback 定位，不用猜）
+
+b276 的失败行是适配器 `build-sheng-source-storage.py:151`（`else` 分支的 `data = path.read_bytes()`），
+也就是"按全量 manifest 读"。而走这条分支只有一个条件组合能成立：
+
+```python
+if tables_in_userdata and header.is_file():   # 本该走这条：只读 544 字节签名头
+        data = header.read_bytes()
+else:
+        data = path.read_bytes()              # ← 实际走这条，于是要 manifest.bin（我们没有、也不该有）
+```
+
+逐个排除之后（都用 CI 日志里的实证，不靠推测）：
+
+| 疑点 | 结论 | 证据 |
+|---|---|---|
+| 三份 `manifest.header.bin` 没提交？ | **不成立** | `git ls-tree HEAD` 九份全在；`trusted-key.bin`/`verification.json` 都被成功读取（否则 traceback 会在 123/134 行先炸） |
+| `[root] tables_in_userdata` 写错位置？ | **不成立** | `tomllib` 解析 `root.tables_in_userdata = True` |
+| 545 字节头与镜像摘要不符？ | **不成立** | 本地逐项核对，三份头 `data[56:88]` == `[root] *_image_sha256`、uuid、`trusted_key_sha256`、`real_c_signature_and_block_verification` 全 True |
+| **核心的 `version_env()` 没有这一行？** | **成立** | CI 用的核心是 `TongHuaQWQ/UniXNU@macos` = `fef5d15`（日志 "Record revisions" 打印），该提交的 `scripts/unixnu/kernel.py` 里**没有** `XNU_SOURCE_STORAGE_TABLES`，于是 `tables_in_userdata = False` → 走 `else` |
+
+即：**本地分支 `d3bf0cc`（"userdata: let the board declare data objects…"）从来没推到远端 `macos`**。那份提交里正是两件关键事：
+`[root] tables_in_userdata` → `XNU_SOURCE_STORAGE_TABLES=userdata`，以及 `[userdata] objects` 让 `<window>.vroot`
+表随根镜像落位。CI 跟踪的是**分支**而不是提交，所以它一直在用一个"少一行"的核心。
+
+### 95.2 处理
+
+1. 把 `d3bf0cc` cherry-pick 到 `fef5d15` 上（干净应用，5 文件 +200/-14），
+   `python3 scripts/unixnu/test_userdata.py` 10 项通过，推送到 `TongHuaQWQ/UniXNU@macos`：`fef5d15..e10bb7d`。
+2. 新增 `scripts/check-core-contract.py`：按 `board.toml` **实际声明**校验核心是否具备对应能力，
+   三类历史失败（b274 IOStorageFamily 版本、b275 `prepare()` 签名、b276 上面这条）全部变成**秒级报错**：
+
+   | 检查 | 触发条件 | 失败时的历史代价 |
+   |---|---|---|
+   | `kernel.py` 有 `XNU_SOURCE_STORAGE_TABLES` 路由 | `[root] tables_in_userdata` | b276，21 分钟 |
+   | 适配器有 `manifest.header.bin` 交接 | 同上 | 同 b276 |
+   | `userdata.py` 读 `spec.get('objects')` | `[userdata] objects` 非空 | 表根本不落位，刷完才发现 |
+   | 适配器 `prepare()` 写死的版本 == `feeds.toml` 的 IOStorageFamily pin | feeds 有该 pin | b274，18 分钟 |
+   | `scripts/prepare-storage-headers.py:prepare(source, revision, out)` | 本仓库有该文件 | b275 |
+
+   反证跑过：对 `fef5d15` 报两条（正是 b276 的真因＋表不落位），对修好的 `e10bb7d` 通过。
+3. workflow `build-kernel-min.yml` 在 UniXNU 检出之后立刻跑这个检查（`--core ../UniXNU`）。
+
+### 95.3 下一轮（b277 = `ci-b277-tables`）
+
+预期：`prepare storage headers` → `component-ShengUfs` 走 header-only（`root-policies.bin` 约 1.7 KB 而不是 108 MiB）
+→ 链接出 `kernel.macho`。刷机前先验 payload 里 `native-ufs-root=1`（`build-payload-linux.sh:196` 会在缺
+`CONFIG_XNU_NATIVE_UFS=y` 时静默追加 `=0`，b272 已经踩过）。
+
+另外 bootstrap pass 现在多两条 undefined：`_native_verified_block_root_authorized`、`_native_verified_block_volume_device`
+（`_load_init_program` 引用，由后面才建的 `kits/sheng` 提供）。它们和 `_corecrypto_kext_start`/`_mockfs_*` 同类，
+属于"没有归档时的预期"，不是失败——但下一轮要确认它们在**第二遍链接**里被解析掉，若仍报缺，就是
+`kits/sheng` 的归档没进 `EXTRA_LD_ARCHIVES`。

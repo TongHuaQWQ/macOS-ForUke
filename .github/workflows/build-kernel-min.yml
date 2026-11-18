@@ -107,6 +107,17 @@ jobs:
           ref: ${{ env.UKE_CORE_REF }}
           path: UniXNU
 
+      # Same kind of guard, for the half of the build that lives in the core: this job tracks a core
+      # *branch*, so a core one commit behind silently changes what the board builds. b276 spent 21
+      # minutes to die on 'No such file or directory: scripts/policies/26C5035r/OS/manifest.bin' because
+      # the core's version_env() never turned [root] tables_in_userdata into XNU_SOURCE_STORAGE_TABLES,
+      # so the storage builder took the full-manifest branch and wanted the 108 MiB table this repository
+      # deliberately does not ship. b274 (IOStorageFamily revision) and b275 (prepare() signature) were
+      # the same class of miss. This costs seconds.
+      - name: Check the core contract of this board
+        working-directory: UniXNU-uke
+        run: python3 scripts/check-core-contract.py --core ../UniXNU
+
       # Cheap guard against an expensive failure: patches/xnu/series applies the *copies* in patches/xnu/,
       # while the component owns the originals under package/qcom-usb-debug/patches/. A fix written in one
       # place only is invisible until the kernel compile dies on it, eight minutes into the link step
