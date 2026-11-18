@@ -65,3 +65,47 @@ sheng-pmgr=2  amfi_get_out_of_my_way=1  ml-timeout-lock-panic-scale=40  boot-pro
    （风暴仍不出现、N 仍 >0），但少了一个分叉。
 3. **b265**：对齐 sheng 的参数集里**我们已有组件**的那几条（`armcpu-self-ipi=1` 优先），验收 IPI 计数。
 4. 之后才是 USB / 显示 / Wi-Fi 这些增量。
+
+---
+
+## 5. 官方 macOS 参考：`Jelly10086/macOS-ForSheng`（本地 `work/ref-macos-sheng/`）
+
+`unixnu.com/zh/devices/sheng-macos` 指向的不是 `UniXNU-sheng`（那是 iPadOS 的），而是这个：
+
+| 项 | 内容 |
+|---|---|
+| 目标 | macOS **26.5 / 25F71**，配套 **XNU 12377.121.6 ARM64E** |
+| 形态 | **UEFI + DarwinBoot + 自建 EL1 内核**（和我们一样），硬件适配参考 UniXNU |
+| 已达成（实机）| 原版 **launchd** 与恢复服务已执行；UFS 读取 + **BaseSystem / ISC 挂载**；图形 Recovery 语言窗口已显示 |
+| 未达成 | WindowServer 在 HID/显示初始化时反复退出；Adreno 加速未实现 |
+| 文档 | `docs/{status,bringup,debugging,boot-progress,panic-qr,native-smp,native-early-exception,macos26-security,routes}.md` |
+
+### 5.1 他们的日志体系（比我们的 userdata 尾环成熟一代）——**这是我们应该抄的**
+
+`docs/debugging.md` 列了六个来源，各管一段，互不替代：
+
+| 来源 | 保存内容 | 限制 |
+|---|---|---|
+| 滚动控制台 | 当前字符输出 | 会滚掉 |
+| 底部进度 | 阶段/目标服务/停留时间/提交状态 | 不是百分比 |
+| **首次 panic 面板** | 最多 **4095 字节**首次 panic 文本 | 受屏幕大小限制 |
+| **panic 二维码** | 内核 UUID、调用地址、钩子寄存器、丢失计数、有界原因 | 仅摘要 |
+| **RAM 保留日志** | 128 字节头 + 16 KiB 前缀 + 64 KiB 环形尾部 | writer 忙时丢字 |
+| macoslog 文件 | 周期提交的 RAM 快照 | 双槽 + CRC + 保护域校验 |
+
+**关键设计（`docs/panic-qr.md`）**：首次 panic 时把不超过 4095 字节的文本 + 一段结构化摘要**画成二维码**放在独立 panic 区，手机离线扫。编码与绘制路径**不申请内存、不等锁、不写盘**；重复/递归 panic 不覆盖首次记录。
+
+→ 这正好解决我们今晚最痛的事：`brk` 断言的文本只能靠拍模糊照片猜（我还因此误读出一句内核里根本不存在的 `zone_allocate: failure`）。
+
+### 5.2 我们应该照抄的三件事（按顺序）
+
+1. **panic 文本 → 二维码**。我们已经有 QR 编码器（`package/qcom-usb-debug/kernel/QcomUsbQr.h`）和 panic 钩子（`patches/xnu/zzzzzzzzzzz-uke-panic-flush.patch`，目前只捕获 512 字节并经 `uke_panic_flush()` 写 pram）。把上限提到 4095 并在 panic 区画码，就能彻底摆脱拍屏。
+2. **pram 尾部槽位**：固件在下次启动会打印 `pram slot 0x37F1xx`（可打印文本）并搜索 `UKEUSB`/`UKELASTLOG`/`QCOMUSB` 魔数。把 panic 文本同时写到那个尾部区，等于**零成本跨启动通道**（需先确认与 `UKE_RAMOOPS_OFFSET=0x200000` 及 log arena 不冲突）。
+3. **磁盘日志双槽 + CRC**：我们的 32 MiB 窗口是单环；他们的 `macoslog` 是双槽提交 + CRC + 保护域校验，崩溃时能保住"最后一次成功提交"。等 b266 的 DMA 修好后，按这个格式改造我们的记录头（`UKELLOG1` 已在用 CRC，缺的是双槽）。
+
+### 5.3 SMP：我们的配置与他们一致（`docs/native-smp.md`）
+
+> `sheng-smp=1` 启动次级核心，`armcpu-spi-ipi=1` 使用分配给各核的 SPI 发送核间中断。
+> 构建 40949503078 八核运行到达 `load_init_program`，七个副核均完成初始化，PSCI 返回值与失败计数均为 0，八核均收到定时器中断。
+
+我们正是 `sheng-smp=1` + `armcpu-spi-ipi=1` + dts 里 8 个 `unixnu,cluster-type`，与他们逐条对应。**b263 之后 `ArmCpu: N timer interrupts` 是否为 0，是唯一还没拿到的证据**——下次拍屏请往上翻找这一行。
