@@ -629,6 +629,15 @@ kernel_args = [
   # [userdata]), so the window they opened was not the userdata tail at all. This round ships the correct
   # pair plus sheng-log=1, which is the actual test of that channel.
   "sheng-log=1",
+  # The disk log window, back after b261 removed it to pay for uke-platform-error-panic=1.
+  # uke-platform-error-panic is gone instead: the GIC-read storm it guarded against was fixed in
+  # b262/b263, and a full kernel log in userdata is worth more than a panic on the first ignored
+  # error. NativeUfs reads these two as ABSOLUTE LBAs of userdata (4096-byte blocks) on LUN 0 and
+  # opens the last 8192 of them: start = last + 1 - 8192 = 61941755. They come from this unit's own
+  # GPT (blockdev --getsz userdata = 471908312 sectors = 58988539 blocks = last - first + 1), which
+  # is also the geometry work/analysis/read-uke-log.py reads back through TWRP.
+  "uke-log-first=2961408",
+  "uke-log-last=61949946",
   # XNU panics with "Console I/O from interrupt-disabled context" (osfmk/console/serial_console.c:181,
   # console_io_allowed) as soon as anything prints with interrupts masked. On this port that fires late
   # in kext loading, after AppleImage4 has already logged its nonce-slot failures; the tunable's own name
@@ -642,7 +651,6 @@ kernel_args = [
   # DRAM: the next firmware boot can then export the Advanced Logger buffer, kernel lines included.
   # Paid for by dropping uke-log-first/uke-log-last: that userdata window never produced a record (the dump
   # was 517 non-zero bytes out of 32 MiB), and the QR channel is the one that now works.
-  "uke-platform-error-panic=1",
   # 0 for this round, and stated here rather than injected by the build script. configs/uke-macos_defconfig
   # still has CONFIG_XNU_NATIVE_UFS off, so this kernel carries no UFS driver and
   # drivers/NativeUfs/NativeUfs.cpp:2089 returns false on a 0 argument anyway - the value itself changes
