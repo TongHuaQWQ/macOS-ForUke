@@ -4,11 +4,13 @@ name = "IOStorageFamily"
 kind = "refer"
 git = "https://github.com/apple-oss-distributions/IOStorageFamily.git"
 ref = "main"
-commit = "e45fbe30a7879e0b16e26dddb78538f1b00e0bff"
-# NOT synced with the reference board on purpose: scripts/prepare-storage-headers.py validates the public
-# IOStorageFamily revision against the one its patched header set was measured on, and refuses any other
-# ("Unexpected public IOStorageFamily revision", run 44319702546). The storage headers are this port's ABI
-# contract with the 26 train, so the pin moves only when that script is re-measured.
+commit = "7edb88fbae296fb7c8ce2f64e115e116e566d51c"
+# Synced with the reference board, and it has to be: the storage adapter in the core
+# (scripts/build-sheng-source-storage.py:109) calls prepare(storage, "7edb88fb...", out) with that revision
+# written into the call, and scripts/prepare-storage-headers.py is now the core's own implementation, which
+# takes the revision as an argument instead of pinning one. b274 failed because the device copy pinned
+# e45fbe30 and rejected 7edb88fb; b275 failed because the device copy had no prepare() at all
+# (AttributeError: module 'source_headers' has no attribute 'prepare').
 
 # The SM7675 (cliffs) SoC layer, shared with future boards. Local until the
 # repository is published; the commit pin replaces the local override then.
