@@ -173,6 +173,6 @@ CONFIG_XNU_QCOM_USB_DEBUG=y
 # Force-loaded straight into the kernel link (build-xnu-4k-baseline.sh appends XNU_EXTRA_LD_ARCHIVES
 # verbatim, so the -force_load comes from here). {tree} is the build tree, which is also what the
 # script's $ROOT is -- the same substitution uke-full-plus_defconfig's two *_ARCHIVE keys use.
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a"
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a -Wl,-force_load,{tree}/build/sheng-platform-power/libShengPlatformPower.a"
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
 CONFIG_XNU_ARMVIRT_PLATFORM=n
