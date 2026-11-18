@@ -217,6 +217,12 @@ def main():
         ('UfsLog.cpp', (CXX_RECORD,) + CXX_RECORD_ALTERNATES,
          includes + warnings + ['-fno-exceptions', '-fno-rtti'], ['-x', 'c++', '-std=c++17']),
         ('UfsLogKernel.c', (C_RECORD,) + C_RECORD_ALTERNATES, includes + warnings + platform_private, []),
+        # IOMallocContiguous asks the VM for a contiguous run below 4 GiB and this board has no memory
+        # there (its device tree hands XNU 0x8C0000000 and up), so the transport's DMA buffer has to come
+        # from the API the working references use. That call is C++, hence a unit of its own: the C unit
+        # above has no IOKit include path.
+        ('UfsLogDma.cpp', (CXX_RECORD,) + CXX_RECORD_ALTERNATES,
+         includes + warnings + ['-fno-exceptions', '-fno-rtti'], ['-x', 'c++', '-std=c++17']),
     )
     for name, candidates, extra, language in units:
         source = ROOT / 'kits/uke' / name

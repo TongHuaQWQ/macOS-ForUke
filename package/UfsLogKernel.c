@@ -34,6 +34,8 @@ typedef uint64_t IOPhysicalAddress;
 typedef struct IOLock IOLock;
 extern void  IOLog(const char *format, ...) __attribute__((format(printf, 1, 2)));
 extern void  IODelay(unsigned microseconds);
+extern int uke_log_dma_alloc(uint32_t bytes, void **virt, uint64_t *phys);
+
 extern void *IOMallocContiguous(uintptr_t size, uintptr_t alignment,
                                 IOPhysicalAddress *physicalAddress)
   __attribute__((deprecated));
@@ -60,6 +62,7 @@ extern int ufs_log_attach(const struct UfsLogMaps *maps, const char **why);
 static uintptr_t gUfsLogHc;
 static uintptr_t gUfsLogSmmu;
 static void     *gUfsLogDma;
+static void *gUfsLogDmaVirt = NULL;
 // IOPhysicalAddress, not uintptr_t: IOMallocContiguous takes IOPhysicalAddress* and on arm64 macOS that
 // is `unsigned long long` while uintptr_t is `unsigned long`, which is an incompatible-pointer warning.
 static IOPhysicalAddress gUfsLogDmaPhys;
@@ -194,6 +197,13 @@ ufs_log_start(const char **why)
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     gUfsLogDma = IOMallocContiguous(UFSLOG_DMA_BYTES, 4096, &gUfsLogDmaPhys);
 #pragma clang diagnostic pop
+    if (gUfsLogDma == NULL && uke_log_dma_alloc(UFSLOG_DMA_BYTES, &gUfsLogDmaVirt, &gUfsLogDmaPhys)) {
+      // IOMallocContiguous asks for a run BELOW 4 GiB (vm_page_find_contiguous low=0xFFFFF pages) and this
+      // port's memory map starts at 0x8C0000000, so that search can never succeed - b265 printed
+      // "userdata log transport unavailable: dma buffer" for exactly this. The fallback is the allocation
+      // both working references use, in package/UfsLogDma.cpp.
+      gUfsLogDma = gUfsLogDmaVirt;
+    }
     if (gUfsLogDma == NULL) {
       gUfsLogWhy = "dma buffer";
       if (why != NULL) {
