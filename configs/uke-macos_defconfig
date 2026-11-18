@@ -91,7 +91,10 @@ CONFIG_XNU_ARMCPU=y
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 CONFIG_XNU_SOURCE_MOCKFS=y
 CONFIG_XNU_NATIVE_CS_HASH_CACHE=y
-# CONFIG_XNU_SHENG_PMGR is not set
+# The native UFS root needs AMFI's "No PMGR" panic answered, and scripts/unixnu/payload.py:58-74 refuses to
+# build a payload with native-ufs-root=1 unless pmgr=2 rides the command line AND the kernel links
+# _sheng_pmgr_run. That symbol comes from this archive, so the round that turns the root on turns this on.
+CONFIG_XNU_SHENG_PMGR=y
 CONFIG_XNU_DT_PANIC_REGION=y
 # CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE is not set
 CONFIG_XNU_NATIVE_ARCH_TIMER=y

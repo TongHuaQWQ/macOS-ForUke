@@ -659,8 +659,11 @@ kernel_args = [
   # stops - or silently passes native-ufs-root=0 behind your back through
   # tools/build-payload-linux.sh:186-189, which is the trap the device side hit on 2026-11-15. The storage
   # round puts this back to 1 together with the policy directory and CONFIG_XNU_NATIVE_UFS.
-  "native-ufs-root=0",
-  "native-ufs-allow-unverified=1",
+  "native-ufs-root=1",
+  # The payload gate (scripts/unixnu/payload.py:71) demands exactly one `pmgr=2` beside
+  # native-ufs-root=1, because the unchanged target AMFI panics with "No PMGR" otherwise. sheng-pmgr
+  # stays too: that is the argument package/ShengPlatformPower.cpp reads for our own integration.
+  "pmgr=2",
   "sheng-data-persist=2",
   # "sheng-staged-apps=1",   (see the note above: dropped for the 1000-byte command-line cap)
   # sheng-log=1 is OFF for this round, and it is the one variable changed. It is the switch for
