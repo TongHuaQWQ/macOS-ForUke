@@ -5795,3 +5795,43 @@ force-load 任何归档，所以那一步报 undefined 是预期（和 `_corecry
 `[payload] root_policies`、`[kernel] archives` 里那条适配器条目及其 `--policy-dir` 目录、三份 policy 文件齐全、
 以及"同一个归档别被 force-load 两遍"。反证：`--defconfig uke-storage_defconfig` 立刻报出缺 `SOURCE_STORAGE` 与
 `_TABLES` 两条，退出码 1。
+
+## §97 b278：存储运行时**首次真正建成**，链接只剩 6 个符号（都是我们的缺口）
+
+### 97.1 这一轮的进展
+
+b278 的 `archive-11-build-sheng-source-storage` **成功**（不再报错），`libShengUfs.a` 里出现了
+`SourceStorage.o`、`NativeUfs.late.o`；`storage-headers` 报 `PASS: 19 public IOStorageFamily headers`。
+失败点从"适配器起不来"推进到"第二遍链接差 6 个符号"：
+
+```
+Undefined symbols for architecture arm64e.kernel:
+  "__GLOBAL__sub_I_NativeAES.cpp"        <- SourceStorage.o
+  "_native_software_aes_create"          <- SourceStorage.o
+  "_native_adreno_preflight_ready"       <- SourceStorage.o
+  "_uke_kext_class_begin" / "_uke_kext_class_end"   <- SourceStorage.o
+  "_armcpu_spi_mask"                     <- NativeUfs.late.o (hostEnableInterrupt)
+```
+
+### 97.2 六个符号各自的来历（**都是"官方有、我们没有"**）
+
+| 符号 | 谁提供 | 我们为什么没有 |
+|---|---|---|
+| `armcpu_spi_mask` | `Allenwdk/ArmCpu@8721288` | feeds 里明明 pin 了它，但**核心自带同名 submodule 时 `git` 条目永远不会生效**（feeds.py 先解析核心 submodule）→ 实际编的是 `UniXNU/ArmCpu@93a5030`，它没有这个函数。改 `local = "drivers/ArmCpu"`（local 在第 4 步解析，赢）+ 提交一份 8721288 |
+| `uke_kext_class_begin/end` | `patches/xnu-12377/uke-kext-registration-lock-order.patch`（改 `OSKext.cpp`） | 我们的 series 里没有这个补丁。顺带把 §75 那个 sKextLock 死锁顺序也一并对齐了。注意：**内核对静态镜像不认 `weak_import`**，所以 `UkeClassRegistration.h` 的 fallback 救不了链接 |
+| `__GLOBAL__sub_I_NativeAES.cpp`、`native_software_aes_create` | `Allenwdk/UniXNU-uke:scripts/build-software-aes-27.py`（生成工厂 + `objcopy --globalize-symbol`） | 前者被编译器发成 **local** 符号（归档里有、外面引用不到）；后者源码里根本没有，官方每次都在构建时生成。我们已把这**两步**搬成 `scripts/build-software-aes-factory.py`（**不搬**它那半 24A446 vtable 审计——我们的绑定来自 `build-software-aes-bindings.py` 的 mac17g 记录） |
+| `native_adreno_preflight_ready` | Adreno 驱动（我们这一配置不建 GPU 归档） | `SourceStorage.cpp` 只读它做打印。放进 `package/MissingKernelSymbols.c`，weak + 0（"没跑过 preflight"就是事实） |
+
+### 97.3 教训：`git` pin 输给核心 submodule，这件事已经坑了第三轮
+
+b262 前后就记录过"`git` 条目对核心自带的组件静默失效"，这次又以另一种形式复现（编译出来的 ArmCpu
+不是我们 pin 的那个）。**以后凡是核心同时带 submodule 的组件，要么用 `local`，要么别 pin。**
+`scripts/check-core-contract.py` 目前没检查这一条，因为权威事实在核心的 `.gitmodules` 里，可以从那里读：
+下一轮加。
+
+### 97.4 顺带确认
+
+`drivers/ShengUfs/NativeUfs.cpp`（官方 source-API 驱动）**不**定义 `native_verified_block_*`，
+所以它和 `package/SourceRootBinding.cpp` 不再撞符号——这正是 b277 里把 feeds 指到 classic 驱动时的问题。
+另外 8721288 的 `enableGic()` 与 `armcpu_gic_diag()` **确实回读** SGI 帧（`redist+0x10000+0x{80,100,d00}`），
+所以 b262 的那两处本地改动在新文件里**逐字重新加上了**，并在源码里标了 `LOCAL EDIT (b262)`。
