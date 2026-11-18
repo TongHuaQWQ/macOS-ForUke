@@ -565,6 +565,79 @@ uke_panic_settle(void)
 	} while (now - start < 1000000);
 }
 
+
+/*
+ * Panic text for the NEXT boot, delivered through the firmware's own pram printer.
+ *
+ * UkeUsbLogDxe scans five 64-byte slots at pram + 0x37F100 (stride 0x10) and prints each one as quoted
+ * text when its first bytes are printable (Drivers/UkeUsbLogDxe/UkeUsbLogDxe.c:1275-1305, 48 characters
+ * per slot). That log is exported from the menu as QR codes, so a panic message written there is readable
+ * after the next boot without a serial port, a disk driver or a working display path.
+ *
+ * This is deliberately NOT the /chosen/pram route: board.toml keeps panic_region off because enabling it
+ * kills this tree's kernel before the console appears (b156 vs b158, again at b175). We map the region
+ * ourselves once, exactly like uke_mark maps its page, and only store bytes: no allocation, no lock, no
+ * formatting library, nothing that can fail inside a panic.
+ *
+ * The reference macOS port solves the same problem by drawing a panic QR (macOS-ForSheng docs/panic-qr.md,
+ * up to 4095 bytes with no allocation or lock wait); this is the same idea through the channel this
+ * firmware already has.
+ */
+#define UKE_PRAM_BASE           0xFF800000ULL
+#define UKE_PRAM_BYTES          0x380000U
+#define UKE_PRAM_PANIC_OFFSET   0x37F100U        /* the first of the five slots the firmware prints */
+#define UKE_PRAM_PANIC_SLOT     64U              /* bytes between slots */
+#define UKE_PRAM_PANIC_SLOTS    5U
+#define UKE_PRAM_PANIC_CHARS    48U              /* what LogPramSlot prints per slot */
+
+static volatile char *gPramPanic;                /* pram + UKE_PRAM_PANIC_OFFSET, mapped once */
+
+static void
+uke_panic_publish(const char *message)
+{
+	size_t length = 0;
+	unsigned slot;
+
+	if (gPramPanic == NULL) {
+		return;                                   /* never mapped: nothing to write into */
+	}
+	while ((message[length] != '\0') && (length < UKE_PRAM_PANIC_SLOTS * UKE_PRAM_PANIC_CHARS)) {
+		length++;
+	}
+	for (slot = 0; slot < UKE_PRAM_PANIC_SLOTS; slot++) {
+		unsigned index;
+		for (index = 0; index < UKE_PRAM_PANIC_CHARS; index++) {
+			size_t at = slot * UKE_PRAM_PANIC_SLOT + index;
+			char c = (at < length) ? message[at] : ' ';
+			/* The printer stops at the first byte outside [0x20,0x7f), so a newline would end the
+			 * slot: normalise everything into that range. */
+			if ((c < 0x20) || (c >= 0x7f)) {
+				c = ' ';
+			}
+			gPramPanic[slot * UKE_PRAM_PANIC_SLOT + index] = c;
+		}
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* Called once from the log start path: after this the panic hook needs no allocation. */
+static void
+uke_panic_publish_arm(void)
+{
+	vm_offset_t va;
+
+	if (gPramPanic != NULL) {
+		return;
+	}
+	va = ml_io_map((vm_offset_t)UKE_PRAM_BASE, (vm_size_t)UKE_PRAM_BYTES);
+	if (va == 0) {
+		IOLog("UkeLastLog: pram not mappable, panic text will not reach the next boot\n");
+		return;
+	}
+	gPramPanic = (volatile char *)(uintptr_t)(va + UKE_PRAM_PANIC_OFFSET);
+	IOLog("UkeLastLog: panic text slot armed at pram+0x%x\n", UKE_PRAM_PANIC_OFFSET);
+}
+
 void
 uke_panic_flush(const char *message)
 {
@@ -576,6 +649,8 @@ uke_panic_flush(const char *message)
 	}
 	flushing = 1;
 	ukePanicStaged = 1;
+	/* Before anything that can bail out below: this path needs neither gPanicBase nor a size. */
+	uke_panic_publish(message);
 	__asm__ volatile("dsb sy" ::: "memory");
 	uke_panic_settle();
 	const size_t capacity = (size_t)gPanicSize - 8;
@@ -787,6 +862,8 @@ uke_last_log_start(void)
 {
 	static int started;
 	thread_t thread;
+
+	uke_panic_publish_arm();
 
 	if (started) {
 		// uke_last_log_hook_entry() is called from csr_check and from bsd_init, and the STARTUP()
