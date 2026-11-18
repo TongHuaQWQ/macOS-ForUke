@@ -101,14 +101,28 @@ paths = ["drivers/NativeUfs/**", "board.toml", "proprietary-files.txt"]
 inputs = ["UFS host at 0x1d84000 (GCC windows 0x177000/0x19e000).",
   "userdata GPT windows (first_lba 0x2d3000..) with the OS and SystemOS components."]
 configuration = ["NativeUfs builds with --unverified (bring-up transport without the verified-root policy bundle).",
-  "Kernel arguments native-ufs-root=1 native-ufs-allow-unverified=1, owner Data persist level 2."]
-procedure = ["./unixnu build package -D ../UniXNU-uke-format2; ./unixnu build userdata (macOS) or the recorded seed images."]
+  "Kernel arguments native-ufs-root=1 native-ufs-allow-unverified=1, owner Data persist level 2.",
+  # 2026-11-15, the macOS 27.3 track: storage is back after the signed policy directory exists.
+  # Kept as separate variables on purpose (see findings): the policy bundle, the two-gate bypass, and
+  # the gate's own arguments. Do not fold any of them into a USB round.
+  "macos-27.3-uke (26C5035r): CONFIG_XNU_NATIVE_UFS, CONFIG_XNU_OWNER_CACHE_MOUNT/_CACHE_STARTUP/_UNION_SYSTEMOS and CONFIG_XNU_BRINGUP_OWNER_CACHE, with scripts/policies/26C5035r/{OS,SystemOS,App} (544-byte headers, one shared 395-byte anchor) and [root] tables_in_userdata.",
+  "The same kernel line carries pmgr=2 beside sheng-pmgr=2 and [adt.defaults.u32] vmm-present=1."]
+procedure = ["./unixnu build package -D ../UniXNU-uke-format2; ./unixnu build userdata (macOS) or the recorded seed images.",
+  "Signed policies: scripts/make-root-policies.py on macOS with the three decrypted disk images; its TREE/build/verified-root-<NAME>/hashes.bin becomes the [userdata] objects table."]
 findings = ["TLMM per-GPIO base is 0x0f100000; reading 0x0f000000 hits unbacked space and hangs the bus.",
-  "The owner root-binding audit is the base of the bsd_init owner block; the other probes expect its result.",
+  "The owner root-binding audit is the base of bsd_init owner block; the other probes expect its result.",
+  "The macOS train had no block driver at all until 2026-11-15 (CONFIG_XNU_NATIVE_UFS off, payload built with native-ufs-root=0), which is why the APFS container never initialized: drivers/NativeUfs/NativeUfs.cpp:2089 returns false without native-ufs-root=1, so the driver never touches the controller.",
+  "scripts/unixnu/payload.py:check_native_root() has two conditions, not one: exactly one pmgr=2 argument, and the _sheng_pmgr_run symbol. Renaming sheng-pmgr=2 clears only the first; SHENG_PMGR is unbuildable on this train, so vmm-present is the only exit that skips both. Measured by calling the function with the real Context.",
+  "The three signed tables are 113,229,824 + 22,790,144 + 425,984 B (130 MiB) against boot_partition_bytes 0x6000000 (96 MiB) for boot and vendor_boot, so the OS table alone exceeds the whole partition: they travel as the [userdata] data objects OS.vroot/SystemOS.vroot/App.vroot and the kernel bundle carries only the 544-byte headers.",
 ]
-completion = ["UFS enumerates, the owner Data mounts and the SystemOS volume appears."]
-limits = ["The verified-root transport is not yet the default; userdata imaging needs macOS hdiutil."]
-next_action = ["Switch the UFS transport to the verified-root policy bundle before shipping."]
+completion = ["UFS enumerates, the owner Data mounts and the SystemOS volume appears.",
+  "macOS 27.3: the APFS container initializes and the OS root plus SystemOS cryptex mount from the userdata windows."]
+limits = ["The verified-root transport is not yet the default; userdata imaging needs macOS hdiutil.",
+  "The block tables are 130 MiB of local input (git ignores *.bin), so a checkout can build the kernel but not the userdata image without them.",
+  "vmm-present=1 is an explicit lie about running under a hypervisor: XNU's only source consumer is allow_research_modes(), already satisfied by -v and debug=0x14e, but Apple's binary kexts read it too and the AMFI/ApplePMGR wait changes. Treat it as its own variable: if a round regresses where VM presence is branched on, drop this single line plus pmgr=2 and sheng-pmgr=2 before suspecting anything else.",
+  "Nothing in this 2026-11-15 configuration has been device-verified yet; it is an isolated round of its own, deliberately not mixed with the USB/DevSpd experiments."]
+next_action = ["Flash the storage round alone and read whether the APFS container initializes, then whether the OS root and SystemOS mount; keep it out of the USB rounds.",
+  "Switch the UFS transport to the verified-root policy bundle before shipping."]
 evidence = [
   { kind = "device", reference = "docs/PROGRESS.md", result = "UFS root boots and the owner Data volume mounts on hardware", command = "fastboot boot boot.img", revision = "c77d613dc91fb54479242aa5d5902c48662b80d7" },
 ]

@@ -236,7 +236,7 @@ constexpr uint64_t kLogWindowBlocks = 8192;   // 32 MiB, the same window board.t
 // gLogFirst / gLogBlocks belong to RootCommands.h: hostLogOpen() sets them and hostWrite4k() checks every
 // write against them, so this file reads them instead of keeping its own copy.
 
-extern "C" int native_ufs_log_open(uint64_t *firstLba, uint64_t *blocks, const char **why)
+extern "C" __attribute__((weak)) int native_ufs_log_open(uint64_t *firstLba, uint64_t *blocks, const char **why)
 {
   const char *reason = "";
   int ok = 0;
@@ -273,7 +273,7 @@ extern "C" int native_ufs_log_open(uint64_t *firstLba, uint64_t *blocks, const c
   return ok;
 }
 
-extern "C" int native_ufs_log_write(uint64_t rel, uint32_t blocks, const void *src)
+extern "C" __attribute__((weak)) int native_ufs_log_write(uint64_t rel, uint32_t blocks, const void *src)
 {
   if (!gLogBlocks || !src || !blocks || rel >= gLogBlocks || blocks > gLogBlocks - rel) return 0;
   while (blocks) {
@@ -287,7 +287,7 @@ extern "C" int native_ufs_log_write(uint64_t rel, uint32_t blocks, const void *s
   return 1;
 }
 
-extern "C" int native_ufs_log_sync(void)
+extern "C" __attribute__((weak)) int native_ufs_log_sync(void)
 {
   if (!gLogBlocks) return 0;
   // SYNCHRONIZE CACHE(10), not a NOP OUT. The record only survives the reset this channel exists for
