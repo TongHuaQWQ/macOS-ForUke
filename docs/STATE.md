@@ -5835,3 +5835,50 @@ b262 前后就记录过"`git` 条目对核心自带的组件静默失效"，这�
 所以它和 `package/SourceRootBinding.cpp` 不再撞符号——这正是 b277 里把 feeds 指到 classic 驱动时的问题。
 另外 8721288 的 `enableGic()` 与 `armcpu_gic_diag()` **确实回读** SGI 帧（`redist+0x10000+0x{80,100,d00}`），
 所以 b262 的那两处本地改动在新文件里**逐字重新加上了**，并在源码里标了 `LOCAL EDIT (b262)`。
+
+## §98 b283：**内核链接通过了**，卡点移到 prelink 的"reviewed anchor"
+
+b283 的结果是本项目第一次走到 prelink：
+
+```
+== kernel: component-ShengUfs        (b278 起就能跑)
+== kernel: archive-12-build-sheng-source-storage
+...
+== kernel: archive-22-build-fileset-release-reference
+bash build-xnu-4k-baseline.sh        11:19:07 → 11:34:46   ← 链接成功
+== kernel: prelink
+original: 23976 functions, 5013 diversities
+native:   30005 functions, 1441 diversities               ← 多了 6029 个函数（整个存储运行时）
+ValueError: Reviewed native address is not a function start: 0xfffffff007364b28
+```
+
+（b283 里 bootstrap pass 仍报 `_corecrypto_kext_start`/`_mockfs_*`/`_native_verified_block_*` 未定义——那是
+**预期**且被容忍的一遍，`kernel.log` 的尾巴是 `built kernel at ...`。）
+
+### 98.1 真因：我们把"reviewed anchor"写成了**绝对地址**
+
+`kits/XnuPrelink/fixtures/fileset-26C5035r-symbols.json` 有两条 reviewed 记录（b141 时加的，目的是把
+AppleImage4 通过 `__DATA_CONST` 槽调用的 `kalloc_type_impl` / `kfree_type_var_impl` 绑上，否则它们会被
+prelink 打成 stub），其中 `native_address` 是**上一版内核**的地址。内核长了 6029 个函数，地址全部平移，
+于是 `anchor_reviewed()` 直接抛错。
+
+上游 kit（`UniXNU/XnuPrelink`）**没有** `native_address` 这个概念，只按 `named_functions` 名字绑；
+`native_address` 是我们本地为"同名双地址"加的。
+
+### 98.2 改法：地址降级为**线索**，绑定按名字重新解析
+
+`kits/XnuPrelink/fileset_match.py:anchor_reviewed()` 现在：记录里的地址**仍然先试**（且仍要求它是函数起点
+并且该地址上确实有这个名字，所以不会静默漂到别的函数）；只有对不上时才走新增的
+`resolve_reviewed_address()`：
+
+- 候选 = 所有"名字匹配且是函数起点"的地址；
+- 多于一个时，优先**名字集合里没有 `<same>_external` 别名**的那个（别名正是 AppleImage4 不该被导到的地址）；
+- 仍然不唯一就报错，并把每个候选的 `地址（该地址上的所有符号名）` 打出来——下一次这类失败自己会说清；
+- 成功时会打印一行 `reviewed <sym>: recorded address 0x… is stale in this build, resolved to 0x…`。
+
+`python3 -m pytest test_fileset_match.py` 15 项通过。
+
+### 98.3 这一轮之后
+
+prelink 通过就进 payload 阶段（`[payload] root_policies` → `kernel.macho.vroot`）。刷机前要验：
+`native-ufs-root=1` 在 payload 里、`root-policies.bin` 约 1.7 KB（不是 108 MiB）、`kernel.macho.vroot` 存在。

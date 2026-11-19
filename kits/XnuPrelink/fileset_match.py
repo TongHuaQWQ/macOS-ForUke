@@ -618,19 +618,47 @@ class Matcher:
                     # that also appears under an <name>_external alias elsewhere in __TEXT_EXEC cannot be
                     # bound by name at all -- kalloc_type_impl and kfree_type_var_impl are both like that,
                     # and they are what AppleImage4 calls through its __DATA_CONST slots on this board.
-                    # The address is cross-checked against the declared symbol, so a reviewed entry cannot
-                    # drift onto a different function silently.
+                    #
+                    # The address is recorded against ONE build of this kernel, so it is a hint, not a fact:
+                    # it still has to be a function start that carries the declared symbol, and when the
+                    # kernel has grown since it was recorded (the source storage runtime alone adds six
+                    # thousand functions) the identity is resolved again by symbol below. Hard-failing on a
+                    # moved address blocks a prelink over something that is still there under its own name.
                     address = int(entry['native_address'], 16)
-                    if address not in self.native.functions:
-                        raise ValueError('Reviewed native address is not a function start: '
-                                         f'{entry["native_address"]}')
-                    if entry['native_symbol'] not in self.native.symbol_names.get(address, ()):
-                        raise ValueError(f'Reviewed symbol {entry["native_symbol"]} is not at '
-                                         f'{entry["native_address"]}')
-                    native = address
+                    if address in self.native.functions and \
+                            entry['native_symbol'] in self.native.symbol_names.get(address, ()):
+                        native = address
+                    else:
+                        native = self.resolve_reviewed_address(entry['native_symbol'], address)
                 if native is not None:
                     added += self.bind(orig, native, 'reviewed')
         return added
+
+    def resolve_reviewed_address(self, symbol, recorded):
+        """Find the reviewed symbol again after the kernel that carried the recorded address grew.
+
+        Only addresses that are function starts carrying the declared symbol compete. When the name is
+        duplicated -- which is what these records exist for -- the winner is the one whose symbol set has no
+        other `<same>_external` style alias, because the alias is precisely the address AppleImage4 must not
+        be routed to. Anything else is reported with the candidates instead of guessed.
+        """
+        candidates = sorted(address for address, names in self.native.symbol_names.items()
+                            if symbol in names and address in self.native.functions)
+        if len(candidates) > 1:
+            plain = [address for address in candidates
+                     if not any(name != symbol and name.endswith('_external')
+                                for name in self.native.symbol_names[address])]
+            if len(plain) == 1:
+                candidates = plain
+        if len(candidates) != 1:
+            described = ', '.join(
+                f'{address:#x} ({", ".join(sorted(self.native.symbol_names[address]))})'
+                for address in candidates) or 'none'
+            raise ValueError(f'Reviewed symbol {symbol} no longer resolves from its recorded address '
+                             f'{recorded:#x}; candidates in this build: {described}')
+        print(f'reviewed {symbol}: recorded address {recorded:#x} is stale in this build, '
+              f'resolved to {candidates[0]:#x}')
+        return candidates[0]
 
     def reviewed_data(self, inputs, known):
         """Reviewed data identities: original address -> native symbol plus addend."""
