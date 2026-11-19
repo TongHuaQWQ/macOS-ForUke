@@ -967,6 +967,19 @@ include_dirs = ["soc:dts"]
 # baseline). The GMU pool rides as a top-level node; the panic log's top-level
 # `pram` node is generated from [payload.adt] panic_region, not from here.
 [adt.chosen.u32]
+# No Apple CTRR on this SoC, so XNU must be *told* that. osfmk/arm64/machine_routines.c keeps
+# _unsafe_kernel_text_initialized false until /chosen/kernel-ctrr-to-be-enabled exists as a 32-bit value
+# (iBoot writes it on Apple silicon), and ml_unsafe_kernel_text() then hits assert() — which a DEVELOPMENT
+# build keeps. dtrace's sdt_init() is the first caller at STARTUP, so the boot dies there:
+#
+#   Assertion failed: _unsafe_kernel_text_initialized at pc 0xfffffff00bc2b8f4 …
+#
+# That is exactly what b286's panic screen shows. Both reference boards declare this (Allenwdk/UniXNU-uke
+# board.toml "No Apple CTRR on this board; XNU TUNABLES requires an explicit 32-bit value", sheng
+# "This SoC has no CTRR: kernel text stays writable by hardware, which XNU must be told"), and 0 is the
+# truthful value: no hardware text lockdown here. ctables/verify fixtures in the reference check the
+# missing/wrong-width/unprotected/protected cases; the missing case is this board until now.
+kernel-ctrr-to-be-enabled = 0
 # `embedded-panic-log-size` deliberately absent: panic_region writes it, and
 # SecureDTGetProperty returns the FIRST property of a name, so a copy here wins
 # over the one that matches pram.reg -- which is how 0x380000 (the old

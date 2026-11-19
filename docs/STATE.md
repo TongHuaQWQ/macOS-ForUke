@@ -6036,3 +6036,65 @@ fastboot -s $SER reboot
 - 日志通道：`sheng-log=1` + `uke-log-first/last` → userdata 尾 32 MiB，`work/analysis/read-uke-log.py` 可读；
   固件 AL 缓冲在 `0xB112E000`，QR 导出仍然可用。
 - 已知未解释项不变：固件 ASSERT（`ArmCpuDxe CpuExceptionHandlerLib.c(438)`）。
+
+## §102 b286 真机：内核跑到 STARTUP，panic 的真因是 **ADT 少 `/chosen/kernel-ctrr-to-be-enabled`**
+
+### 102.1 屏幕上的两组信息
+
+1. **"CPU stuck"**：`pc=0xfffffff00bbef1f0 lr=...bbef1e8 window=64 samples=128`。符号化后是
+   `_machine_idle + 0x12c` / `+0x124`（`ldp x29,x30,[sp,#0x40]` / `retab` 之前的 `strb`）——
+   **是空闲的从核**，不是死循环。stall probe 把 idle 核当成"卡住"报了，属于误报。
+2. **panic**：`…ailed: _unsafe_kernel_text_initialized at pc 0xfffffff00bc2b8f4, lr 0x8c8f1700bc2b72c
+   (saved state: 0xfffffff9d78c8910)`。照片左侧被裁掉的部分是 `Assertion f`。
+
+### 102.2 定位过程（全部离机完成）
+
+- `pc 0xfffffff00bc2b8f4` 落在发射后 `com.apple.kernel[__TEXT_EXEC] + 0x32b8f4`，反汇编是
+  `adrp x8, …; ldrb w8, [x8, #0x8e8]; tbnz w8, #0, …; adrp/add <串>; brk #0xbffc` ——
+  即"读一个 bool，false 就 panic"的形状。
+- 那个 bool 的地址按段偏移换回 native 是 **0xfffffff0071cd8e8 = `__unsafe_kernel_text_initialized`**
+  （native 符号表 217,974 条，逐个核对；同一换算把 `__DATA_CONST` 起点 0x7dc4000 ↔ 0x71a8000 对上）。
+- XNU 源码 `osfmk/arm64/machine_routines.c:3373-3399`：
+
+  ```c
+  static bool SECURITY_READ_ONLY_LATE(_unsafe_kernel_text_initialized) = false;
+  __mockable bool ml_unsafe_kernel_text(void) { assert(_unsafe_kernel_text_initialized); … }
+  static void ml_unsafe_kernel_text_init(void) {   // STARTUP(TUNABLES, RANK_FIRST)
+      if (SecureDTLookupEntry(0,"/chosen",&entry)==kSuccess &&
+          SecureDTGetProperty(entry,"kernel-ctrr-to-be-enabled",&value,&size)==kSuccess &&
+          size==sizeof(int)) { _unsafe_kernel_text_initialized = true; … }
+  }
+  ```
+- 调用者（GitHub 代码搜索 `ml_unsafe_kernel_text(`）是 `bsd/dev/dtrace/dtrace_subr.c:442/456`
+  （`dtrace_fbt_probes_restricted` / `dtrace_sdt_probes_restricted`），由 **STARTUP 的 `sdt_init()`** 触发 ——
+  这正好解释了为什么 panic 的最近符号是 `_sdt_init`。
+
+⇒ **我们的 ADT 从来没有 `kernel-ctrr-to-be-enabled`，DEVELOPMENT 内核的 assert 就必然踩。**
+
+### 102.3 官方两块板子都写了这一行
+
+| 来源 | 位置 | 原文 |
+|---|---|---|
+| `Allenwdk/UniXNU-uke` | `board.toml:355`（`[adt.chosen.u32]`）| `kernel-ctrr-to-be-enabled = 0`，注释 "No Apple CTRR on this board; XNU TUNABLES requires an explicit 32-bit value. 0 truthfully describes absent CTRR" |
+| `UniXNU/UniXNU-sheng` | `board.toml:130` | `"kernel-ctrr-to-be-enabled" = 0`，注释 "This SoC has no CTRR: kernel text stays writable by hardware, which XNU must be told" |
+
+上游 `porting.toml` 里甚至记录了 2026-11-03 就是加这条（"Added chosen kernel-ctrr-to-be-enabled 4B u32=0"）。
+我们这条一直是缺的。
+
+### 102.4 修复（纯 payload/ADT，不需要重编内核）
+
+`board.toml [adt.chosen.u32]` 加 `kernel-ctrr-to-be-enabled = 0`。重新出包后直接从生成的 ADT 里读到：
+
+```
+kernel-ctrr-to-be-enabled  .. 04 00 00 00 | 00 00 00 00     ← 长度 4，值 0（XNU 要求 size==4）
+```
+
+镜像 **b287-ctrr**：`work/flash/boot-round-b287-ctrr.img`（1,564,672 B）、
+`work/flash/vendor_boot_round-b287-ctrr.img`（85,782,528 B）。**内核 sha256 与 b286 完全相同**
+（`fe312f03…`），只有 ADT 变了。
+
+### 102.5 顺带确认
+
+AMFI 那一串 `Failed to open prelink data (1)` / `Failed to find entry /chosen/secure-boot-hashes` /
+`No Trust Cache found` 是**预期**：payload 没有 `--trust-cache`，ADT 也没有 secure-boot-hashes，
+而 `amfi_get_out_of_my_way=1` 就是为这个状态准备的。SMC 的 `AppleSMC` 读噪声同理。
