@@ -6210,3 +6210,27 @@ payload 片段:
 
 在这两件完成之前不要把 `qcom-usb-debug` 关掉：两套驱动都会抢 DWC3，等新栈跑通后再把
 `qcom-usb-debug=0`、只留 `usb=1`。
+
+### 105.3 26C5035r 的 XDCI vtable 已有候选（导出脚本还差最后一步）
+
+用本地 `kc_image.py` 直接在 26C5035r kernelcache 上扫 `com.apple.driver.AppleUSBXDCI` 的
+`__DATA_CONST`（`0x89aa2d8..0x89ac578`），找"连续 chained-fixup 槽"：
+
+```
+0xfffffe00089aaa70: 384 槽（其中 75 个指向 AppleUSBXDCI 自己的 __TEXT_EXEC → 它覆写的方法）
+0xfffffe00089ab7a0:  46 槽（0 个指向自身 → 不是 vtable，像元类表）
+0xfffffe00089abb88:  49 槽（14 个指向自身）
+0xfffffe00089ac260:  99 槽（0 个）
+```
+
+对照：他们的 24A446 表是 **280 槽**（`vtable 0xfffffe00083f24c0`）。26C5035r 出现 384 槽，
+要么 27.3 的类虚函数更多，要么这段连续区把 vtable 和相邻的元类/常量表连在一起了 —— **必须用父类
+`IOUSBDevice` 的 vtable 结束位置来钉住精确槽数**，不能直接拿 384。
+
+导出脚本（下一轮写 `scripts/export-usb-abi.py`）要复刻他们 json 的字段：
+`kernelcache_sha256 / collection_slide / vtable / instance_size / slots[[target,diversity]] / methods / bindings`，
+其中 `slots` 就是 `fix[addr]`（`build-software-aes-27.py` 读 AES vtable 用的同一手法），
+`bindings` 是 ctor/dtor 的原始地址，供构建脚本做"每个槽都落在原始 override 上"的校验。
+
+**注意**：在 `scripts/build-uke-usb-stack.py` 与这两张 26C5035r ABI 表就位之前，`qcom-usb-debug=1` 不能关
+（两套驱动会抢同一个 DWC3）；等新栈链接通过再改成 `usb=1` + `qcom-usb-debug=0`。
