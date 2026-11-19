@@ -6234,3 +6234,61 @@ payload 片段:
 
 **注意**：在 `scripts/build-uke-usb-stack.py` 与这两张 26C5035r ABI 表就位之前，`qcom-usb-debug=1` 不能关
 （两套驱动会抢同一个 DWC3）；等新栈链接通过再改成 `usb=1` + `qcom-usb-debug=0`。
+
+## §106 b289 绿了（USB 栈进集合），以及 USB 下一步的确切做法
+
+`44548801704` / `ci-b289-usbwire`：**23 个 step 全绿**，`kernel.macho` sha256 `d698a3f6…`，
+`unresolved closure references: 0; stubbed functions: 0`。核对结果：
+
+- collection entries 60 个，`AppleUSBXDCI` / `IOUSBDeviceFamily` / `AppleUSBDeviceMux` / `IOUSBHostFamily`
+  都在集合里 ✓（closure 42 roots 生效）
+- native `__DATA` 仍 **0x280000**（窗口 0x284000）→ `gScratch` 那 128 KiB 的修复继续有效 ✓
+- `sheng-aks-sls=3` 在参数里（54 条 / 992 B）✓
+- 镜像已出：`work/flash/boot-round-b289.img` / `vendor_boot_round-b289.img`
+
+这一轮 **USB 还不会枚举**：`QcomDwc3` 没编译进去，板级电源/时钟/TCSR/repeater/WCD 五段也没搬。
+
+### 106.1 硬结论：上游 `QcomDwc3` 绑死 24A446，不能直接用在 26C5035r
+
+用 `kc_image.py` 从**我们的** kernelcache 导出 `AppleUSBXDCI` 的 vtable（`0xfffffe00089aaa70`，384 槽、
+383 个不同 PAC diversity），与他们的 24A446 夹具（280 槽）逐槽比 diversity：
+
+```
+共同长度 280，diversity 相同者仅 13 个；第一个不同出现在槽 13
+179 XDCI_KEEP_CONFIGURATIONS   24A446 0x0e01  vs 我们 0x42b6   DIFF
+197 XDCI_CONNECTION_DONE       0x284f          vs 0xaec3        DIFF
+227 XDCI_DESIRED_POWER         0x8455          vs 0xe213        DIFF
+258 XDCI_UPDATE_REGISTER_FIELD 0xc455          vs 0x5b2b        DIFF
+267/268/269/270/275/277/278                                  全部 DIFF
+```
+
+diversity 由方法名+签名散列而来 ⇒ 27.3 的私有虚函数布局与 24A446 **不同**（384 vs 280 槽）。
+所以 `QcomDwc3.cpp`（按 24A446 ABI 写）在我们的 26C5035r 内核上会把覆写打到错的槽，
+`build-uke-usb-stack.py` 里"每槽 diversity 必须等于原版"的校验会立刻失败。
+
+**结论**：要在**我们这轮 26C5035r 内核**上开 USB 调试，只能用上游的**板级五段**（与 ABI 无关）+ 我们现有的
+轮询驱动；要"整包上游"，必须改用 24A446 profile（那是他们整条 USB 工程的基准）。
+
+### 106.2 下一步：把板级五段搬进 `package/qcom-usb-debug/soc/`
+
+源：`work/ref-allenwdk` → `git show origin/main:package/UkeUsbBoard.cpp`（函数名与顺序）
+
+| 段 | 行号（origin/main）| 关键值 |
+|---|---|---|
+| `Registers`/`sync()` 辅助 | 36-60 | `IODeviceMemory::withRange(...)->map(kIOMapAnywhere|kIOMapInhibitCache)` |
+| `refClock()` | 63-89 | TCSR `0x01f40000 + 0xb1118 = 0x01ff1118`，bit0 置位 + `IODelay(10)` + 读回 |
+| `voteRails()` | 96-180 | db `0x81c60000` 0x20000、rsc `0x17a20000` 0x10000；TCS = `0xd00 + 2*stride`；`kV3TcsStatus=0x28`、`kV3CmdStatus=0x40`、`kTriggered=bit24`、`kIssuedAndComplete=bit8|bit16`；rails：ldob2 880 / ldob4 1200 / ldob7 1800 / ldob17 3075 / ldob3 880(SS)；地址三件套 `{+8, +0, +4}` 值 `{7, mV, 1}`；再投 xo.lvl=3 与 SN2（`60000` KBps→编码）|
+| `repeater()` | 182-…| PMIC arbiter core `0xc400000` 0x3000、owner `0xc42d000` 0x4000；版本窗口 `BR_VERSION_V7_MIN..V8`；SID7 `0xfd00` |
+| `uke_usb_reset_controller()` | 见文件内 | Apple XDCI reset 槽 → GCC 块复位 → UTMI 恢复 → 读回 DWC3 ID/halted/role |
+| `initPhy()` | 见文件内 | eUSB2 `0x88e3000` 19.2 MHz 序列（我们已有同源生成表 `soc/QcomUsbPhyInit.h`）|
+| `uke_usb2_hardware_init()` | 1812-1834 | 顺序：map GCC → voteRails → GDSC → GCC 0x39030/0x3902c → refClock → reset_controller → repeater+WCD → initPhy；返回码 -1..-7 对应用户面板字段 |
+
+依赖：
+- `QcomRpmh.{c,h}`（`qcom_cmd_db_find` / `qcom_rpmh_active_request` / `qcom_rpmh_finish` /
+  `qcom_rsc_layout` / `QcomRpmhResource`）——**本地 `work/ref-sheng/package/` 里就有**（`UniXNU/UniXNU-sheng`），
+  也可以从上游 `kits/Sm7675Platform/remoteproc/` 取；我们的 `sm7675` 层（`UniXNU-sm7675-common@e5c8d35`）里没有。
+- `routeWcd()` 需要 GENI I2C 引擎（`package/GeniI2c.c` 已随 §105 导入）与背光的 SE0 串行（`uke_backlight_with_wcd_bus`）。
+  第一版可以先**跳过 WCD**（固件已把 WCD 路由到 USB，我们不碰它），不枚举再加。
+
+接线：在 `package/qcom-usb-debug/kernel/QcomXnuUsbDebug.c` 的 core 初始化之前调用这段板级初始化，
+把失败码写进 `native.status.error`/`qcom_result`，面板 `QCOMUSB PH=… E=…` 会直接显示停在哪一段。
