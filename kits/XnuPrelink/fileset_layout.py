@@ -227,6 +227,13 @@ class Layout:
                            f'so the kernel exceeds it by {segment["size"] - (home[1] - home[0]):#x}')
         else:
             report += f'; {name} mapping {root["va"]:#x}..{limit:#x} has no free range at all'
+        # What the space would have to come from. Without this the next step of a failed round is a
+        # rebuild to learn which sections are big, which is another 45 minutes.
+        sections = sorted((section for section in self.native.sections if section['segment'] == name),
+                          key=lambda section: -section['size'])[:10]
+        if sections:
+            report += f'; largest native {name} sections: ' + ', '.join(
+                f'{section["name"]} {section["size"]:#x}' for section in sections)
         return report
 
     def validate(self):

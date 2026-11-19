@@ -5882,3 +5882,49 @@ prelink 打成 stub），其中 `native_address` 是**上一版内核**的地址
 
 prelink 通过就进 payload 阶段（`[payload] root_policies` → `kernel.macho.vroot`）。刷机前要验：
 `native-ufs-root=1` 在 payload 里、`root-policies.bin` 约 1.7 KB（不是 108 MiB）、`kernel.macho.vroot` 存在。
+
+## §99 b284：prelink 的 reviewed anchor 已解决，新卡点是 **native `__DATA` 比 Apple 留的位置大 0x1c000**
+
+b284 的 prelink 走到了 `place_kernel()`，我加的 resolver 生效（日志里两行）：
+
+```
+reviewed _kalloc_type_impl: recorded address 0xfffffff007364b28 is stale in this build, resolved to 0xfffffff007559394
+reviewed _kfree_type_var_impl: recorded address 0xfffffff007365020 is stale in this build, resolved to 0xfffffff007ae7568
+reviewed anchors: 2
+...
+ValueError: Native __DATA overlaps a retained segment: placed 0xfffffff00c884000..0xfffffff00cb24000,
+needs 0x2a0000 bytes; __DATA mapping … free: 0xfffffff00c884000..0xfffffff00cb08000 (0x284000), …;
+the range the placement landed in holds 0x284000 bytes, so the kernel exceeds it by 0x1c000
+```
+
+### 99.1 数字从哪来（本地用 kit 的 `kc_image.py` 直接算，不用再跑 CI）
+
+拿本地 `out/ipsw/26C5035r/kernelcache.decompressed` 解析：
+
+| 项 | 值 |
+|---|---|
+| `__DATA` mapping | `0xfffffe000c884000..0xfffffe000cd40000`（0x4bc000 = 4.96 MiB，运行时地址加 slide 0x1f000000000）|
+| Apple 自己 `com.apple.kernel` 的 `__DATA` | **0x1a8000**（`__common` 0xb3cc0、`__bss` 0xaef88、`__data` 0x20c51、`__lock_grp` 0x17f18、`__percpu` 0x8730）|
+| 我们重建的内核需要 | **0x2a0000** → 比 Apple 多 **1.09 MiB** |
+| 我们 closure（31 个 root）之后的第一块连续空闲 | `0xc884000..0xcb08000` = **0x284000** |
+| 挡住它的东西 | `com.apple.kec.Libm` 的 `__DATA`，只有 **0xdc 字节**（0xcb08000..0xcb080dc）|
+
+也就是说：只差 0x1c000（112 KiB），而挡路的是一块 220 字节的 kext 数据。要凑够连续空间就得同时去掉
+Libm / AppleARMPlatform / AppleARMWatchdogTimer / AppleAudioClockLibs —— 全是平台关键 kext，不能动。
+
+### 99.2 为什么不能靠"挪位置"解决
+
+`fileset_layout.py` 把 native `__DATA` 钉在 `roots['__DATA']['va']`（上游也一样），`__DATA` mapping
+里的空闲被 retained kext 切成 20 多段，最大的就是那 0x284000。上游最新版只是为 `__TEXT` 加了
+`span()/used()/room()`（16 KiB padding 那一类问题），没给 `__DATA` 留任何挪位机制。
+
+（`__KLDDATA`/`__BOOTDATA` 是唯一"可以自建 root 映射"的先例——它们被 `allocate()` 放到 collection 之外，
+但把 native `__DATA` 塞进去要先确认这两个 segment 的映射权限是读写，风险更高，暂时不动。）
+
+### 99.3 这一轮先让失败自己说话
+
+`overlap_report()` 现在会额外打印 **native `__DATA` 里最大的 10 个 section 及大小**，所以下一次同款失败
+直接告诉我们 112 KiB 该从哪儿省，不用再猜（这也是 `overlap_report` 当初加的理由——它就是上一轮
+省掉一轮的东西）。已 diff：我们的内核 `__DATA` 比 Apple 多 1.09 MiB，而 development 配置、我们自己的
+in-kernel 驱动（ArmCpu `gSpiRoutes[1024]`=8 KiB、ShengUfs、UFS 日志、USB debug、BootProgress 探针…）
+加起来也解释不了 1 MiB，所以先要证据。
