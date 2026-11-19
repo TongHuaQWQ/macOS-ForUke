@@ -6137,3 +6137,37 @@ window bytes: 33554432   non-zero bytes: 517        ← 这次内核一个字节
 
 `read-uke-log.py` 之前只认 `adb devices` 里状态为 `device` 的行，而 TWRP 报的是 `recovery`，
 于是拒读；现在两种状态都接受（`work/analysis/read-uke-log.py:329`）。
+
+## §104 二维码面板解出来了：面板一次只带 **~380 字节日志尾部**，而且里面**没有 panic 文本**
+
+用户把面板按时间顺序拍成了 20 张截图，我装了 `zxing-cpp`（venv，不动系统 python）直接解二维码：
+
+```
+session=0x554b4531 ('1EKU')  blocks=8  blen=60  plen=479  psum=…
+payload 片段:
+  … 00000400 FAR=7c1bbca3 CB=0 GW=0 G=0 EV=0 TR=3 LT=8 P=16129
+  QCOMUSB PH=19 E=0 CR=0 S=0 ER=0 LS=0 FSR=00000400 FAR=7c1bbca3 …
+  uukkee--hheeaarrttbbeeaatt  3333      ← "uke-heartbeat 33"（字符被写了两遍）
+```
+
+对应固件源码 `workspace/UniXNU/package/UniXNUPkg/Driver/AdvancedLogDxe/AdvancedLogDxe.c`：
+
+- 帧是 **OneSend v2**：`'O','S',2,0` + session(4) + seq(4) + blockCount(4) + blockLen(2) + 0(2) + payloadLen(4)
+  + payloadCrc(4) + 块数据 + 帧 CRC（`BuildFrame`，第 265-296 行）；`Page = (Page+1) % PageCount` 自动轮播。
+- payload 是 `BuildEnvelope()` 包出来的 **text/plain 文件信封**（文件名 `uke-YYYYMMDD-HHMMSS.log`）+ 日志正文，
+  而 `CollectLog()` 只拿 `AdvancedLoggerAccessLibGetNextFormattedLine()` 能给出的部分。
+- 这次 `PayloadLen = 479`、`blocks=8`、`blen=60`（注意：源码里 `ONESEND_BLOCK_LENGTH` 是 720，说明面板是另一版常量）
+  ⇒ **面板一次只导出约 380 字节正文**，也就是"最后几行"。所以拿它当完整日志用是不现实的。
+
+**而且尾部没有 panic 文本**：最后是心跳（33/35/36）和 `QCOMUSB PH=19 E=0 …`（pram 里的相位行）。
+心跳还在涨、`P=` 每轮 +512（日志还在增长）——这次更像是**跑着跑着挂住、被硬件看门狗复位**，
+而不是 b286 那种 `panic()`。这与 b286 照片里 `_machine_idle` 的"CPU stuck" 报点也吻合。
+
+两个可以顺手改进的地方（下一轮）：
+
+1. `uukkee--hheeaarrttbbeeaatt` 这种**每个字符写两遍**说明 AL 镜像那条路径（`package/UkeAdvLogger.c`）
+   把字节重复写进了固件缓冲；虽然不影响阅读（去掉重复即可），但值得查一遍。
+2. 真正要解决的是 §103 那条：**panic/挂住之前的日志要有持久通道**。最省事的一条：
+   内核每 N 毫秒把 msgbuf 的**最后 ~200 字节**镜像到固件已经会打印的 pram 槽
+   （`UkeUsbLogDxe.c:1564`：`+0x37F000` 的 `QCOMUSB … LAST=` 行就是面板会显示的），
+   这样挂住时面板上直接能看到最后一行，不必依赖二维码。
