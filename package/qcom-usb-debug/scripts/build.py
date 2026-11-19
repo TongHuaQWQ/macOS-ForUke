@@ -13,7 +13,11 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 UNITS = ('kernel/QcomXnuUsbDebug.c', 'kernel/QcomUsbScreenshot.c',
          'usb/Dwc3.c', 'soc/QcomUsbQualify.c',
-         'soc/QcomUsbDmaDomain.c', 'soc/QcomUsbPhy.c')
+         'soc/QcomUsbDmaDomain.c', 'soc/QcomUsbPhy.c',
+         # The board half of USB2 device mode (rails/RSC, GCC core power and clocks, TCSR USB2 clkref,
+         # controller reset, PMIC repeater) and the RPMh/cmd-db helpers it votes through. Ported from the
+         # same-device upstream's package/UkeUsbBoard.cpp; see soc/QcomUsbBoardInit.h for the resources.
+         'kernel/QcomUsbBoardInit.c', 'soc/QcomRpmh.c')
 
 
 def compile_flags(record):

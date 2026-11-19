@@ -6320,3 +6320,20 @@ diversity 由方法名+签名散列而来 ⇒ 27.3 的私有虚函数布局与 2
 接线完成后一轮 CI 的判读顺序：
 `QCOMUSB PH=… E=…` → `[usb] uke rails rsc=00030200 complete=1` → `[usb] uke TCSR clkref before=… after=…(bit0=1)`
 → `[usb] uke BCR assert=1 release=1 clocks=1` → `[usb] uke board init ok` → 然后才是枚举。
+
+### 107.2 接线完成（本轮）
+
+| 改动 | 内容 |
+|---|---|
+| `package/qcom-usb-debug/kernel/QcomUsbBoardInit.c` | 五段（rails/RSC 3.2 + GDSC/GCC + TCSR clkref + XDCI reset + PMIC repeater）按 `QcomXnuUsbDebug.c` 同样的内核单元风格落地（`ml_io_map` / `IODelay` / `IOSleep` / `printf`），入口 `qcom_usb_board_init()` |
+| `package/qcom-usb-debug/soc/QcomRpmh.c` | RPMh/cmd-db 辅助，**freestanding**（只 include `<stdint.h>`/`<stddef.h>`），已进宿主编译检查 |
+| `scripts/build.py` + `scripts/build-qcom-usb-debug.py` + `check-component.sh` | 两处 UNITS 同步；`QcomRpmh.c` 进"freestanding compiles"列表，`QcomUsbBoardInit.c` 属内核单元（与 `QcomXnuUsbDebug.c` 同类，不进该列表）|
+| `kernel/QcomXnuUsbDebug.c` | 在 `QcomUsbInspectInherited()` **之前**调用 `qcom_usb_board_init()`；失败时打印 `QCOMUSB BOARD stage=-N`、用新增的 `QCOM_USB_DEBUG_BOARD_INIT_FAILED` 记 `native.status.error` 并置 `phase=FAILED`（不掩盖，也不静默继续）|
+| `include/QcomXnuUsbDebug.h` | 新增拒绝码 `QCOM_USB_DEBUG_BOARD_INIT_FAILED` |
+
+`cmd-db` 的 128 KiB 快照**改成原地读**（uncached MMIO 直读）：这台机器的 `__DATA` 只剩 0x4000 余量，
+既不能放静态缓冲，也不该在启动路径上申请 128 KiB 堆内存。
+
+**本地验证**：`check-component.sh`（含 34 项 sanitised suite）全通过；`QcomUsbBoardInit.c` 另用
+gcc/clang `-Wall -Wextra -Werror -fsyntax-only`（kernel 头文件用最小桩）单独编过；核心契约检查通过；
+`kernel_args` 54 条 / 992 B。

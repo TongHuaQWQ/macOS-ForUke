@@ -10,6 +10,7 @@
 #include "../soc/QcomUsbQualify.h"
 #include "../soc/QcomUsbDmaDomain.h"
 #include "../soc/QcomUsbPhy.h"
+#include "QcomUsbBoardInit.h"
 #include "QcomUsbQr.h"
 #include <machine/machine_routines.h>
 #include <kern/cpu_number.h>
@@ -1603,6 +1604,20 @@ int qcom_usb_debug_init(void)
     native.phy_va = ml_io_map((vm_offset_t)QUD_EUSB2_PHY_BASE, QUD_EUSB2_PHY_MAPPED);
     if (!native.gcc_va || !native.usb_va || !native.smmu_va) {
         fail(QCOM_USB_DEBUG_MAP_FAILED, 0); goto out;
+    }
+    /* The board half, in the order the same-device upstream runs it: rails through the apps RSC (which
+     * must report RSC 3.2), the USB core's GDSC and link clocks, the TCSR USB2 reference clock, the
+     * controller reset, then the PMIC repeater. Without these the controller is programmed but the link
+     * is not real, which reads as "PH=19, no events" on the panel (STATE 92). A failure is recorded and
+     * the previous path still runs, so the two are comparable across rounds. */
+    if (usb_diag_enabled) {
+        const int board = qcom_usb_board_init();
+        if (board != 0) {
+            printf("QCOMUSB BOARD stage=%d\n", -board);
+            fail(QCOM_USB_DEBUG_BOARD_INIT_FAILED, board);
+            native.status.phase = QCOM_USB_DEBUG_FAILED;
+            goto out;
+        }
     }
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_INSPECT);
     result = QcomUsbInspectInherited(physical_read, 0, &inherited);

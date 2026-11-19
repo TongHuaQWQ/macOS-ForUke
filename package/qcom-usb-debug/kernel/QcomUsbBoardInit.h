@@ -27,4 +27,12 @@
  */
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int qcom_usb_board_init(void);
+
+#ifdef __cplusplus
+}
+#endif

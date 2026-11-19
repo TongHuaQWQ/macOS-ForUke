@@ -39,7 +39,10 @@ enum qcom_usb_debug_error {
     QCOM_USB_DEBUG_DOMAIN_STATE_INVALID,
     QCOM_USB_DEBUG_ACQUIRE_REFUSED,
     QCOM_USB_DEBUG_PHY_LEASE_FAILED,
-    QCOM_USB_DEBUG_PHY_PROGRAM_FAILED
+    QCOM_USB_DEBUG_PHY_PROGRAM_FAILED,
+    /* The board half of device mode stopped: rails/RSC, core power, the USB2 reference clock, the
+     * controller reset or the PMIC repeater. The negative stage number is the reason (device_phase). */
+    QCOM_USB_DEBUG_BOARD_INIT_FAILED
 };
 
 /* Opt-in preparing-panic delay is 100 + 2*checkpoint seconds. */

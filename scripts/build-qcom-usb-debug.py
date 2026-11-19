@@ -105,7 +105,8 @@ def relaxed_record(source, target):
 
 
 UNITS = ('kernel/QcomXnuUsbDebug.c', 'kernel/QcomUsbScreenshot.c',
-         'usb/Dwc3.c', 'soc/QcomUsbQualify.c', 'soc/QcomUsbDmaDomain.c')
+         'usb/Dwc3.c', 'soc/QcomUsbQualify.c', 'soc/QcomUsbDmaDomain.c',
+         'soc/QcomUsbPhy.c', 'kernel/QcomUsbBoardInit.c', 'soc/QcomRpmh.c')
 
 # Board sizing that has to reach both the preflight and the component's own compile line, so it goes
 # into the compile record they share rather than into one of the two.
