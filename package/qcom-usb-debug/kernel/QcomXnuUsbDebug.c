@@ -1615,7 +1615,6 @@ int qcom_usb_debug_init(void)
         if (board != 0) {
             printf("QCOMUSB BOARD stage=%d\n", -board);
             fail(QCOM_USB_DEBUG_BOARD_INIT_FAILED, board);
-            native.status.phase = QCOM_USB_DEBUG_FAILED;
             goto out;
         }
     }

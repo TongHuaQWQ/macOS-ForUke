@@ -23,6 +23,11 @@
 #include <pexpert/pexpert.h>
 #include <machine/machine_routines.h>
 
+/* IODelay/IOSleep are IOKit entry points; this component's kernel units do not include IOKit headers
+ * (kernel/QcomXnuUsbDebug.c declares IOLog the same way). */
+extern void IODelay(unsigned int microseconds);
+extern void IOSleep(unsigned int milliseconds);
+
 #include "../BootResetCore.h"
 #include "../soc/QcomRpmh.h"
 #include "QcomUsbBoardInit.h"
