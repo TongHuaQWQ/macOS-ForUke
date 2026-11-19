@@ -6292,3 +6292,31 @@ diversity 由方法名+签名散列而来 ⇒ 27.3 的私有虚函数布局与 2
 
 接线：在 `package/qcom-usb-debug/kernel/QcomXnuUsbDebug.c` 的 core 初始化之前调用这段板级初始化，
 把失败码写进 `native.status.error`/`qcom_result`，面板 `QCOMUSB PH=… E=…` 会直接显示停在哪一段。
+
+## §107 板级五段已落地成源码（`soc/QcomUsbBoardInit.{cpp,h}`），还差 3 处接线
+
+新增（值、顺序、失败码全部照 `Allenwdk/UniXNU-uke@55909f4` 的 `package/UkeUsbBoard.cpp`，逐段注明来源）：
+
+| 文件 | 内容 |
+|---|---|
+| `package/qcom-usb-debug/soc/QcomUsbBoardInit.cpp` | `refClock()`（TCSR `0x01ff1118` MMIO）／`voteRails()`（cmd-db `0x81c60000` + RSC `0x17a20000`，RSC 必须 major 3；ldob2 880 / ldob4 1200 / ldob7 1800 / ldob17 3075 + xo.lvl + SN2 60 MB/s）／`resetController()`（link clock 门控 + BCR assert/release + 时钟恢复）／`repeater()`（PMIC arbiter `0xc400000`，SID7 `0xfd00`，OEM device/host 调参表）／入口 `qcom_usb_board_init()`，失败码 `-1/-2/-3/-4/-6` 与上游一致 |
+| `package/qcom-usb-debug/soc/QcomUsbBoardInit.h` | 资源表（MMIO 窗口、寄存器、SID、RSC 版本要求、失败码含义）与"为什么不用 SCM/SPMI/显示"的说明 |
+| `package/QcomRpmh.{c,h}` | 从 `UniXNU/UniXNU-sheng` package 取（`qcom_cmd_db_find` / `qcom_rsc_layout` / `qcom_rpmh_active_request` / `qcom_rpmh_finish`）|
+
+**没做 WCD 路由**（第一版）：`routeWcd()` 要走 GENI QUP0 SE0，而 SE0 与 KTZ8866 背光共用、必须由背光的
+工作循环串行执行（上游为此加了 `uke_backlight_with_wcd_bus` 和 `AppleARMBacklight.cpp` 的 60 行）。
+固件已经把 TypeC 开关放在 USB 位，我们不碰它；不枚举再加。
+
+### 107.1 还差三处接线（下一轮直接做，别再找）
+
+1. `scripts/build-qcom-usb-debug.py`：`UNITS` 里加 `'soc/QcomUsbBoardInit.cpp'`（C++，需用 cpo 记录或
+   `-x c++`）与 `'QcomRpmh.c'`；`preflight()` 的 `-x c` 要按后缀区分语言，否则 C++ 单元会报一堆 C 错。
+2. `package/qcom-usb-debug/kernel/QcomXnuUsbDebug.c`：在 DWC3 core 初始化**之前**调用
+   `qcom_usb_board_init()`，把返回值写进 `native.status.error`（面板 `QCOMUSB … E=` 就会显示停在哪段），
+   失败时仍继续走原有 acquire 流程（保留旧行为，便于对照）。
+3. `bash package/qcom-usb-debug/scripts/check-component.sh --fast`（AGENTS.md 要求每次推送前跑）——
+   它用宿主 clang/gcc 编每个 freestanding 单元；C++ 单元若编不过会在这里几十秒暴露，而不是 40 分钟的 CI。
+
+接线完成后一轮 CI 的判读顺序：
+`QCOMUSB PH=… E=…` → `[usb] uke rails rsc=00030200 complete=1` → `[usb] uke TCSR clkref before=… after=…(bit0=1)`
+→ `[usb] uke BCR assert=1 release=1 clocks=1` → `[usb] uke board init ok` → 然后才是枚举。
