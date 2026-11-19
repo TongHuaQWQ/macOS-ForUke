@@ -6098,3 +6098,42 @@ kernel-ctrr-to-be-enabled  .. 04 00 00 00 | 00 00 00 00     ← 长度 4，值 0
 AMFI 那一串 `Failed to open prelink data (1)` / `Failed to find entry /chosen/secure-boot-hashes` /
 `No Trust Cache found` 是**预期**：payload 没有 `--trust-cache`，ADT 也没有 secure-boot-hashes，
 而 `amfi_get_out_of_my_way=1` 就是为这个状态准备的。SMC 的 `AppleSMC` 读噪声同理。
+
+## §103 b287 真机：CTRR 修好了，内核跑到 BSD 后期；但**panic 前的日志没有持久通道**
+
+### 103.1 这一轮跑到哪（照片可读的部分）
+
+- `_unsafe_kernel_text_initialized` 的 assert **不再出现** → `/chosen/kernel-ctrr-to-be-enabled` 生效。
+- 依次看到：AMFI / Sandbox / Segment / Quarantine 四个策略 `loaded`，`kalloc_type`/zone 初始化，
+  `NIC Framework successfully initialized`（16384 buffer headers / 10240 cluster IO），
+  `registered CoreAnalyticsHub functions with nm:`，`USB: probe thread running`，
+  以及 21:55 那一屏的 `ARPT: … wl0: …`、`en0:`、`AppleUSBHostController … root hub` ——
+  **已经是 BSD 后期（网络/USB 栈在起）**，不再是最早期。
+- 随后 panic，固件切到二维码导出面板（19 块轮播，`LEW 479` 那行是面板自己的编码）。
+
+### 103.2 教训：panic 前的内核日志**没有**持久通道
+
+TWRP 起来后用 `work/analysis/read-uke-log.py --fetch` 拉 userdata 尾部 32 MiB（8192 块）：
+
+```
+window bytes: 33554432   non-zero bytes: 517        ← 这次内核一个字节都没写
+```
+
+原因不是配置：这一轮日志本该由 `UkeLastLog.c` 写进窗口，而它调用的 `native_ufs_log_open/write/sync`
+现在**由 source 驱动强定义**（`libShengUfs.a`），我们那个 freestanding 早期传输（`libUkeUfsLog.a`）是
+**弱定义**——强符号赢，于是早期传输彻底失效；而 source 驱动的日志要等 `native_source_storage_start()`
+（根窗口发布之后）才能开。结果：**panic 在存储运行时起来之前，日志只能进固件的 AL 缓冲（DRAM），
+掉电即失**，可读性完全依赖二维码/面板照片。
+
+`oops` 分区（16 MiB）里是小米自己的 Android kmsg（`## REASON: Restart`、`LOG TYPE:LAST KMSG`），
+与我们无关；这台设备也没有 `pram` 分区，`uke_panic_publish()` 写的 DT pram 区域在冷启动后同样丢失。
+
+**结论（下一轮要解决的"可观测性"问题）**：要么给早期日志一条自己的持久通道（例如让 freestanding
+传输在 source 驱动接管前先跑、接管后让位，代价是两者都碰 SMMU stream 0x60），要么让固件在 panic 时
+把 AL 缓冲落到一个分区（`misc`/`oops`）。在解决之前，每轮的日志只能靠面板/二维码，这正是 §88 那套
+二维码面板存在的理由。
+
+### 103.3 顺带修的小事
+
+`read-uke-log.py` 之前只认 `adb devices` 里状态为 `device` 的行，而 TWRP 报的是 `recovery`，
+于是拒读；现在两种状态都接受（`work/analysis/read-uke-log.py:329`）。
