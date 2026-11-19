@@ -478,6 +478,17 @@ roots = [
   "com.apple.security.sandbox",
   "com.apple.iokit.IOHIDFamily",
   "com.apple.iokit.IOHIDEventDriver",
+  "com.apple.iokit.IOUSBDeviceFamily",
+  "com.apple.driver.AppleUSBXDCI",
+  "com.apple.driver.AppleUSBDeviceMux",
+  "com.apple.iokit.IOUSBHostFamily",
+  "com.apple.driver.usb.AppleUSBXHCI",
+  "com.apple.driver.usb.AppleUSBHub",
+  "com.apple.driver.usb.AppleUSBHostCompositeDevice",
+  "com.apple.driver.usb.IOUSBHostHIDDevice",
+  "com.apple.iokit.IOUSBMassStorageDriver",
+  "com.apple.iokit.IOSCSIArchitectureModelFamily",
+  "com.apple.iokit.IOSCSIBlockCommandsDevice",
 ]
 
 [firmware]
@@ -839,6 +850,10 @@ kernel_args = [
   "sheng-pmgr=2",
   "sheng-lite=1",
   "sheng-aks=1",
+  # The KeyStore implementation answers 0 by default while Apple's pairing check wants the
+  # no-passcode state, which is 3 (Allenwdk/UniXNU-uke carries the same argument, added when the
+  # lockdown session was being chased; docs/USB2-20261115.md records why).
+  "sheng-aks-sls=3",
   # Documented diagnostic switch (unixnu.com/zh/xnu/boot-arguments): the security stage was the next
   # suspect after the nonce slot reads all failed, and this is the supported way to boot past it and see
   # what the next stage does. sheng-disable-watchdogd is dropped to stay inside the 1000-byte command line.

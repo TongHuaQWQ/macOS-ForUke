@@ -6171,3 +6171,42 @@ payload 片段:
    内核每 N 毫秒把 msgbuf 的**最后 ~200 字节**镜像到固件已经会打印的 pram 槽
    （`UkeUsbLogDxe.c:1564`：`+0x37F000` 的 `QCOMUSB … LAST=` 行就是面板会显示的），
    这样挂住时面板上直接能看到最后一行，不必依赖二维码。
+
+## §105 转向上游的 USB 路线（B 方案）：文件已就位，还差构建脚本与 XDCI ABI 表
+
+用户决定"上游一致、拿来、直接开 USB 调试"。`Allenwdk/UniXNU-uke` 自 `215a788` 已推进到 `55909f4`
+（新 23 个提交，11 个 USB），其 `docs/USB2-20261115.md` 记录了**这台机器第一次 USB2 设备模式枚举成功**：
+主机在 `usb3-1` 枚举到 `05ac:12ab`（Apple iPad），sysfs 读回 `speed=480 / bConfigurationValue=1 / authorized=1`
+（2026-11-15 22:51:37）。之后他们卡在 Mux 短包与 lockdown 62018 SYN 无响应。
+
+### 105.1 已落地（本轮）
+
+| 项 | 内容 |
+|---|---|
+| `package/UkeUsbBoard.{cpp,h}` | 1972 + 36 行，**逐字节原样**（板级 USB2 初始化：RSC 3.2 投票 → 核心 GDSC → GCC 时钟 → TCSR clkref MMIO `0x01ff1118` → XDCI reset 槽 275 → PMIC repeater（PMIC arbiter `0xc400000`）→ WCD939x 路由 → eUSB2 PHY）|
+| `package/GeniI2c.{c,h}` | GENI I2C 引擎（WCD 走 QUP0 SE0，须与背光串行）|
+| `package/UsbProbe.cpp`、`UkeQmpUsb3.h`、`UkeQmpDp.h`、`UkeDpDpu.h`、`UkeDpLinkPolicy.h`、`UkeDpVideoMode.h` | 依赖链原样带入（`UkeUsbBoard.cpp` include 了它们）|
+| `docs/USB2-20261115.md` | 他们的验收记录原文（含四个 fix 的证据）|
+| `feeds.toml` | 新增 `QcomDwc3 = Allenwdk/QcomDwc3@4825d1f9`（含 `QcomDwc3.cpp` 99 KB、`QcomEusb2Phy.h`、`QcomQmpUsb3.h`、`QcomUcsi.h`）|
+| `board.toml` prelink closure | **+11 个 USB kext**（`IOUSBDeviceFamily`、`AppleUSBXDCI`、`AppleUSBDeviceMux`、`IOUSBHostFamily`、`AppleUSBXHCI`、`AppleUSBHub`、`AppleUSBHostCompositeDevice`、`IOUSBHostHIDDevice`、`IOUSBMassStorageDriver`、`IOSCSIArchitectureModelFamily`、`IOSCSIBlockCommandsDevice`）→ 42 roots |
+| `kernel_args` | +`sheng-aks-sls=3`（配对/KeyStore 前置）→ 54 条 / **992 B**（上限 1000）|
+
+**已验证**：42 个 root 里只有 `com.apple.iokit.IOHIDEventDriver` 不在 26C5035r 的 kernelcache 中（本来就在，与我们无关）；
+加入 USB 栈后 prelink 的首个连续空闲仍是 `0x284000`（挡路 `com.apple.kec.Libm`），native `__DATA` 0x280000 **仍能放下**，余量 0x4000。
+
+顺带查明：`QcomRpmh`（RSC/cmd-db 辅助）**不需要单独搬** —— 它来自 SoC 层
+`kits/Sm7675Platform/remoteproc/QcomRpmh.{c,h}`，我们的 `sm7675` feed 已经带进来。
+
+### 105.2 还差的两件（下一轮）
+
+1. **构建脚本**：他们的 USB 栈编译在 `scripts/build-native-legacy-display-27.py` 里（我们没启用 legacy
+   display），需要写一个 `scripts/build-uke-usb-stack.py`，照抄那一段的编译参数与 vtable 校验
+   （`QcomDwc3.cpp` 的 XDCI/XHCI vtable 槽必须与原始 AppleUSBXDCI/AppleUSBXHCI 对上），产出归档并
+   force-load。
+2. **XDCI ABI 表**：他们的 `scripts/usb-xdci-24A446.json` / `usb-xhci-24A446.json` 是从 **24A446**
+   kernelcache 导出的（vtable VA + 每槽 PAC diversity + methods + macros）。我们跑的是 **26C5035r**，
+   必须用同一个方法从我们的 cache 重新导出等价表（`kc_image.py` 的 chained fixups 能直接读
+   `fix[slot_addr]` = (target, diversity)，`build-software-aes-27.py` 就是这么读 AES vtable 的）。
+
+在这两件完成之前不要把 `qcom-usb-debug` 关掉：两套驱动都会抢 DWC3，等新栈跑通后再把
+`qcom-usb-debug=0`、只留 `usb=1`。

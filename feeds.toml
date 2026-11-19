@@ -45,6 +45,17 @@ kind = "driver"
 git = "https://github.com/Allenwdk/AdrenoMetal.git"
 commit = "75e182072332863bd65df9806b446668057ac75d"
 
+# USB device mode, the way the same-device upstream runs it: the Qualcomm subclass of the original
+# AppleUSBXDCI in this fileset. Allenwdk/UniXNU-uke pins the same commit and drives it with the board
+# initialisation in package/UkeUsbBoard.cpp (rails/RSC 3.2, core GDSC, TCSR USB2 clkref, XDCI reset slot,
+# PMIC repeater, WCD939x routing). Its 2026-11-15 record (docs/USB2-20261115.md) is the first time this
+# board enumerated in device mode at all: host saw 05ac:12ab, speed 480, bConfigurationValue 1.
+[[source]]
+name = "QcomDwc3"
+kind = "driver"
+git = "https://github.com/Allenwdk/QcomDwc3.git"
+commit = "4825d1f98b98abdea12bdd26b0b632467a3a67dd"
+
 [[source]]
 name = "ShengUfs"
 kind = "driver"
