@@ -5975,3 +5975,64 @@ largest native __DATA sections: __bss 0x196078, __common 0xbfa48, __data 0x2d180
 `__bss` 增长 0x2d000 里，`gScratch`(0x20000) + `entries`(0x4000) = 0x24000 已解释，剩下 0x9000（36 KiB）是
 其它新增全局（ArmCpu 的 `gSpiRoutes[1024]` 8 KiB、`gCore[8]`、storage runtime 的若干静态）。等 prelink 真过了、
 或者下一轮又被空间卡住，再动它——现在有 16 KiB 余量。
+
+## §101 b286：**CI 绿了** —— 内核链接 + prelink 都过，镜像已出（等设备进 fastboot）
+
+### 101.1 这一轮的成果
+
+```
+CI success                                          21:19
+kernel.macho (prelinked collection) 139,952,128 B   sha256 fe312f0313a0560963d193378011a0e365a76c98b4f90b6373f9703be1c57f0e
+native/native.macho                  46 MB          ← artifact 里连 native 一起传了
+```
+
+`__DATA` 的预测被实测证实（artifact 里的 `native/native.macho`）：
+
+| | native `__DATA` | 说明 |
+|---|---|---|
+| b285（未改） | **0x2a0000** | 超 0x1c000 |
+| b286（`gScratch` 128 KiB→16 KiB + 复用 `entries`）| **0x280000** | ≤ 0x284000，**余量 0x4000** |
+| 其中 `__bss` | 0x196078 → **0x176078** | −0x20000，正好是收回的 128 KiB |
+
+### 101.2 本地 payload：`root-policies.bin` 的来历
+
+CI 只上传 kernel（不含 `build/sheng-source-storage/root-policies.bin`），而 payload 是本机用下载的 kernel 组的，
+所以 `payload.py` 报 `Root-policy bundle missing or outside handoff bounds`。处理：
+
+`scripts/assemble-root-policy-bundle.py`（新）+ `tools/build-payload-linux.sh` 里缺文件时自动调用。它复刻
+`build-sheng-source-storage.py` 最后那几行的**布局**，并且逐项校验后才写：
+
+- 每份 `manifest.header.bin` 必须是 544 字节；
+- `header[56:88]` 必须等于 `[root] <window>_image_sha256`；
+- 三份 `trusted-key.bin` 必须逐字节相同（一个 owner anchor）；
+- `verification.json` 必须记录完整校验（`real_c_signature_and_block_verification`）。
+
+产出 1712 字节 = 32 头 + 3×16 表项 + 3×544 头，`header[24:32]` = 1712（`payload.py:155-158` 就是查这个）。
+
+### 101.3 刷机前的验收（全部已在本机核对）
+
+| 检查 | 结果 |
+|---|---|
+| payload 里有 `kernel.macho.vroot` | ✅ 1712 B |
+| vroot 与 bundle 字节相同 | ✅ `897b5f1442cb5427…` |
+| kernel args | ✅ `native-ufs-root=1`、`pmgr=2`、`sheng-log=1` |
+| `boot-round-b286.img` | 1,564,672 B（只有 UEFI）|
+| `vendor_boot_round-b286.img` | 85,782,528 B ≤ 96 MiB 分区 |
+| kernel lzma in payload | 23,955,626 B（139.95 MB collection 压到 24 MB）|
+
+设备现在是关机/未连接状态（`fastboot devices` 为空），刷机命令：
+
+```bash
+SER=62427178
+fastboot -s $SER flash boot_a        work/flash/boot-round-b286.img
+fastboot -s $SER flash vendor_boot_a work/flash/vendor_boot_round-b286.img
+fastboot -s $SER reboot
+```
+
+### 101.4 下一轮看到的期望/风险
+
+- 存储运行时**第一次真正进内核**（`SourceStorage.o`、`NativeUfs.late.o`、`SourceRootBinding.o` 都在归档里），
+  `kernel.macho.vroot` 也在 payload 里，所以这一轮是"用 26C5035r 签名策略挂根卷"的第一次真机尝试。
+- 日志通道：`sheng-log=1` + `uke-log-first/last` → userdata 尾 32 MiB，`work/analysis/read-uke-log.py` 可读；
+  固件 AL 缓冲在 `0xB112E000`，QR 导出仍然可用。
+- 已知未解释项不变：固件 ASSERT（`ArmCpuDxe CpuExceptionHandlerLib.c(438)`）。
