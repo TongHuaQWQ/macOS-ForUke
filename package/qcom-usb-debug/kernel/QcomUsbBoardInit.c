@@ -23,10 +23,34 @@
 #include <pexpert/pexpert.h>
 #include <machine/machine_routines.h>
 
-/* IODelay/IOSleep are IOKit entry points; this component's kernel units do not include IOKit headers
- * (kernel/QcomXnuUsbDebug.c declares IOLog the same way). */
-extern void IODelay(unsigned int microseconds);
-extern void IOSleep(unsigned int milliseconds);
+/* This component's units import only the kernel symbols build.py allows (IOLog is on that list; IODelay,
+ * IOSleep and printf are not). Both helpers are therefore the same two the existing kernel unit uses: IOLog
+ * for output, and a CNTVCT_EL0 busy wait for delay. */
+extern void IOLog(const char *format, ...);
+
+static uint64_t board_counter(void) {
+  uint64_t value;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(value));
+  return value;
+}
+
+static uint64_t board_frequency(void) {
+  static uint64_t frequency;
+  if (!frequency) {
+    uint64_t hz;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(hz));
+    frequency = hz ? hz : 24000000;
+  }
+  return frequency;
+}
+
+static void board_delay_us(uint64_t microseconds) {
+  const uint64_t ticks = board_frequency() / 1000000ull * microseconds;
+  const uint64_t start = board_counter();
+  while (board_counter() - start < ticks) __asm__ volatile("yield" ::: "memory");
+}
+
+static void board_sleep_ms(unsigned milliseconds) { board_delay_us(milliseconds * 1000ull); }
 
 #include "../BootResetCore.h"
 #include "../soc/QcomRpmh.h"
@@ -66,7 +90,7 @@ static void upd(const struct regs *r, unsigned offset, uint32_t mask, uint32_t v
 static int wait_for(const struct regs *r, unsigned offset, uint32_t mask, uint32_t value, unsigned count) {
   for (unsigned i = 0; i < count; ++i) {
     if ((rd(r, offset) & mask) == value) return 1;
-    IODelay(10);
+    board_delay_us(10);
   }
   return 0;
 }
@@ -94,16 +118,16 @@ static int refClock(void) {
   struct regs tcsr;
   if (pa != 0x01ff1118ull) return 0; /* the static_assert of the upstream source, in C */
   if (!regs_map(&tcsr, page, 0x1000)) {
-    printf("[usb] uke TCSR clkref pa=%08x map failed\n", (uint32_t)pa);
+    IOLog("[usb] uke TCSR clkref pa=%08x map failed\n", (uint32_t)pa);
     return 0;
   }
   uint32_t before = rd(&tcsr, reg);
   if (!(before & enable)) {
     wr(&tcsr, reg, before | enable);
-    IODelay(10); /* BRANCH_HALT_DELAY */
+    board_delay_us(10); /* BRANCH_HALT_DELAY */
   }
   uint32_t after = rd(&tcsr, reg);
-  printf("[usb] uke TCSR clkref pa=%08x before=%08x after=%08x\n", (uint32_t)pa, before, after);
+  IOLog("[usb] uke TCSR clkref pa=%08x before=%08x after=%08x\n", (uint32_t)pa, before, after);
   return (after & enable) != 0;
 }
 
@@ -134,7 +158,7 @@ static int voteRails(int superSpeed) {
     memset(&rail, 0, sizeof(rail));
     int lookup = qcom_cmd_db_find(copy, kDbSize, rails[i].name, &rail);
     if (lookup != 0) {
-      printf("[usb] uke cmd-db resource=%s status=%d\n", rails[i].name, lookup);
+      IOLog("[usb] uke cmd-db resource=%s status=%d\n", rails[i].name, lookup);
       ok = 0;
       continue;
     }
@@ -148,7 +172,7 @@ static int voteRails(int superSpeed) {
     uint32_t status = rd(&rsc, tcs + kV3TcsStatus);
     uint32_t control = rd(&rsc, tcs + layout.control);
     if (!status || (control & kTriggered)) {
-      printf("[usb] uke rpmh busy resource=%s tcs=%u status=%08x control=%08x\n", rails[i].name, kUsbTcs,
+      IOLog("[usb] uke rpmh busy resource=%s tcs=%u status=%08x control=%08x\n", rails[i].name, kUsbTcs,
              status, control);
       ok = 0;
       continue;
@@ -163,7 +187,7 @@ static int voteRails(int superSpeed) {
     for (unsigned c = 0; c < 3; ++c) {
       unsigned offset = tcs + kV3CmdStatus + c * layout.cmd_stride;
       if (!wait_for(&rsc, offset, kIssuedAndComplete, kIssuedAndComplete, 5000)) {
-        printf("[usb] uke rpmh timeout resource=%s cmd=%u address=%08x status=%08x tcs=%08x irq=%08x\n",
+        IOLog("[usb] uke rpmh timeout resource=%s cmd=%u address=%08x status=%08x tcs=%08x irq=%08x\n",
                rails[i].name, c, addresses[c], rd(&rsc, offset), rd(&rsc, tcs + kV3TcsStatus),
                rd(&rsc, kDrvOffset + layout.irq_status));
         ok = 0;
@@ -215,7 +239,7 @@ static int voteRails(int superSpeed) {
   } else {
     ok = 0;
   }
-  printf("[usb] uke rails rsc=%08x complete=%u\n", rscId, ok);
+  IOLog("[usb] uke rails rsc=%08x complete=%u\n", rscId, ok);
   return ok;
 }
 
@@ -225,17 +249,17 @@ static int resetController(void) {
   for (unsigned i = 0; i < sizeof(kCoreClocks) / sizeof(*kCoreClocks); ++i) upd(&gGcc, kCoreClocks[i], 1, 0);
   upd(&gGcc, kCoreBcr, 1, 1);
   int asserted = wait_for(&gGcc, kCoreBcr, 1, 1, 200);
-  IOSleep(1);
+  board_sleep_ms(1);
   upd(&gGcc, kCoreBcr, 1, 0);
   int released = wait_for(&gGcc, kCoreBcr, 1, 0, 200);
-  IODelay(1);
+  board_delay_us(1);
   int clocked = 1;
   for (unsigned i = 0; i < sizeof(kCoreClocks) / sizeof(*kCoreClocks); ++i) {
     upd(&gGcc, kCoreClocks[i], 1, 1);
     clocked = wait_for(&gGcc, kCoreClocks[i], 0x80000001u, 1, 200) && clocked;
   }
-  IOSleep(10);
-  printf("[usb] uke BCR assert=%u release=%u clocks=%u\n", asserted, released, clocked);
+  board_sleep_ms(10);
+  IOLog("[usb] uke BCR assert=%u release=%u clocks=%u\n", asserted, released, clocked);
   return asserted && released && clocked;
 }
 
@@ -282,7 +306,7 @@ static int repeater(int host) {
   for (unsigned attempt = 0; attempt < 10; ++attempt) {
     if (br_read8(observer.base, &arb, (int)apid, 8, &value) != 0) return 0;
     if (value & 0x80) return 1;
-    IODelay(100);
+    board_delay_us(100);
   }
   return 0;
 }
@@ -297,6 +321,6 @@ int qcom_usb_board_init(void) {
   upd(&gGcc, 0x3902c, 0, 1);
   if (!wait_for(&gGcc, 0x3902c, 1, 0, 200) || !refClock() || !resetController()) return -4;
   if (!repeater(0)) return -6;
-  printf("[usb] uke board init ok (rails + core + clkref + reset + repeater)\n");
+  IOLog("[usb] uke board init ok (rails + core + clkref + reset + repeater)\n");
   return 0;
 }
