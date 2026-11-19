@@ -5928,3 +5928,50 @@ Libm / AppleARMPlatform / AppleARMWatchdogTimer / AppleAudioClockLibs —— 全
 省掉一轮的东西）。已 diff：我们的内核 `__DATA` 比 Apple 多 1.09 MiB，而 development 配置、我们自己的
 in-kernel 驱动（ArmCpu `gSpiRoutes[1024]`=8 KiB、ShengUfs、UFS 日志、USB debug、BootProgress 探针…）
 加起来也解释不了 1 MiB，所以先要证据。
+
+## §100 b285：prelink 的 `__DATA` 差 0x1c000，真凶是官方 source 驱动的 **128 KiB `gScratch`**
+
+### 100.1 证据（一轮就定位，靠 `overlap_report` 新加的 section 排名）
+
+```
+largest native __DATA sections: __bss 0x196078, __common 0xbfa48, __data 0x2d180,
+                                __lock_grp 0x161a0, __percpu 0x3c10, __refgrps 0xcb0
+```
+
+和本地 `work/ci-artifacts/b272-rootstub/kernel.macho`（那一轮 prelink 是**成功**的，native `__DATA` = 0x274000）
+逐项相减：
+
+| section | b272 | 现在 | 差 |
+|---|---|---|---|
+| `__bss` | 0x169078 | 0x196078 | **+0x2d000（184 KiB）** |
+| `__common` | 0xbf510 | 0xbfa48 | +0x538 |
+| `__data` | 0x2cfa8 | 0x2d180 | +0x1d8 |
+| `__lock_grp` / `__percpu` / `__refgrps` | 同 | 同 | 0 |
+
+即"多出来的 176 KiB"几乎全在 `__bss`，而 `__bss` 里最大的单项就是我们这一轮拿进来的官方 source 驱动：
+`drivers/ShengUfs/RootLayout.h:27` 的 `static uint8_t gScratch[kDataMax]`，`kDataMax = 131072` → **128 KiB**。
+（同文件 `NativeUfs.cpp:1923` 还有一块 `static uint8_t entries[4096*4]` = 16 KiB。）
+
+### 100.2 修法：把 bounce buffer 收到 16 KiB，并复用
+
+`gScratch` 的四处用途逐条核对过都装得下 16 KiB：
+
+| 用途 | 需要的字节 |
+|---|---|
+| GPT 头 | 4 KiB（单块） |
+| GPT 表 | `count <= 128` 被 `readLayout` 强制 → 128×128 = **16 KiB** |
+| policy 表分块读（`hashPolicyTable` / layout walk）| 分块大小由缓冲区决定，跟着改成 `kScratchBytes` |
+| 窗口签名探针 | 4 KiB（单块） |
+
+所以：`kScratchBytes = 16384` + 两处 chunk 计算从 `kDataMax` 改成 `kScratchBytes`，并把
+`native_ufs_store_gpt_check()` 里那块 16 KiB 静态 `entries` 改成复用 `gScratch`（`blocks > kScratchBytes/4096`
+先拒绝）。合计放回 **0x20000（128 KiB）**：native `__DATA` 从 0x2a0000 降到 0x280000 < 0x284000（余量 16 KiB）。
+
+**没有改任何传输尺寸**：`kDataMax` 仍然是控制器的单命令数据上限，只是这些读回来的 bounce buffer 变小了，
+每个循环本来就按"它要了多少块"前进。这是本仓库对官方驱动唯一的一处尺寸改动，`LOCAL EDIT` 已标在源码里。
+
+### 100.3 剩下的 0x9000 没查（先不查）
+
+`__bss` 增长 0x2d000 里，`gScratch`(0x20000) + `entries`(0x4000) = 0x24000 已解释，剩下 0x9000（36 KiB）是
+其它新增全局（ArmCpu 的 `gSpiRoutes[1024]` 8 KiB、`gCore[8]`、storage runtime 的若干静态）。等 prelink 真过了、
+或者下一轮又被空间卡住，再动它——现在有 16 KiB 余量。

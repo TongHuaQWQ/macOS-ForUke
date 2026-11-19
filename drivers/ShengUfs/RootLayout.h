@@ -24,7 +24,21 @@ struct RootLayout {
   uint32_t ext4Blocks;                    // s_blocks_count_lo at byte 1028
 };
 
-static uint8_t gScratch[kDataMax];
+// LOCAL EDIT (b286, see docs/STATE.md §99): this bounce buffer was kDataMax (128 KiB) of static __DATA,
+// the largest single item this port adds to the kernel image. The prelink has 0x284000 bytes for a native
+// __DATA that this build makes 0x2a0000, and one 220-byte kext object (com.apple.kec.Libm) is what stops the
+// free run there, so the room has to come out of our own data. Every use of this buffer fits in 16 KiB:
+//
+//   * the GPT header and every single-block read at 4 KiB;
+//   * the GPT entry array, which readLayout bounds at count <= 128 entries x 128 bytes = 16 KiB;
+//   * the chunked reads of a signed policy table, which hashPolicyTable() and the layout walk chunk by
+//     kScratchBytes below instead of by kDataMax.
+//
+// Nothing about the transported sizes changes: kDataMax stays the controller's per-command data limit; only
+// the bounce buffer these reads come back through is smaller, and each loop already advances by the chunk it
+// asked for.
+static constexpr uint64_t kScratchBytes = 16384;
+static uint8_t gScratch[kScratchBytes];
 
 static uint32_t le32 (const uint8_t *at)
 {

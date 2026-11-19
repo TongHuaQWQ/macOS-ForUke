@@ -1920,9 +1920,10 @@ extern "C" unsigned native_ufs_store_gpt_check (void)
   if (headerBytes < 92 || headerBytes > 4096 || rootCrc32 (block, headerBytes, true) != le32 (block + 16) ||
       le32 (block + 16) != gStoreGeometry.headerCrc) return 3;
   uint32_t blocks = (gStoreGeometry.entryCount * 128 + 4095) / 4096;
-  static uint8_t entries[4096 * 4];
-  if (blocks > 4 || hostRead4k (0, gStoreGeometry.entriesLba, blocks, entries) != kIOReturnSuccess) return 4;
-  return rootCrc32 (entries, gStoreGeometry.entryCount * 128) == gStoreGeometry.entriesCrc ? 0 : 5;
+  // Reuses gScratch (LOCAL EDIT, b286): the entry array is bounded by 128 entries x 128 bytes, which is
+  // exactly kScratchBytes, so the second 16 KiB static this used to keep is redundant.
+  if (blocks > kScratchBytes / 4096 || hostRead4k (0, gStoreGeometry.entriesLba, blocks, gScratch) != kIOReturnSuccess) return 4;
+  return rootCrc32 (gScratch, gStoreGeometry.entryCount * 128) == gStoreGeometry.entriesCrc ? 0 : 5;
 }
 
 // Root window requests, for the log (native_ufs_stats_text): their count, bytes and time from entry to the completion call (the wait
@@ -2114,7 +2115,7 @@ static bool readPolicyTable (const char *window, uint8_t *table, uint64_t tableB
   if (!policyTableLba (window, tableBytes, &lba)) return false;
   while (done < tableBytes) {
     uint64_t left = tableBytes - done;
-    uint32_t blocks = static_cast<uint32_t> (left >= kDataMax ? kDataMax / 4096 : (left + 4095) / 4096);
+    uint32_t blocks = static_cast<uint32_t> (left >= kScratchBytes ? kScratchBytes / 4096 : (left + 4095) / 4096);
     if (hostRead4k (0, lba, blocks, gScratch) != kIOReturnSuccess) return false;
     uint64_t take = left < blocks * 4096ULL ? left : blocks * 4096ULL;
     memcpy (table + done, gScratch, take);
@@ -2197,7 +2198,7 @@ static bool hashPolicyTable (uint64_t lba, uint64_t hashBytes, uint8_t *buffer, 
   }
   for (uint64_t done = 0, page = 0; done < hashBytes;) {
     const uint64_t left = hashBytes - done;
-    const uint32_t blocks = static_cast<uint32_t> (left >= kDataMax ? kDataMax / 4096 : (left + 4095) / 4096);
+    const uint32_t blocks = static_cast<uint32_t> (left >= kScratchBytes ? kScratchBytes / 4096 : (left + 4095) / 4096);
     if (hostRead4k (0, lba, blocks, buffer) != kIOReturnSuccess) return false;
     const uint64_t take = left < blocks * 4096ULL ? left : blocks * 4096ULL;
     SHA256_Update (&table, buffer, take);
