@@ -99,6 +99,48 @@
 #define QUD_EUSB2_PHY_MAPPED 0x1000u
 #define QUD_EUSB2_PHY_EUD_ENABLE_REG 0x088e2000u
 
+/* UFS, read-only. The userdata log writer (device package/UfsLogKernel.c) maps this controller itself
+ * and sends one NOP OUT through the apps SMMU stream 0x60; nothing in this port's own firmware ever
+ * powers the block, so whether UFS is still clocked at hand-off decides whether that writer can attach.
+ * The port only reads - no clock, reset or GDSC write is made here.
+ *
+ * Controller window: work/re/data/ufs-cliffs.json host.regions, "ufs_mem" base 0x1d84000 size 0x3000
+ * (live.dts ufshc_mem). Offsets 0x08/0x30/0x34 are the UFSHCI standard VER/HCS/HCE words.
+ *
+ * Branch clocks: gcc-cliffs.c clk_branch halt_reg/enable_reg, the ufs_phy_* set. Halt and enable share
+ * one register per branch, enable is BIT(0) and CLK_OFF is BIT(31) (clk-branch.c), exactly as the USB
+ * CBCRs above. The symbol clocks are TX/RX lane branches (live.dts lanes-per-direction = 2). */
+#define QUD_UFS_HC_BASE   0x01d84000ULL
+#define QUD_UFS_HC_BYTES  0x3000u
+#define QUD_UFS_HC_VER    0x0008u
+#define QUD_UFS_HC_HCS    0x0030u
+#define QUD_UFS_HC_IS     0x0020u   /* UTP transfer-request completion + UTP/UIC error status */
+#define QUD_UFS_HC_HCE    0x0034u
+#define QUD_UFS_HC_UTRLBA 0x0050u   /* base address of the request list the last submitter built */
+#define QUD_UFS_HC_UTRLDBR 0x0058u  /* doorbell: a bit stays set while a request is still outstanding */
+/* The apps SMMU stream the userdata log writer installs for itself (work/re/data/ufs-cliffs.json
+ * host.smmu.stream). Reported, never written: the writer owns it. */
+#define QUD_UFS_LOG_STREAM 0x60u
+/* The two UFS GDSCs, from the same live.dts node set as the USB one above:
+ *   gcc_ufs_phy_gdsc      qcom,gdsc@177004  reg <0x177004 0x04>  -> GCC-relative 0x77004
+ *   gcc_ufs_mem_phy_gdsc  qcom,gdsc@19e000  reg <0x19e000 0x04>  -> GCC-relative 0x9e000
+ * Both carry qcom,support-cfg-gdscr, so the power state is CFG_GDSCR.POWER_UP_COMPLETE BIT(16) at
+ * gdscr + 4 - the bit the USB GDSC comment above already relies on - and both carry
+ * qcom,proxy-consumer-enable, the same "vendor GCC probe opens it and holds it for the boot"
+ * arrangement the USB port was measured to have. Read only here. */
+#define QUD_UFS_GDSCR_COUNT 2u
+#define QUD_UFS_GDSCR_OFFSETS {0x77004u, 0x9e000u}
+#define QUD_UFS_CFG_GDSCR_OFFSET   0x4u
+#define QUD_UFS_CFG_POWER_UP_BIT   (1u << 16)
+
+#define QUD_UFS_CBCR_COUNT 9u
+#define QUD_UFS_CBCR_OFFSETS {0x77018u, 0x77024u, 0x77028u, 0x7702cu, 0x77068u, \
+                              0x77074u, 0x770b0u, 0x770ccu, 0x770e4u}
+/* Order of QUD_UFS_CBCR_OFFSETS: axi, ahb, tx_symbol_0, rx_symbol_0, unipro_core, ice_core, phy_aux,
+ * rx_symbol_1, aggre_axi. AXI and AHB are the two the host cannot live without. */
+#define QUD_UFS_CBCR_REQUIRED 2u
+#define QUD_UFS_CBCR_RUNNING  31u
+
 /* QSCRATCH inside the wrapper window: wrapper base 0xa6f8800 (live.dts:15967 window + 0xf8800)
  * plus QSCRATCH_HS_PHY_CTRL 0x10 (dwc3-qcom.c) = 0xa6f8810, i.e. 0xf8810 relative to
  * QUD_DWC3_BASE. Bit meanings: UTMI_OTG_VBUS_VALID BIT(20), SW_SESSVLD_SEL BIT(28). */

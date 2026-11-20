@@ -322,6 +322,12 @@ archives = [
   # libQcomXnuUsbDebug.a (package/qcom-usb-debug), built against this tree's own compile records with
   # soc/Uke.h. The kernel links it when CONFIG_XNU_QCOM_USB_DEBUG is on, which it now is.
   "build-qcom-usb-debug.py",
+  # libQcomDwc3.a (drivers/QcomDwc3 + package/UsbProbe.cpp): the official route. The script generates the
+  # two base classes from scripts/usb-{xdci,xhci}-26C5035r.json, compiles the driver against them, reads the
+  # compiled vtables back entry by entry to prove each one authenticates with the original slot's
+  # diversity, and emits the branch stubs that bind them to the prelinked collection's own code.
+  # configs/uke-macos_defconfig force-loads the archive; `usb=1` decides at boot whether it runs.
+  "build-qcom-dwc3.py",
   # libUkeUfsLog.a (package/UfsLog.cpp + package/UfsLogKernel.c): the freestanding UFS transport that
   # gives UkeLastLog.c's userdata half its native_ufs_log_* symbols without CONFIG_XNU_NATIVE_UFS.
   # configs/uke-macos_defconfig force-loads it through CONFIG_XNU_EXTRA_LD_ARCHIVES, so a configuration
@@ -478,6 +484,18 @@ roots = [
   "com.apple.security.sandbox",
   "com.apple.iokit.IOHIDFamily",
   "com.apple.iokit.IOHIDEventDriver",
+  # The USB stack, for drivers/QcomDwc3 (the official route). Everything above is what the 25F84/26C5035r
+  # port needed before there was a controller; these eleven are the device stack, the host stack and the
+  # storage chain they pull in, copied from the sheng board, which runs this driver on the same generation
+  # of Apple USB code (UniXNU-sheng board.toml [kernel.prelink] roots).
+  #
+  # Why each one is named rather than left to be pulled in: the prelink walks *dependencies of the roots*,
+  # and these eleven are what makes the closure contain the USB kexts at all -- QcomDwc3Xdci derives from
+  # AppleUSBXDCI, whose kext has no personality, so nothing else would ever load it.
+  #
+  # The two `!` entries exclude rather than add. AppleUSBXHCI's metaclass comparison reaches
+  # AppleOnboardSerial and AppleSMC, neither of which can exist on a Snapdragon; excluding them keeps a
+  # match from silently binding a serial or SMC personality to our controller's name.
   "com.apple.iokit.IOUSBDeviceFamily",
   "com.apple.driver.AppleUSBXDCI",
   "com.apple.driver.AppleUSBDeviceMux",
@@ -489,6 +507,8 @@ roots = [
   "com.apple.iokit.IOUSBMassStorageDriver",
   "com.apple.iokit.IOSCSIArchitectureModelFamily",
   "com.apple.iokit.IOSCSIBlockCommandsDevice",
+  "!com.apple.driver.AppleOnboardSerial",
+  "!com.apple.driver.AppleSMC",
 ]
 
 [firmware]
@@ -706,13 +726,32 @@ kernel_args = [
   "boot-progress=2",
   "-apfs_shared_datavolume",
   "offline-key-events=1",
-  # usb= is the USB side's single interface (they own package/qcom-usb-debug and drivers/QcomDwc3; this
-  # file owns the arguments). Levels: 1 bring-up only (non-fatal), 4 add the Apple stack
-  # (OSKextLoadKextWithIdentifier + preModLoad/postModLoad + publish), 6 panic after bring-up with the
-  # judgement line (stage/gsnpsid/gdsc/smmu/rep/qmp/rpmh/irq). 1 here, not 6: 6 stops the boot inside
-  # bsd_autoconf(), and the question this round asks is whether the boot gets PAST BSD init now that the
-  # timer is armed - a deliberate panic there would answer the USB half and hide the timer half. Flipping
-  # to 6 is one character when the timer is confirmed and the USB readout is what matters.
+  # usb= is the single interface of the USB side (they own drivers/QcomDwc3, package/UsbProbe.cpp and
+  # package/qcom-usb-debug; this file owns the arguments). package/UsbProbe.cpp, the entry point the
+  # merge keeps as the enabled USB owner, reads it:
+  #   1  bring the controller up and stop there. Nine stages, one "qcom-dwc3: stage N" line each and two
+  #      "UKE usb:" summary lines after the attempt; stage is negative when a step failed. This is what the
+  #      USB line ships (b252): on b251 the driver was force-loaded and never called at all, so the first
+  #      job is the bring-up reading, not the Apple stack.
+  #   4  also load AppleUSBXDCI/AppleUSBXHCI and publish the two subclasses (bounded retry, reports the
+  #      load result). Try it with a payload rebuild -- this is a boot argument, not a kernel change.
+  #   5  and additionally run qcom_dwc3_diag(true), the controller-off-the-bus cycle.
+  #   6  panic after bring-up with the judgement line (stage/gsnpsid/gdsc/smmu/rep/qmp/rpmh/irq), so a
+  #      single photograph of the panel carries the whole verdict.
+  # 1 here, not 6: 6 stops the boot inside bsd_autoconf(), and this round also asks whether the boot gets
+  # PAST BSD init. A deliberate panic there would answer the USB half and hide everything after it.
+  # Flipping to 6 is one character when the USB readout is what matters.
+  # No log-sys (that group belongs to package/BootLog.c, which this port does not carry) and no IOSleep:
+  # this kernel's timer never delivers an interrupt, so every delay in the route spins on the timebase
+  # (uke_delay_ms in package/QcomDwc3Platform.c). UsbProbe.cpp prints the stage table itself.
+  # ONE USB OWNER PER KERNEL, and this is the whole of the arbitration: drivers/QcomDwc3 and both CDC-ACM
+  # consoles (package/qcom-usb-debug's libQcomXnuUsbDebug.a and package/uke_usb.c) program the same DWC3
+  # controller -- and package/QcomRpmh.c is a byte-identical copy of package/qcom-usb-debug/soc/QcomRpmh.c,
+  # so linking both archives is also a duplicate symbol. This round links libQcomDwc3.a only:
+  # CONFIG_XNU_QCOM_USB_DEBUG=n keeps the component built but out of the link (board.toml [kernel]
+  # archives still runs build-qcom-usb-debug.py, so it stays buildable), the line below keeps
+  # qcom-usb-debug= off, and uke_usb=0 keeps the old probe driver inert. Going back to the CDC-ACM console
+  # is those three flipped and libQcomDwc3.a dropped from CONFIG_XNU_EXTRA_LD_ARCHIVES.
   "usb=1",
   # Arms the userdata half of UkeLastLog (UkeLastLog.c:789; the pram half needs panic_region and stays
   # off). The transport is freestanding - UfsLog.cpp/UfsLogKernel.c map the UFS host and the apps SMMU
@@ -793,15 +832,18 @@ kernel_args = [
   # the freestanding UFS writer in package/UfsLog.cpp. They are short on purpose -- the command line
   # is capped at 1000 bytes and 949 were already in use.
   #
-  # boot_b, not the userdata tail (2026-11-17). These are absolute 4096-byte blocks and the pair is the
-  # whole of slot B's boot partition, read from this unit's own GPT (gpt/sde-primary.bin):
-  #   boot_b = sde39, first=256566 last=281141, 24,576 blocks (96 MiB), sysfs start 2052528 x 512 B
-  # so the window the writer opens, last+1-8192 = 272950..281141, sits inside an INACTIVE slot.
-  # The previous values (2961408 / 61949946, i.e. the userdata partition from [userdata]) put the same
-  # 32 MiB in the tail of userdata, which on this unit is live /data: dm-60 covers the same 58,988,539
-  # blocks, so a successful write would have dropped 32 MiB of msgbuf into user data. The device side
-  # measured that overlap and had already moved the window here; this file now agrees with them.
-  # A write is therefore not harmless to slot B: if slot B is ever made bootable, reflash it.
+  # MERGE NOTE (branch usb-on-macos, ci-b276-storage4 x ci-b250-ufsclk). Both lines moved this window and
+  # both were reviewed; the two pairs are mutually exclusive, because the arguments themselves are the
+  # conflict:
+  #   this line (b276, 5477e52, 2026-11-18)  uke-log-first=2961408  uke-log-last=61949946   userdata
+  #   the USB line (b250, b253, 2026-11-17)  uke-log-first=256566   uke-log-last=281141     slot B boot_b
+  # boot_b is the safe one and the current line's own note (above) argued for it: the userdata tail of
+  # this unit is live /data (dm-60 covers exactly these 58,988,539 blocks), so a successful write costs
+  # 32 MiB of f2fs. The pair kept here is nevertheless userdata's, because it is what the storage rounds
+  # b270-b276 shipped and measured against and this merge must not silently change the storage line's log
+  # channel. Swap "uke-log-first/uke-log-last" for 256566 / 281141 -- and treat boot_b as dirty, reflashing
+  # it afterwards -- when the /data overlap is judged unacceptable before the next flash. Nothing else
+  # changes: sheng-log=1 is already set above and both pairs are inside the 1000-byte command line (991).
   # The old probe driver (package/uke_usb.c) is now inert, on purpose. Three of its switches would
   # each stop the boot before QcomXnuUsbDebug's worker runs: uke_usb_sync=1 panics inside its
   # STARTUP by design ("uke_usb_sync=1's whole purpose"), uke_usb_hook=1 reaches
@@ -810,6 +852,10 @@ kernel_args = [
   # beacon into pram before returning, which is the one piece of evidence worth keeping.
   # uke_usb=0 alone disables the old probe driver (it returns before touching anything), so sync/hook/
   # panic are dropped rather than carried as zeros - the 1000-byte command line is full.
+  # MERGE NOTE: the USB line (ci-b250-ufsclk) dropped this argument, because there the CDC-ACM console
+  # was being retired altogether. Here it stays, and it is part of the single-owner arbitration: the
+  # component (package/uke_usb.c, built by build-uke-usb.py) remains in the tree, and this is the
+  # argument that keeps it from touching the DWC3 that drivers/QcomDwc3 now owns. 9 bytes.
   "uke_usb=0",
   # ON again for the b204 channel round, and this time the firmware fills the hole that made every
   # earlier attempt impossible: UkeUsbLogDxe powers the USB30 GDSC, releases the block reset and ungates
@@ -820,7 +866,22 @@ kernel_args = [
   # The OneSend card stays off (it now needs qcom-usb-qr=1), so the panel keeps the plain kernel text.
   # If the kernel hangs in USB init instead of reaching kext loading, set this back to 0: that is one
   # payload rebuild, not a CI round, and it restores the previous boot exactly.
-  "qcom-usb-debug=1",
+  # OFF for the official-route round, and this is the one variable changed. The CDC-ACM probe
+  # (package/qcom-usb-debug) and drivers/QcomDwc3 both drive the same controller: the probe programs
+  # DEVCTRL/DEVCTRLHLT and arms ep0 its own way, so leaving it on would fight the official sequence for
+  # the core reset. It stays force-loaded (CONFIG_XNU_QCOM_USB_DEBUG) because its switches are what the
+  # previous rounds read, so turning it back on is this one line, not a rebuild of the archive.
+  # "qcom-usb-debug=1",
+  # The official route's call site: patches/xnu/zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch calls
+  # uke_usb_probe() from the first statement of bsd_autoconf(), not from
+  # native_legacy_display_late_probe() -- that caller is compiled only when CONFIG_XNU_NATIVE_LEGACY_DISPLAY
+  # is on, which this board leaves off, and b251 therefore shipped libQcomDwc3.a force-loaded and never
+  # called. The usb= levels, the no-IOSleep rule and the single-USB-owner arbitration are documented at
+  # the usb=1 argument above; the argument itself lives there and only there (one copy -- the merged
+  # command line is 991 of its 1000 bytes).
+  #
+  # The evidence this route produces is console text (qcom-dwc3: and the "UKE usb:" stage table), which
+  # the graphics console does not draw, so -uketextconsole above is what makes the round readable.
   # b206's firmware log (Advanced Logger export, 2026-11-14 01:45) settled the hand-off question the
   # other way round from what b204 suggested: the USB30 GDSC was powered all along (UkeProgressDxe at
   # 00:00:07.443 already printed gdsc_powered=1 usb_clocks_running=3/3, and the DWC3 answers with
@@ -836,7 +897,6 @@ kernel_args = [
   # numbers: FSR 00000400 = the SMMU recorded no fault, GW 0 = the core never posted an event.
   # What the card costs is console lines (it repaints every second to stay on top), which is why it
   # stayed off in the rounds that were reading kernel text instead. Set to 0 for those.
-  "qcom-usb-qr=1",
   # The panel now paints the request and a QR of it without panicking (STATE 82/84), so the diagnostic
   # panic stays off: with it on, the first control request stops the machine and enumeration can never
   # be tested. qcom-usb-panic=0 overrides the compiled-in default of 2.

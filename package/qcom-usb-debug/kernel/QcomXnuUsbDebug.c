@@ -44,6 +44,7 @@ extern void IOLog(const char *format, ...);
 #define USB_GUSB2PHYCFG 0xc200u
 #define USB_PHY_KEEP_AWAKE_MASK ((1u << 6) | (1u << 8))
 #define USB_RUN_STOP (1u << 31)
+#define USB_CSFTRST (1u << 30)
 #define USB_HALTED (1u << 22)
 #define USB_HS_PHY_CTRL QUD_QSCRATCH_HS_PHY_CTRL_OFFSET
 #define USB_SW_VBUS_MASK QUD_QSCRATCH_VBUS_MASK
@@ -69,6 +70,7 @@ static struct {
     struct qcom_usb_debug_status status;
     vm_offset_t gcc_va, usb_va, smmu_va;
     vm_offset_t phy_va; /* eUSB2 PHY register window, QUD_EUSB2_PHY_BASE */
+    vm_offset_t ufs_va; /* UFS host controller, read only: see the UFS sample below */
     struct dwc3 *core;
     QUSB_DOMAIN_LEASE lease;
     QUSB_DOMAIN_PLATFORM domain_platform;
@@ -109,6 +111,29 @@ static uint64_t counter(void)
     __asm__ volatile("isb\nmrs %0, cntvct_el0" : "=r"(value) :: "memory");
     return value;
 }
+/*
+ * Why this exists. The log channel this port needs is a pram window in DRAM, and DRAM only survives a
+ * *warm* reset: the Gunyah virtual watchdog the firmware arms (UkeBootMemoryDxe.c:1488, 65 s) is meant
+ * to provide exactly that, and on 2026-11-15 it did not recycle a hung kernel - the tablet sat at the
+ * card for minutes. A long press would have rebooted it, but that drops DRAM and with it the record.
+ *
+ * So the kernel asks for the reset itself, through the platform's own conduit: PSCI SYSTEM_RESET
+ * (SMC 0x84000009). QUD_PSCI_SMC_RESET stays 0 - this board's profile has never observed that SMC
+ * reboot it, so the port does not claim the capability - and the call below is only ever made when a
+ * boot argument asks for it, which makes every use an explicit qualification attempt rather than an
+ * assumption.
+ */
+static unsigned int qcom_usb_reboot_seconds;
+
+static void uke_psci_system_reset(void)
+{
+    __asm__ volatile("movz w0, #9\nmovk w0, #0x8400, lsl #16\n"
+                     "mov x1, xzr\nmov x2, xzr\nmov x3, xzr\ndsb sy\nsmc #0"
+                     ::: "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+                         "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                         "x16", "x17", "memory");
+}
+
 static void diag_reset(unsigned int seconds);
 static void platform_smc_reset(void)
 {
@@ -169,6 +194,7 @@ static unsigned int usb_panic_mode = QCOM_USB_PANIC_DEFAULT;
  * unit, so it must not be declared here: an extern declaration is expanded by the macro into syntax
  * errors ("expected identifier or '('"), which is exactly how the round that added this failed. */
 static void pram_state(void);
+static int physical_read(void *cookie, QUSB_U64 address, QUSB_U32 *value);
 static void sample_translation(void);
 static void pram_setup(uint32_t a, uint32_t b);
 static void fb_remember_request(const char *line);
@@ -300,6 +326,15 @@ static char *append_hex32(char *to, uint32_t value)
     static const char digits[] = "0123456789abcdef";
     int shift;
     for (shift = 28; shift >= 0; shift -= 4) *to++ = digits[(value >> shift) & 0xfu];
+    return to;
+}
+/* Fixed-width hex with a chosen digit count: PLL is a 4-digit pair of bytes and MIS a 6-digit triple,
+ * and padding them makes the card line a fixed 55 characters, which is what lets it fit one block. */
+static char *append_hex32n(char *to, uint32_t value, unsigned digits)
+{
+    static const char hexdigits[] = "0123456789abcdef";
+    int shift = (int)(digits * 4u) - 4;
+    for (; shift >= 0; shift -= 4) *to++ = hexdigits[(value >> (unsigned)shift) & 0xfu];
     return to;
 }
 static char *append_hex(char *to, uint64_t value)
@@ -478,6 +513,35 @@ static unsigned fb_trace_count;
  * SET_ADDRESS on sight, plus how many the host has sent. The full request history and the traces keep
  * their place further down, where a longer capture still reaches them. */
 static char fb_setup_line[32];
+/* The six numbers this round exists for, in priority order and short enough to survive both a
+ * 60-column card line and the first 60-byte OneSend block: a generic scanner that only ever reads
+ * block 1 still gets DS/DT/DC, which is what decides whether the core is even running. */
+static char fb_key_line[QCOM_USB_FB_WIDTH + 1u];
+/* UFS, sampled once at hand-off. The userdata log writer maps 0x01d84000 itself and sends a NOP OUT
+ * through the apps SMMU, and nothing in this port's firmware powers the block before that, so the first
+ * question a silent log asks is whether UFS is clocked at all. Two masks answer it without writing
+ * anything: one bit per branch in QUD_UFS_CBCR_OFFSETS, set when the branch is running (CLK_OFF clear)
+ * and when its own ENABLE bit is set. Everything after "HCS=" is read only when the required branches
+ * are running, because a read of a gated UFS block can abort rather than return. */
+static char fb_ufs_line[QCOM_USB_FB_WIDTH + 1u];
+static uint32_t fb_ufs_run_mask, fb_ufs_en_mask, fb_ufs_gd_mask, fb_ufs_hcs, fb_ufs_ver, fb_ufs_hce;
+static unsigned fb_ufs_sampled;
+/* What the controller and the SMMU say *after* the log writer has had its chance, one shot. The init
+ * sample above answers "is the block alive"; this one answers "did the writer get anywhere", and the
+ * three numbers are chosen so that the answers do not overlap:
+ *   UTRLDBR  a request is submitted and not retired - the NOP OUT never completed
+ *   UTRLBA   the request list address the last submitter built, zero if nothing was ever submitted
+ *   SMR      the stream-matching entry for stream 0x60, which UfsLog.cpp installs itself; "none" means
+ *            the writer never reached the SMMU half of attach
+ * IS/HCS/S2CR and the SMMU's stream count go to the log, where the text console can show them. */
+static char fb_ufw_line[QCOM_USB_FB_WIDTH + 1u];
+static unsigned fb_ufw_sampled;
+/* DCTL/DSTS read *now*, next to the stored ring sample. DC in the key line is whatever the ring sample
+ * caught, which on b250 read C0000000 - RUN_STOP set together with CSftRst, a combination the core only
+ * presents while a soft reset is still in flight. Whether that is the steady state or a stale early
+ * sample decides whether USB is being refused by an un-armed ep0 (hardware STALL, host sees -32) or by
+ * something further on, and one live read separates the two without another instrumented build. */
+static char fb_now_line[QCOM_USB_FB_WIDTH + 1u];
 static unsigned fb_setup_count;
 static unsigned fb_block_show, fb_tick, fb_hold;
 
@@ -577,6 +641,11 @@ static void fb_build_payload(void)
     uint8_t *payload = fb_payload;
     size_t capacity = sizeof(fb_payload);
     used = 0;
+    if (fb_key_line[0] != 0) {
+        const char *line = fb_key_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
     {
         const char *line = fb_state_line;
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
@@ -595,6 +664,23 @@ static void fb_build_payload(void)
     }
     for (i = 0; i < fb_request_count && used + 1u < capacity; ++i) {
         const char *line = fb_request_lines[i];
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    /* Last of the fixed lines: the panel paints it on its own, so nothing that already fits block 0 or
+     * block 1 moves because UFS was added. */
+    if (fb_ufs_line[0] != 0) {
+        const char *line = fb_ufs_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    if (fb_ufw_line[0] != 0) {
+        const char *line = fb_ufw_line;
+        while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
+        if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
+    }
+    if (fb_now_line[0] != 0) {
+        const char *line = fb_now_line;
         while (*line != 0 && used + 1u < capacity) payload[used++] = (uint8_t)*line++;
         if (used + 1u < capacity) payload[used++] = (uint8_t)'\n';
     }
@@ -642,6 +728,11 @@ static void fb_paint(void)
     side = 0;
     if (qr_encode_bytes(frame, frame_len, &qr)) side = (uint32_t)qr.size * QCOM_USB_QR_SCALE;
     card_h = (side != 0 ? side : 160u) + 120u;
+    /* One extra row for the UFS line: the card is the only place these numbers are painted, and the
+     * band it maps is 640 rows tall, so asking for it explicitly is cheaper than losing it to the clamp. */
+    if (fb_ufs_line[0] != 0) card_h += 26u;
+    if (fb_ufw_line[0] != 0) card_h += 26u;
+    if (fb_now_line[0] != 0) card_h += 26u;
     if (card_h > qcom_usb_fb_rows) card_h = qcom_usb_fb_rows;
     x0 = qcom_usb_fb_width > side + 24u ? (qcom_usb_fb_width - side) / 2u : 4u;
     fb_blank(0u, card_h, 0xffffffffu);
@@ -655,8 +746,25 @@ static void fb_paint(void)
     p = append_decimal(p, (uint64_t)fb_payload_len);
     *p = 0;
     fb_text(x0, text_y, 5u, label, 0x00000000u);
-    /* The text carried by this block, so a photo that cannot be scanned still reads. */
+    /* The key numbers before the block text: a photo of the card has to be enough to read DS/DT/DC,
+     * because a generic scanner only ever sees one 60-byte block and the block boundaries move. */
     line_y = text_y + 32u;
+    if (fb_key_line[0] != 0) {
+        fb_text(x0, line_y, 4u, fb_key_line, 0x00000000u);
+        line_y += 26u;
+    }
+    if (fb_ufs_line[0] != 0) {
+        fb_text(x0, line_y, 4u, fb_ufs_line, 0x00000000u);
+        line_y += 26u;
+    }
+    if (fb_ufw_line[0] != 0) {
+        fb_text(x0, line_y, 4u, fb_ufw_line, 0x00000000u);
+        line_y += 26u;
+    }
+    if (fb_now_line[0] != 0) {
+        fb_text(x0, line_y, 4u, fb_now_line, 0x00000000u);
+        line_y += 26u;
+    }
     {
         size_t at = (size_t)fb_block_show * ONESEND_BLOCK;
         char line[QCOM_USB_FB_WIDTH + 1u];
@@ -774,7 +882,12 @@ static void pram_state(void)
     /* 192 for the pram/msgbuf record: it carries every field, and the four this round added (CB, FSR,
      * FAR, GW) push the worst case past the old 128. The panel line stays at 128 and is clipped to the
      * card's 60 columns anyway. */
-    char text[192], panel[128];
+    /* These appends are unbounded (append_text/append_decimal/append_hex32 simply advance the
+     * pointer), so the sizes are a budget, not a guard. The record now carries PH/E/CR/S/ER/LS/
+     * FSR/GW/PW/PC/PF/PS/P1 + RA/RS/DT/DC/DS + PLL/MIS and an optional TA/TB pair: about 200
+     * characters. 128 was the b226 size and the b233 read-back wrote past it into the stack,
+     * which is the kind of bug that shows up as a boot that stops after the first card paint. */
+    char text[384], panel[320];
     char *p = append_text(text, "QCOMUSB PH=");
     char *q = append_text(panel, "PH=");
     /* Sample the context bank and the core's event count first, so this record and the card line below
@@ -851,6 +964,19 @@ static void pram_state(void)
     }
     /* Re-read after core init: PLL = 0x5c/0x60 (vendor 0x9001), MISC = 0xb8/0x64/0x54 (vendor
      * 0x011 70b). Zero valid means the read failed, not that the PHY is empty. */
+    /* Event-ring programming and the two control registers, in the record: GW 0 with a full-speed
+     * device on the bus has two very different meanings depending on whether DEVTEN ever had
+     * CONNECTDONEEN set and whether DSTS says the core thinks it is connected at all. */
+    q = append_text(q, " RA=");
+    q = append_hex32(q, native.status.ring_address_lo);
+    q = append_text(q, " RS=");
+    q = append_hex32(q, native.status.ring_size);
+    q = append_text(q, " DT=");
+    q = append_hex32(q, native.status.ring_devten);
+    q = append_text(q, " DC=");
+    q = append_hex32(q, native.status.ring_dctl);
+    q = append_text(q, " DS=");
+    q = append_hex32(q, native.status.ring_dsts);
     if (native.status.phy_after_valid) {
         q = append_text(q, " PLL=");
         q = append_hex32(q, native.status.phy_after_pll);
@@ -864,6 +990,51 @@ static void pram_state(void)
     /* A refused endpoint command is the one thing TA/TB report, so an all-zero pair is omitted rather
      * than printed: 23 characters of every frame spent saying nothing, in the one line that has to fit
      * block 0 (measured on b107; see fb_setup_line). */
+    /* The same numbers as a standalone 55-character line, ordered by how much they decide. This is what
+     * the card paints and what the QR payload starts with, so a generic scanner reading only its first
+     * 60-byte block still gets DS/DT/DC - the three registers that say whether the device controller is
+     * running at all (DSTS.DEVCTRLHLT), whether it was ever told to interrupt (DEVTEN), and whether the
+     * run bit in DCTL actually took. PLL/MIS follow, to prove core init did not undo the PHY sequence. */
+    {
+        char *k = fb_key_line;
+        static char key_prev[sizeof(fb_key_line)];
+        k = append_text(k, "DS=");
+        k = append_hex32(k, native.status.ring_dsts);
+        k = append_text(k, " DT=");
+        k = append_hex32(k, native.status.ring_devten);
+        k = append_text(k, " DC=");
+        k = append_hex32(k, native.status.ring_dctl);
+        k = append_text(k, " PLL=");
+        k = append_hex32n(k, native.status.phy_after_valid ? native.status.phy_after_pll : 0xdeadbeefu, 4u);
+        k = append_text(k, " MIS=");
+        k = append_hex32n(k, native.status.phy_after_valid ? native.status.phy_after_misc : 0xdeadbeefu, 6u);
+        *k = 0;
+        /* Also as a console line, once per change: with -uketextconsole on, the panel's text is the one
+         * record of a boot that stops, and the six numbers have to be inside it or a hang is blind. */
+        if (!fb_same(key_prev, fb_key_line)) {
+            unsigned n;
+            for (n = 0; n < sizeof(key_prev) - 1u && fb_key_line[n] != 0; ++n) key_prev[n] = fb_key_line[n];
+            key_prev[n] = 0;
+            {
+                QUSB_U32 ctl = 0, sts = 0;
+                char *k = fb_now_line;
+                if (!physical_read(0, QUSB_DWC3_BASE + USB_DCTL, &ctl)) ctl = 0xdeadbeefu;
+                if (!physical_read(0, QUSB_DWC3_BASE + USB_DSTS, &sts)) sts = 0xdeadbeefu;
+                k = append_text(k, "NOW ctl=");
+                k = append_hex32(k, ctl);
+                k = append_text(k, " sts=");
+                k = append_hex32(k, sts);
+                k = append_text(k, " run=");
+                k = append_decimal(k, (ctl & USB_RUN_STOP) ? 1u : 0u);
+                k = append_text(k, " csf=");
+                k = append_decimal(k, (ctl & USB_CSFTRST) ? 1u : 0u);
+                *k = 0;
+            }
+            IOLog("QCOMUSB KEY %s S=%u EV=%u TR=%u LT=%u\n", fb_key_line,
+                  native.status.core_control_state, native.status.core_event_bytes_raw,
+                  native.status.traces, native.status.last_trace);
+        }
+    }
     if (native.status.command_a != 0 || native.status.command_b != 0) {
         p = append_text(p, " TA=");
         q = append_text(q, " TA=");
@@ -1029,6 +1200,8 @@ static volatile uint32_t *mmio(uint64_t physical)
         base = native.smmu_va; offset = physical - QUSB_SMMU_BASE;
     } else if (in_range(physical, QUD_EUSB2_PHY_BASE, QUD_EUSB2_PHY_MAPPED)) {
         base = native.phy_va; offset = physical - QUD_EUSB2_PHY_BASE;
+    } else if (in_range(physical, QUD_UFS_HC_BASE, QUD_UFS_HC_BYTES)) {
+        base = native.ufs_va; offset = physical - QUD_UFS_HC_BASE;
     }
     if (!base) {
         native.status.io_failed = 1;
@@ -1388,6 +1561,118 @@ static void sample_phy_after_init(void)
     native.status.phy_after_valid = 1;
 }
 
+/* UFS at hand-off, read only.
+ *
+ * The userdata log window this board persists kernel text to is served by package/UfsLogKernel.c, which
+ * maps 0x01d84000 and the apps SMMU itself and sends one SCSI NOP OUT. Nothing in this port's firmware
+ * powers UFS - there is no UFSDxe, ClockDxe, RpmhDxe or SPMIDxe in the boot - so the block arrives in
+ * whatever state XBL left it, and if its branch clocks are gated the first controller access cannot
+ * answer. That is the first thing to rule out when the window stays empty, and it is answerable without
+ * writing a single register.
+ *
+ * Two masks, one bit per branch in QUD_UFS_CBCR_OFFSETS: run = CLK_OFF (bit31) clear, en = ENABLE
+ * (bit0) set. The controller words are only read when the branches QUD_UFS_CBCR_REQUIRED names are
+ * running, because a read of a clock-gated AXI slave can abort instead of returning - and an abort here
+ * would turn a readable "clocks are off" into a panic that says nothing about UFS.
+ */
+static void sample_ufs_state(void)
+{
+    static const uint32_t gdscr[QUD_UFS_GDSCR_COUNT] = QUD_UFS_GDSCR_OFFSETS;
+    static const uint32_t cbcr[QUD_UFS_CBCR_COUNT] = QUD_UFS_CBCR_OFFSETS;
+    const uint32_t required = (1u << QUD_UFS_CBCR_REQUIRED) - 1u;
+    char *p = fb_ufs_line;
+    unsigned index;
+    uint32_t value;
+    if (fb_ufs_sampled || native.gcc_va == 0) return;
+    fb_ufs_run_mask = fb_ufs_en_mask = fb_ufs_gd_mask = 0;
+    for (index = 0; index < QUD_UFS_GDSCR_COUNT; ++index) {
+        uint32_t state = *(volatile uint32_t *)(uintptr_t)
+            (native.gcc_va + gdscr[index] + QUD_UFS_CFG_GDSCR_OFFSET);
+        uint32_t control = *(volatile uint32_t *)(uintptr_t)(native.gcc_va + gdscr[index]);
+        if (state & QUD_UFS_CFG_POWER_UP_BIT) fb_ufs_gd_mask |= 1u << index;
+        IOLog("QCOMUSB UFS gdscr %08x=%08x cfg=%08x up=%u\n", gdscr[index], control, state,
+              (state & QUD_UFS_CFG_POWER_UP_BIT) ? 1u : 0u);
+    }
+    for (index = 0; index < QUD_UFS_CBCR_COUNT; ++index) {
+        value = *(volatile uint32_t *)(uintptr_t)(native.gcc_va + cbcr[index]);
+        if (!(value & (1u << QUD_UFS_CBCR_RUNNING))) fb_ufs_run_mask |= 1u << index;
+        if (value & 1u) fb_ufs_en_mask |= 1u << index;
+        IOLog("QCOMUSB UFS cbcr %08x=%08x run=%u en=%u\n", cbcr[index], value,
+              (value & (1u << QUD_UFS_CBCR_RUNNING)) ? 0u : 1u, value & 1u);
+    }
+    p = append_text(p, "UFS clk=");
+    p = append_hex32n(p, fb_ufs_run_mask, 3u);
+    p = append_text(p, " en=");
+    p = append_hex32n(p, fb_ufs_en_mask, 3u);
+    p = append_text(p, " gd=");
+    p = append_hex32n(p, fb_ufs_gd_mask, 2u);
+    if ((fb_ufs_run_mask & required) == required && native.ufs_va != 0) {
+        volatile uint32_t *hc = (volatile uint32_t *)(uintptr_t)native.ufs_va;
+        fb_ufs_ver = hc[QUD_UFS_HC_VER / 4u];
+        fb_ufs_hcs = hc[QUD_UFS_HC_HCS / 4u];
+        fb_ufs_hce = hc[QUD_UFS_HC_HCE / 4u];
+        p = append_text(p, " V=");
+        p = append_hex32n(p, fb_ufs_ver, 4u);
+        p = append_text(p, " hce=");
+        p = append_hex32n(p, fb_ufs_hce, 2u);
+        p = append_text(p, " hcs=");
+        p = append_hex32n(p, fb_ufs_hcs, 2u);
+    } else {
+        p = append_text(p, " hc=skip");
+    }
+    *p = 0;
+    fb_ufs_sampled = 1;
+    IOLog("QCOMUSB UFS %s\n", fb_ufs_line);
+}
+
+/* Second UFS sample, one shot, taken from the poll loop rather than from init: the userdata log writer
+ * installs its own SMMU entry and submits its own NOP OUT from its startup thread, so nothing about
+ * those is visible before it has run. Read only, and only when the required AXI/AHB branches reported
+ * running in the first sample - a gated UFS block can abort a read instead of returning one.
+ */
+static void sample_ufs_writer(void)
+{
+    const uint32_t required = (1u << QUD_UFS_CBCR_REQUIRED) - 1u;
+    char *p = fb_ufw_line;
+    uint32_t id0, is = 0, hcs = 0, ba = 0, dbr = 0, smr = 0, s2cr = 0, value;
+    unsigned index, count;
+    if (fb_ufw_sampled) return;
+    if ((fb_ufs_run_mask & required) != required || native.ufs_va == 0 || native.smmu_va == 0) return;
+    fb_ufw_sampled = 1;
+    {
+        volatile uint32_t *hc = (volatile uint32_t *)(uintptr_t)native.ufs_va;
+        is  = hc[QUD_UFS_HC_IS / 4u];
+        hcs = hc[QUD_UFS_HC_HCS / 4u];
+        ba  = hc[QUD_UFS_HC_UTRLBA / 4u];
+        dbr = hc[QUD_UFS_HC_UTRLDBR / 4u];
+    }
+    /* Stream matching, exactly the layout QcomUsbQualify.c uses for the USB stream: QUAD_ID0 carries the
+     * count in bits 7:0, SMR[i] is at 0x800 + 4i with validity in bit 31, S2CR[i] at 0xc00 + 4i. */
+    id0 = *(volatile uint32_t *)(uintptr_t)(native.smmu_va + 0x20u);
+    count = id0 & 0xffu;
+    if (count > 128u) count = 128u;
+    for (index = 0; index < count; ++index) {
+        value = *(volatile uint32_t *)(uintptr_t)(native.smmu_va + 0x800u + 4u * index);
+        if (!(value & 0x80000000u) || (value & 0x7fffu) != QUD_UFS_LOG_STREAM) continue;
+        smr = value;
+        s2cr = *(volatile uint32_t *)(uintptr_t)(native.smmu_va + 0xc00u + 4u * index);
+        break;
+    }
+    p = append_text(p, "UFW is=");
+    p = append_hex32(p, is);
+    p = append_text(p, " dbr=");
+    p = append_hex32(p, dbr);
+    p = append_text(p, " ba=");
+    p = append_hex32(p, ba);
+    p = append_text(p, " smr=");
+    if (smr != 0) p = append_hex32(p, smr); else p = append_text(p, "none");
+    *p = 0;
+    IOLog("QCOMUSB %s hcs=%08x s2cr=%08x id0=%08x\n", fb_ufw_line, hcs, s2cr, id0);
+    fb_payload_dirty = 1;
+    fb_build_payload();
+    fb_paint();
+}
+
 static int program_eusb2_phy(void)
 {
     QPHY_IO io;
@@ -1548,6 +1833,21 @@ int qcom_usb_debug_init(void)
     if (native.status.phase != QCOM_USB_DEBUG_NOT_INITIALIZED) {
         ret = native.status.phase == QCOM_USB_DEBUG_ACTIVE; goto out;
     }
+    {
+        /* -uketextconsole means the panel is meant to show kernel text. Taking PE_kputc away from it
+         * then leaves a boot that stops with no evidence, which b235..b239 paid for four rounds in a
+         * row. The bytes still reach USB through the console patch's _cnputs tee. */
+        boolean_t text_console = FALSE;
+        if (PE_parse_boot_argn("-uketextconsole", &text_console, sizeof(text_console)) && text_console) {
+            qcom_usb_debug_console_hijack = 0;
+        }
+    }
+    {
+        unsigned int reboot_seconds = 0;
+        if (PE_parse_boot_argn("usb-reboot", &reboot_seconds, sizeof(reboot_seconds))) {
+            qcom_usb_reboot_seconds = reboot_seconds;
+        }
+    }
     if (!PE_parse_boot_argn("qcom-usb-debug", &enabled, sizeof(enabled)) || enabled != 1) {
         native.status.phase = QCOM_USB_DEBUG_DISABLED; goto out;
     }
@@ -1602,9 +1902,15 @@ int qcom_usb_debug_init(void)
      * b223 firmware dump shows it holds a mis-programmed PLL at hand-off. Mapped one page wide
      * because ml_io_map takes pages; the node's own reg is 0x154 bytes. */
     native.phy_va = ml_io_map((vm_offset_t)QUD_EUSB2_PHY_BASE, QUD_EUSB2_PHY_MAPPED);
+    /* UFS is mapped but never written: the log writer in the device package owns it. Mapping costs
+     * nothing and a gated block tolerates a translation; only reads of it are gated below. */
+    native.ufs_va = ml_io_map((vm_offset_t)QUD_UFS_HC_BASE, QUD_UFS_HC_BYTES);
     if (!native.gcc_va || !native.usb_va || !native.smmu_va) {
         fail(QCOM_USB_DEBUG_MAP_FAILED, 0); goto out;
     }
+    /* Before anything can refuse this boot: the one observation that tells whether the UFS log window
+     * is empty because the writer failed or because the block was never clocked for it. */
+    sample_ufs_state();
     /* The board half, in the order the same-device upstream runs it: rails through the apps RSC (which
      * must report RSC 3.2), the USB core's GDSC and link clocks, the TCSR USB2 reference clock, the
      * controller reset, then the PMIC repeater. Without these the controller is programmed but the link
@@ -1698,11 +2004,6 @@ int qcom_usb_debug_init(void)
     if (!acquire_vbus()) {
         fail(QCOM_USB_DEBUG_VBUS_FAILED, 0); (void)restore_after_failure(); goto out;
     }
-    diag_checkpoint(QCOM_USB_DEBUG_DIAG_PHY_PROGRAM);
-    if (!program_eusb2_phy()) {
-        fail(QCOM_USB_DEBUG_PHY_PROGRAM_FAILED, (int)native.status.phy_writes);
-        (void)restore_after_failure(); goto out;
-    }
     bytes_zero(&platform, sizeof(platform));
     platform.read32 = core_read; platform.write32 = core_write;
     platform.delay_us = delay_us; platform.dma_sync = dma_sync;
@@ -1715,6 +2016,21 @@ int qcom_usb_debug_init(void)
         fail(QCOM_USB_DEBUG_CORE_INIT_FAILED, ret); (void)restore_after_failure(); ret = 0; goto out;
     }
     native.core_initialized = 1;
+    /* The vendor eUSB2 sequence has to run AFTER dwc3_init(), not before it.
+     *
+     * dwc3_init() ends its takeover with usb2_phy_soft_reset(), which pulses GUSB2PHYCFG(0).PHYSOFTRST -
+     * a PHY block reset that returns the register file to its defaults. Running the sequence before it
+     * therefore programs the PHY and then wipes it: the b235 card showed PLL=C800 and MIS=000709 after
+     * core init, which are the hand-off values from the b223 dump (0x5c=0xc8, 0x60=0x00, 0xb8=0x00,
+     * 0x64=0x07, 0x54=0x09), not the 9001/01170b the replay had just verified. The vendor orders it the
+     * other way round because its PHY driver is not called from inside the core's own soft reset.
+     * Placed before dwc3_start(), which arms endpoint 0 and starts the device, so the core sees a
+     * programmed PHY the first time it connects. */
+    diag_checkpoint(QCOM_USB_DEBUG_DIAG_PHY_PROGRAM);
+    if (!program_eusb2_phy()) {
+        fail(QCOM_USB_DEBUG_PHY_PROGRAM_FAILED, (int)native.status.phy_writes);
+        (void)restore_after_failure(); goto out;
+    }
     {
         static const char banner[] = "QCOM XNU USB CDC ACM v1\n";
         (void)backlog_write(banner, sizeof(banner) - 1);
@@ -1742,6 +2058,13 @@ int qcom_usb_debug_init(void)
         /* core_event_bytes is the card's G field, so the ring's readback replaces it here: after this
          * boot, G shows the count the core had written when the window opened, not the last poll's. */
         native.status.core_event_bytes = ring.event_count;
+        /* Same words into the record. The IOLog line above is unreadable without the CDC port (which is
+         * the thing being debugged), so a round that only logged them cost a photograph each time. */
+        native.status.ring_address_lo = ring.event_address_lo;
+        native.status.ring_size = ring.event_size;
+        native.status.ring_devten = ring.devten;
+        native.status.ring_dctl = ring.dctl;
+        native.status.ring_dsts = ring.dsts;
     }
     usb_diag_polling = 1;
     /* Let the host complete EP0 enumeration before early kernel startup can
@@ -1772,6 +2095,20 @@ int qcom_usb_debug_init(void)
     usb_diag_polling = 0;
     if (usb_diag_mode >= 201u && usb_diag_mode <= 203u) diag_reset(12);
     diag_checkpoint(QCOM_USB_DEBUG_DIAG_ENUM_DONE);
+    if (qcom_usb_reboot_seconds != 0u) {
+        /* The pram record the firmware reads next boot is written by UkeLastLog every second, so all
+         * this has to do is give it a few seconds and then reset warmly. Counted on the virtual
+         * counter, the same one the rest of this file uses. */
+        uint64_t frequency, start;
+        __asm__ volatile("isb\nmrs %0, cntfrq_el0" : "=r"(frequency) :: "memory");
+        __asm__ volatile("isb\nmrs %0, cntvct_el0" : "=r"(start) :: "memory");
+        IOLog("QCOMUSB REBOOT in %u s (PSCI SYSTEM_RESET, boot-arg gated)\n", qcom_usb_reboot_seconds);
+        while (frequency != 0u &&
+               (counter() - start) < (uint64_t)qcom_usb_reboot_seconds * frequency) {
+            delay_us(0, 10000u);
+        }
+        uke_psci_system_reset();
+    }
     native.status.phase = QCOM_USB_DEBUG_ACTIVE;
     /* The success counterpart of fail()'s persistent row. Without it a working controller and a
      * controller that never ran both leave the row empty, which is the ambiguity this whole
@@ -2207,6 +2544,7 @@ size_t qcom_usb_debug_write(const void *bytes, size_t count)
     }
     release(flags); return accepted;
 }
+int qcom_usb_debug_console_hijack = 1;
 void qcom_usb_debug_putc(char c) { (void)qcom_usb_debug_write(&c, 1); }
 void qcom_usb_debug_poll(void)
 {
@@ -2224,6 +2562,9 @@ void qcom_usb_debug_poll(void)
         fb_cycle();
     }
     if ((++pram_polls & 255u) == 1u) pram_state();
+    /* Late enough that the writer's own thread has tried, early enough to be on the card a photo catches:
+     * poll 512 is a few seconds in, and the card keeps cycling after that. */
+    if (pram_polls == 512u) sample_ufs_writer();
     if (usb_panic_mode == QCOM_USB_PANIC_POLLS && pram_polls == 64u)
         panic("QCOMUSB poll64 phase=%u err=%u tr=%u last=%u a=%x b=%x",
               native.status.diag_checkpoint, native.status.error, native.status.traces,

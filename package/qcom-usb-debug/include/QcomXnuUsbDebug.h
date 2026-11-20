@@ -90,6 +90,9 @@ typedef struct qcom_usb_debug_status {
      * issues GUSB2PHYCFG.PHYSOFT) or anything else undid the sequence, these differ from the
      * values the replay verified while it ran. */
     uint32_t phy_after_pll, phy_after_misc, phy_after_valid;
+    /* The event-ring programming read back once, before the poll window, so the record carries the
+     * numbers that used to exist only in an IOLog line nobody can read without the serial port. */
+    uint32_t ring_address_lo, ring_size, ring_devten, ring_dctl, ring_dsts;
     uint32_t dma_address_width, hwparams0;
     uint32_t last_trace, trace_a, trace_b, traces;
     uint32_t poll_calls, last_poll_events, io_failed;
@@ -137,6 +140,10 @@ int qcom_usb_debug_init(void);
  * A write accepts at most 16KiB; excess is counted and the prefix is returned.
  * No console, printf, allocation, scheduler or EFI functions are called. */
 void qcom_usb_debug_putc(char c);
+/* 1: become the kernel console (PE_kputc) after a successful init. Cleared when the boot asks
+ * for a text console (-uketextconsole), because the USB sink is the channel being debugged and
+ * a boot that stops with no panel text is unrecoverable. Read by the XNU console patch. */
+extern int qcom_usb_debug_console_hijack;
 size_t qcom_usb_debug_write(const void *bytes, size_t count);
 /* At most one USB event and a bounded pump; schedule externally if needed. */
 void qcom_usb_debug_poll(void);

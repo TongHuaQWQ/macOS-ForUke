@@ -657,6 +657,11 @@ extern void native_qemu_metal_publish(void);
 extern void sheng_cpufreq_probe(void);
 extern void sheng_gpu_power_probe(void);
 extern void native_touch_probe(void);
+// The official USB route used to be started from here. It is not any more: this function is called by
+// patches/xnu/offline-legacy-start.patch, whose call site is compiled only with XNU_NATIVE_LEGACY_DISPLAY,
+// and configs/uke-macos_defconfig leaves that off -- so on b251-usbdwc3 this whole function did not exist in
+// the kernel and the driver was never started. uke_usb_probe() now runs from bsd_autoconf()
+// (patches/xnu/zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch), before this file's display work and independent of it.
 // The DPU track's read-only snapshot and controlled-pipe test (package/DpuProbe.cpp):
 // a thread that waits for the firmware's scanout and then reads or (only with
 // uke-dpu-test=<n>) briefly writes the live pipes. Default off.

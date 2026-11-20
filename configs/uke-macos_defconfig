@@ -194,15 +194,21 @@ CONFIG_XNU_BOOT_LOG=y
 # CONFIG_XNU_EXTRA_LD_ARCHIVES force-loads it below. The window's geometry arrives on the command line
 # as uke-log-first/uke-log-last (board.toml [payload] kernel_args).
 CONFIG_XNU_LOG_USERDATA=y
-# The USB log console (package/qcom-usb-debug): the component's darwin24 pair is in the series (rebased
-# onto xnu-12377.121.6, see package/qcom-usb-debug/patches/darwin24/README.md) and
-# build/qcom-usb-debug/libQcomXnuUsbDebug.a is force-loaded. Runtime stays opt-in with qcom-usb-debug=1.
-CONFIG_XNU_QCOM_USB_DEBUG=y
+# The USB log console (package/qcom-usb-debug): the component's darwin24 pair stays in the series (rebased
+# onto xnu-12377.121.6, see package/qcom-usb-debug/patches/darwin24/README.md) and build-qcom-usb-debug.py
+# still builds the archive from board.toml [kernel] archives -- but it is NOT linked, and this key is what
+# links it: build-xnu-4k-baseline.sh force-loads .cache/qcom-usb-debug/libQcomXnuUsbDebug.a when
+# XNU_QCOM_USB_DEBUG=1 and compiles the series' hooks with -DXNU_QCOM_USB_DEBUG=0 when it is 0.
+# Off because this round runs the official route instead (drivers/QcomDwc3): both drive the same DWC3 and
+# package/QcomRpmh.c duplicates this component's soc/QcomRpmh.c, so only one may be in a kernel. The
+# patch series still applies unchanged, the hooks compile to nothing, and re-enabling the console is this
+# one line plus the three boot arguments named at the usb=1 block in board.toml.
+CONFIG_XNU_QCOM_USB_DEBUG=n
 # Force-loaded straight into the kernel link (build-xnu-4k-baseline.sh appends XNU_EXTRA_LD_ARCHIVES
 # verbatim, so the -force_load comes from here). {tree} is the build tree, which is also what the
 # script's $ROOT is -- the same substitution uke-full-plus_defconfig's two *_ARCHIVE keys use.
 #
-# Both archives stay linked, and no configuration decides which one wins. package/UfsLog.cpp exports
+# The first two archives stay linked, and no configuration decides which one wins. package/UfsLog.cpp exports
 # native_ufs_log_open/write/sync WEAK since this round; the storage archive carries
 # drivers/ShengUfs/NativeUfs.cpp (build-sheng-source-storage.py:202), which defines the same three
 # strongly. A strong definition beats a weak one, so with CONFIG_XNU_NATIVE_UFS on the driver serves
@@ -218,7 +224,21 @@ CONFIG_XNU_QCOM_USB_DEBUG=y
 # equivalent (build/software-aes-27/libSoftwareAES27.a) in the same key for the same reason. This is NOT
 # CONFIG_XNU_NATIVE_AES: that switch would also turn on the NativeAES subclass path whose vtable binding
 # this configuration deliberately leaves alone (see the note above).
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a -Wl,-force_load,{tree}/build/software-aes/libSoftwareAES.a"
+# The third archive is the official USB route (drivers/QcomDwc3, scripts/build-qcom-dwc3.py): QcomDwc3Xdci
+# and QcomDwc3Xhci subclass Apple's private AppleUSBXDCI/AppleUSBXHCI, and the kernel's only reference to
+# uke_usb_probe lives behind the XNU patch series (patches/xnu/zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch calls
+# it from bsd_autoconf()), so -force_load keeps every object in the image; whether it runs is decided at
+# boot by `usb=` (board.toml [payload] kernel_args), not by the link.
+#
+# Only ONE of the two USB owners may be in this list. drivers/QcomDwc3, package/qcom-usb-debug
+# (libQcomXnuUsbDebug.a) and package/uke_usb.c all program the same DWC3, and package/QcomRpmh.c is a
+# byte-identical copy of package/qcom-usb-debug/soc/QcomRpmh.c, so two of them in one link is both a
+# controller fight and a duplicate symbol. This configuration therefore carries libQcomDwc3.a and leaves
+# CONFIG_XNU_QCOM_USB_DEBUG=n: board.toml [kernel] archives still runs build-qcom-usb-debug.py, so the
+# CDC-ACM console stays buildable (bash package/qcom-usb-debug/scripts/check-component.sh --fast proves it
+# in seconds), it is simply not linked. Flipping back is this key plus the three boot arguments named at
+# the usb=1 block in board.toml.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a -Wl,-force_load,{tree}/build/software-aes/libSoftwareAES.a -Wl,-force_load,{tree}/build/qcom-dwc3/libQcomDwc3.a"
 # The source storage runtime and where its root-policy tables travel. These keys are the official ones —
 # Allenwdk/UniXNU-uke sets exactly this set for this device (configs/uke_ipados27_defconfig:20-23) — and
 # they reach the scripts through xnu_env(), which turns every CONFIG_XNU_* into the XNU_* variable of the

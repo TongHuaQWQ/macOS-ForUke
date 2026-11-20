@@ -145,7 +145,7 @@ diff --git a/pexpert/arm/pe_kprintf.c b/pexpert/arm/pe_kprintf.c
 index 7a4bbd3..15d7d50 100644
 --- a/pexpert/arm/pe_kprintf.c
 +++ b/pexpert/arm/pe_kprintf.c
-@@ -12,11 +12,19 @@
+@@ -12,11 +12,21 @@
  #include <kern/simple_lock.h>
  #include <os/log_private.h>
  #include <libkern/section_keywords.h>
@@ -160,6 +160,8 @@ index 7a4bbd3..15d7d50 100644
 +#if XNU_QCOM_USB_DEBUG
 +/* Whether verbose output was requested before a sink existed. */
 +static bool qcom_usb_debug_kprintf_requested;
++/* Set by the component; 0 leaves the panel console in place (see the install site below). */
++extern int qcom_usb_debug_console_hijack;
 +#endif
 +
  /**
@@ -239,12 +241,19 @@ index 7a4bbd3..15d7d50 100644
  	if (serial_init()) {
  		PE_kputc = serial_putc_crlf;
  	} else {
-@@ -71,6 +132,11 @@ PE_init_kprintf(void)
+@@ -71,6 +132,18 @@ PE_init_kprintf(void)
  		 */
  		PE_kputc = console_write_unbuffered;
  	}
 +#if XNU_QCOM_USB_DEBUG
-+	if (qcom_usb_ready) {
++	/*
++	 * Do not become the only console destination. The driver asked for this through
++	 * qcom_usb_debug_console_hijack, which it clears when the boot asks for a text console
++	 * (-uketextconsole): the USB sink is the channel being debugged, so making it the sole
++	 * consumer is exactly how a boot that stops ends up with nothing on the panel to say where.
++	 * When the hijack is refused the bytes still reach USB through this patch's _cnputs tee.
++	 */
++	if (qcom_usb_ready && qcom_usb_debug_console_hijack) {
 +		PE_kputc = qcom_usb_debug_putc;
 +	}
 +#endif

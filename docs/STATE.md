@@ -10,17 +10,19 @@
 | 项 | 值 |
 |---|---|
 | 目标 | Xiaomi Pad 7（uke / SM7675 "Cliffs"）跑 macOS 27.3（26C5035r，profile `macos-27.3-uke`），4 KiB 页 + arm64e/PAC 自建 XNU |
-| **当前卡点** | **根卷挂载**：`native-ufs-root=1` + 26C5035r 的三份签名 policy（OS/SystemOS/App）。签名表放不进启动镜像，所以内核包里只带 544 字节签名头，表以 `<window>.vroot` 数据对象落在 userdata 镜像里（§95）|
+| **当前卡点** | 主线是**根卷挂载**：`native-ufs-root=1` + 26C5035r 的三份签名 policy（OS/SystemOS/App）。签名表放不进启动镜像，所以内核包里只带 544 字节签名头，表以 `<window>.vroot` 数据对象落在 userdata 镜像里（§95）。**并行**：本轮把 USB 线并进来，`usb=1` 只做 bring-up（§108）|
 | 已经过的 | b262/b263 风暴 + cluster-type（§94）；b264 不对齐 `memcpy`；b266/b268 userdata 日志 DMA；b269 panic 文本进 pram；b272 `native-ufs-root=1` 链接通过 |
 | 刚修掉的 | **b276 的 `manifest.bin`**：不是缺文件，是核心 `version_env()` 少一行 `XNU_SOURCE_STORAGE_TABLES` 路由（§95）|
-| 当前分支 | `ci-b277-tables`（run `44332124267`），核心 `TongHuaQWQ/UniXNU@macos` = `e10bb7d` |
+| 本轮合并 | 分支 `usb-on-macos`：`ci-b276-storage4` 上并入 `mine/ci-b250-ufsclk`（USB 线，2026-11-16~18），9 个冲突逐个人工解（§108）。USB 只有**一个**所有者进内核：`libQcomDwc3.a` 被 force-load，`CONFIG_XNU_QCOM_USB_DEBUG=n` 让 CDC-ACM 那条留树不链接 |
+| 当前分支 | `usb-on-macos`（b276 + b250 的合并），核心 `TongHuaQWQ/UniXNU@macos` = `e10bb7d` |
 | 镜像索引 | `work/flash/INDEX.md`；刷 `bash work/flash/apply.sh <round>`，回原厂 `bash work/flash/restore-os4.sh`（**OS4** 在 `device/uke-backup/os4/`，`uke-backup/` 那份是 OS3 不要刷）|
 | 出镜像 | `python3 work/round.py <RUN_ID> --name <round> --core work/push/UniXNU --device work/push/uke-main-merge --profile macos-27.3-uke`（约 6 分钟）|
 | **参考实现**（别手搓，直接拿）| `work/ref-sheng/`=UniXNU-sheng（**跑 macOS**）、`work/ref-allenwdk/`=Allenwdk/UniXNU-uke（**这台机器跑 iPadOS**）、`work/ref-armcpu/`、`work/ref-senemos/`=Linux 补丁集、`work/ref-vendor-dt/`=厂商 DT |
 | 本轮文档 | `docs/ROADMAP-20261118.md`（问题清单+路线）、`docs/UPSTREAM-REVIEW-20261118.md`（哪些本地覆盖该丢）、`work/re/linux-ref/`（Linux 树交叉核对）|
-| 下一轮验收 | `root-policies.bin` 约 1.7 KB（不是 108 MiB）；`kernel.macho` 链接通过；payload 里 `native-ufs-root=1`；真机上 Root device 被 NativeUfs 认出来 |
-| 组件自检 | `bash package/qcom-usb-debug/scripts/check-component.sh`（几十秒，改归档代码前必跑）|
+| 下一轮验收 | 主线：`root-policies.bin` 约 1.7 KB（不是 108 MiB）；`kernel.macho` 链接通过；payload 里 `native-ufs-root=1`；真机上 Root device 被 NativeUfs 认出来。USB：面板/串口里的 `UKE usb: … stage=N`（9 = 硬件就绪，负值 = 失败的那一步）与 `gsnpsid`，主机 `ioreg -p IOUSB` 是否出现设备 |
+| 组件自检 | `bash package/qcom-usb-debug/scripts/check-component.sh`（几十秒，改归档代码前必跑）；USB 官方路线另有一条纯 Python 自检 `python3 scripts/build-qcom-dwc3.py --check-headers`（267 个 slot 名字重新推导 PAC diversity，不需要 macOS）|
 | 核心契约 | `python3 scripts/check-core-contract.py --core ../UniXNU`（秒级；CI 在检出 UniXNU 后自动跑，把 b274/b275/b276 那类"核心落后一提交"变成秒级报错）|
+| 情报库 | `work/analysis/porting-kb/`（移植知识，含 `linux-dwc3` 源码副本）、`work/analysis/hw-intel/`（9 个分项 + `README.md` 排序后的行动清单，7300 行）|
 | 设备操作铁律 | **不要长按断电**（DRAM 里的诊断全丢）；要在 TWRP 里读日志 |
 | CI 铁律 | `ci-*` 分支一推就构建（~35 分钟），**同一时间只推一个**：推新分支会把在跑的那次顶掉（b262 就是这么被 cancel 的）|
 
@@ -6337,3 +6339,443 @@ diversity 由方法名+签名散列而来 ⇒ 27.3 的私有虚函数布局与 2
 **本地验证**：`check-component.sh`（含 34 项 sanitised suite）全通过；`QcomUsbBoardInit.c` 另用
 gcc/clang `-Wall -Wextra -Werror -fsyntax-only`（kernel 头文件用最小桩）单独编过；核心契约检查通过；
 `kernel_args` 54 条 / 992 B。
+---
+
+## §108 合并进来的 USB 线原文（`ci-b250-ufsclk`，2026-11-16 ~ 11-18）
+
+这一节是**另一条分支**的记录，2026-11-19 并进 `ci-b276-storage4`（分支 `usb-on-macos`）时**整段原样搬来**
+（只在这里加这段说明）。它的"§95/§96"是那条线自己的编号，和本文上文的 §95–§107 不是同一套；段内互相引用的
+`§95f`、`96a` 指的都是下面这两节。
+
+那一轮的结论一句话：官方 USB 路线（`drivers/QcomDwc3` → `AppleUSBXDCI`/`AppleUSBXHCI`）在这台机器上
+**构建、链接、prelink 全部打通，`usb=1` 的 bring-up 还没上真机**；上一轮 CDC-ACM 探针路线（`-71`/`-110`）
+停用。合并时保持的取舍：
+
+| 冲突文件 | 取哪边 | 理由 |
+|---|---|---|
+| `board.toml` | 两边都要，参数去重 | USB prelink roots（含两条 `!` 排除）、`build-qcom-dwc3.py`、`usb=1` 的 1/4/5/6 语义来自这条线；log 窗口与其余参数取主线；`usb=1`、`-uketextconsole`、`sheng-log=1` 各只留一份（命令行 960/1000）|
+| `configs/uke-macos_defconfig` | 主线为底，加 `libQcomDwc3.a` | 三个归档一起 force-load；`CONFIG_XNU_QCOM_USB_DEBUG=n` 是"只留一条 USB 路径"的全部机制 |
+| `docs/STATE.md` | 两段都留 | 本节即原文 |
+| `drivers/ArmCpu/ArmCpu.cpp` | 主线 | 主线已有 `armcpu_spi_mask`（检查 `gSpiRoutes`，未 attach 时回 `kIOReturnNotFound`），这条线那份是同一函数的弱化重复 → 不留重复符号 |
+| `kits/XnuPrelink/fileset_match.py` | 主线 | 主线的 4e56c09（2026-11-19）把 reviewed anchor 改成"地址当提示、按符号重解"；这条线的 88b8de4（2026-11-17）是"按记录距离解一组"，扩内核后会硬失败 |
+| `package/GeniI2c.{c,h}` | 主线 | 主线是超集：多 `geni_i2c_start_read_combined()`（单条 WRITE_READ 主序列命令）、`rx_buffer` 收尾修正 |
+| `package/UsbProbe.cpp` | 这条线 | 它是 `build-qcom-dwc3.py` 编译的那一份，且已是 `usb=1/4/5/6` + 时间基自旋（无 `IOSleep`）+ reporter/worker 双线程 |
+| `package/qcom-usb-debug/kernel/QcomXnuUsbDebug.c` | 两边都要 | 这条线 355 行（UFS 采样、PSCI 自复位、PHY 幅度…）打底，主线那 13 行 `qcom_usb_board_init()` 板级五段接在 `QcomUsbInspectInherited()` 之前 |
+
+## 95. 2026-11-16: the official USB route is wired end to end (build side)
+
+The driver files landed in `2f4e573`; this round makes them *buildable and linkable*, which turned out
+to be the larger half. Nothing here was verified on hardware yet — the round's evidence is one CI build
+and then one boot.
+
+### 95a. What the vendored driver was still missing
+
+`2f4e573` committed `drivers/QcomDwc3/` + `package/UsbProbe.cpp` + the two ABI fixtures and stopped.
+Compiling it, four things were absent from this repository:
+
+| what the source asks for | where it comes from now |
+|---|---|
+| `OriginalUsbXdciABI.h`, `OriginalUsbXhciABI.h` | generated by `scripts/build-qcom-dwc3.py` from the fixtures |
+| `GeniI2c.h` / `.c`, `QcomRpmh.h` / `.c`, `AppsSmmuLock.h` | `package/`, copied from `UniXNU-sheng` (generic Qualcomm IP, board-independent) |
+| `sm8550_gcc_update32` + `sm8550_apps_smmu_lock`/`unlock` | `package/QcomDwc3Platform.c` (new; two `IOLock`s over a locked read-modify-write) |
+| `armcpu_spi_mask` | `drivers/ArmCpu/ArmCpu.cpp` (new; ICENABLER/ISENABLER on one INTID, handler stays attached) |
+
+The `sm8550_` names are the *driver's own imports*, kept verbatim so the vendored file differs from
+upstream by its constants alone; the implementations are this board's. `AppsSmmuLock.h` declares both
+weak, so a build without `QcomDwc3Platform.c` still links.
+
+### 95b. `scripts/build-qcom-dwc3.py` — what it does and what it proves
+
+One script, six steps: generate both base classes from the fixtures, compile the five units with this
+tree's own compile records, read the *compiled* vtables back, emit branch stubs for every original
+entry reached, archive, assert the exports.
+
+The vtable read-back is the point. The kernel is arm64e, so each entry is signed with a
+pointer-authentication diversity derived from the declaration's mangled name; the fixture records the
+diversity the *original* slot authenticates with. Generating a declaration whose mangled name hashes to
+a different diversity compiles fine and faults at the first original call on device. So the script fails
+the build with a slot number instead. Two things make that check trustworthy:
+
+- the SipHash-2-4 `ptrauth_string_discriminator` is implemented in the script, and `--check-headers`
+  re-derives the diversity of **all 267 reviewed slot names** (112 XDCI + 155 XHCI) from their own
+  mangled names before emitting anything. That is a pure-Python check, so it runs anywhere:
+
+      python3 scripts/build-qcom-dwc3.py --check-headers
+
+- the object is verified after compiling, not the source: `object_vtable()` reads the authenticated
+  relocations of `__ZTV12QcomDwc3Xdci` / `__ZTV12QcomDwc3Xhci` and compares every word's diversity and
+  target with the fixture, and rejects a native class that binds an abstract original slot or a foreign
+  entry above `base_slots`.
+
+Note `base_slots`: 272 on 26C5035r, versus 168 on iPadOS 24A446. The fixtures carry it, so the same
+script handles either.
+
+### 95c. Wiring, and the four places it touches
+
+- `feeds.toml`: `QcomDwc3` as `local = "drivers/QcomDwc3"`. Redundant with feeds step 5 (every
+  `drivers/` directory of the device repo is registered anyway) but it states the catalogue
+  relationship. The driver is **not** in `[components].include` on purpose: its catalogue entry has
+  `build = []`, nothing in the kernel references the archive, and `UkePreflight` already proves an
+  uncatalogued driver directory is harmless.
+- `board.toml [kernel] archives`: `"build-qcom-dwc3.py"`.
+- `configs/uke-macos_defconfig`: the archive is the second `-Wl,-force_load` in
+  `CONFIG_XNU_EXTRA_LD_ARCHIVES`. Force-load, not a reference, because the call site is weak.
+- `package/LegacyDisplayProbe.cpp`: `if (uke_usb_probe) uke_usb_probe();` after the input probes — the
+  one call site the module had been missing entirely.
+
+### 95d. Boot arguments: `usb=1`, and why not `log-sys=1`
+
+| change | why |
+|---|---|
+| `usb=1` added | the driver's own switch (`PE_parse_boot_argn("usb", …)` in `package/UsbProbe.cpp`) |
+| `qcom-usb-debug=1` **off** | the CDC-ACM probe programs the same controller's DEVCTRL/ep0; two owners would fight over the core reset. Its archive stays linked, so this is a one-line revert, not a rebuild |
+| `-uketextconsole` added | the round's evidence is kernel text (`qcom-dwc3:` and the two `UKE usb:` lines). The diagnostic card that made the graphics console acceptable is off in this round |
+| `log-sys=1` **not** added | `log-sys` is a group of `package/BootLog.c`, which this port does not carry: the argument would have cost 10 bytes and printed nothing. `package/UsbProbe.cpp` logs `native_usb_stats` itself instead |
+
+Command line after the changes: **971 of 1000 bytes**. `payload.py:38` enforces the cap.
+
+### 95e. What the next boot reads
+
+```
+UKE usb: bring-up stage=9 gsnpsid=… hwpar=… gdsc=… smmu=… repeater=… rpmh=… irq=… kext=…
+UKE usb: helper dsts=… dcfg=… gctl=… gusb2phycfg=… retimer=… qmp=… role=… vbus=…
+UKE usb: published …
+```
+
+`stage` is `native_usb_stats[0]`: 1–9 are the bring-up steps in `QcomDwc3.cpp:bringUp()` and a negative
+value names the step that failed (`-9` xDCI kext load, `-10` `preModLoad`, `-11` `postModLoad`). The
+`bring-up-failed` line is printed on failure too, which is the whole reason it exists: a silent worker
+cannot be told from one that never ran.
+
+Then the two questions this round is meant to answer:
+
+1. does the controller reach stage 9 (`native_usb_stats[1]` = `0x33313130`, the DSNPSID)?
+2. does the Mac see the device (`ioreg -p IOUSB -l -w0 | grep -E 'idVendor|idProduct|Device Speed'`)?
+
+| reading | next step |
+|---|---|
+| stage 9, no enumeration | `usb=2` for the register sampling, then §68's "(b) gap list": PHY tables (`QcomQmpUsb3.h` is still the SM8550 table) and the SMMU context |
+| stage 1–4 | the GCC/GDSC half: `package/QcomDwc3Platform.c` and the cliffs clock offsets the driver carries |
+| stage 6–7 | PHY/repeater: eUSB2 reference clock (19.2 MHz measured on this board, sheng's is 38.4 MHz) |
+| `-10`/`-11` | class registration: the fixture's `base_slots`/diversity check passed at build time, so this would be the metaclass handshake itself |
+| no `UKE usb:` line at all | the call site or `usb=1` did not arrive — check the payload's `kernel_args` in `payload.json` |
+
+### 95f. Known risks taken, in order
+
+1. **Prelink budget.** The roots closure now contains 11 more kexts. `prelink` can fail with "Native
+   __DATA overlaps a retained segment" (STATE 76 paid for that once with a 16 MiB buffer). Nothing was
+   widened to make room; if it fails, `QUD_SCREENSHOT_MAX_BYTES`-style budget work comes next.
+2. **Two DWC3 owners linked.** `CONFIG_XNU_QCOM_USB_DEBUG=y` is unchanged, so both archives are in the
+   image; only the official one is switched on. If the link collides, the debug config is the one to
+   drop.
+3. **`QcomQmpUsb3.h` is still the SM8550 QMP table** (STATE 68 says so and no cliffs Linux tree exists
+   for it yet). The driver falls back to `selectUtmiClock()` when QMP fails, so device mode at 480 Mbps
+   is the target of this round; SuperSpeed is not.
+4. **QMP/USB3 and the retimer were not re-derived** for cliffs; `native_usb_stats[32..34]` reports what
+   they did, which is why they are in the log line.
+
+### 95g. The `!` prelink roots needed a kit port
+
+`board.toml` writes two roots as `!com.apple.driver.AppleOnboardSerial` and `!com.apple.driver.AppleSMC`,
+the way the sheng board does. This board's `kits/XnuPrelink` copy predates that convention and did not
+parse it: `dependency_closure()` fed every root straight into the bundle-id lookup, so a `!` root would
+have died with `Missing prelink dependency: !com.apple.driver.AppleOnboardSerial` about twenty-five
+minutes into the round.
+
+Upstream `XnuPrelink`'s `fileset_emit.py` has the two hunks that handle it, and both are now ported into
+the board copy (they are inert without a `!` root, so nothing else changes):
+
+- `dependency_closure()`: an excluded bundle is never added to the closure, even when a retained kext
+  lists it in `OSBundleLibraries`.
+- `rebase_collection()`: that library entry is deleted from the retained kext's own list, so the
+  collection does not carry a library slot nothing fills.
+
+Measured on the 26C5035r kernelcache (the fixtures' `d1003b51…`), which is also the prelink budget
+number for §95f risk 1:
+
+| roots | closure |
+|---|---|
+| the 31 pre-USB roots | 41 kexts |
+| + 11 USB roots, no exclusions | 68 kexts |
+| + 11 USB roots and the two `!` exclusions | **58 kexts** |
+
+The exclusions drop exactly `AppleOnboardSerial` and `AppleSMC` (and the eight kexts that came in only
+for them: A7IOP, ARMPMU, EmbeddedTempSensor, IOSlaveProcessor, RTBuddy, mDNSOffloadUserClient,
+IOSkywalkFamily, IONetworkingFamily). The kit's own suite still passes: `pytest -q` in `kits/XnuPrelink`
+→ 70 passed.
+
+### 95h. First CI round: the archive step reached the compile, and bitcode stopped it
+
+Run `43885411003` on `d33172b` failed in `archive-18-build-qcom-dwc3`, six log lines:
+
+```
+driver: …/UniXNU-uke/drivers/QcomDwc3        <- the UNIXNU_DEVICE fallback, as designed (the tree does
+kits:   …/tree/kits/uke                          not link an unselected driver)
+usb-xdci-26C5035r.json: 384 slots … 112 names re-derive their diversity
+usb-xhci-26C5035r.json: 427 slots … 155 names re-derive their diversity
+kernelcache d1003b51…, collection slide 0x1f000000000
+not an arm64 Mach-O object
+```
+
+So the generation half worked on the runner — both fixtures, the SipHash check on all 267 names — and the
+five units **compiled clean** (no compile diagnostics in the log). The failure is at the read-back:
+`CONFIG_XNU_BUILD_LTO=y` means the compile records are LTO units, so the same command line emitted an
+LLVM bitcode wrapper (magic `0x0b17c0de`) instead of a Mach-O object, and `macho()` said so in the least
+useful possible words.
+
+The fix is in the script, not the board: `-flto`/`-emit-llvm`/`-fembed-bitcode*` are dropped from the
+record (every archive force-loaded into this link is native — the UFS log, the CDC-ACM probe, the
+component archives — so native is the shape that links), the drop is printed per unit, and
+`read_object()` now names the magic it found: a bitcode wrapper, a wrong magic, or a truncated file each
+get their own message.
+
+Two things this round bought even while failing: the device-checkout fallback for `drivers/QcomDwc3`
+works (`module()`'s second candidate), and the compile of `package/QcomDwc3Platform.c` through an
+`osfmk` record is confirmed — the bsd-record question from the previous commit never had to be tested on
+the runner.
+
+### 95i. Second CI round: bitcode fixed, the assembly lost its language
+
+Run `43889478153` on `da19d6b` got the whole compile through — the log awards the round its evidence:
+
+```
+QcomDwc3.cpp: compiled native (record carried -flto=full)
+UsbProbe.cpp: compiled native (record carried -flto=full)
+GeniI2c.c / QcomRpmh.c / QcomDwc3Platform.c: compiled native (record carried -flto=full)
+usb-bindings.S failed to compile:
+  clang: warning: '-x assembler' after last input file has no effect [-Wunused-command-line-argument]
+  usb-bindings.S:1:1: error: expected identifier or '('
+      1 | .text
+```
+
+So the driver, the board entry and all three C units compile against the generated ABI classes on the
+runner; the LTO stripping works, and `read_object()` is what stopped the round from getting further with
+a wrong-shaped archive.
+
+The last error is mine: `-x` applies to the inputs that *follow* it, and I appended `-x assembler` after
+the source, so clang compiled `.text` as C. The language is now forced in front of the source and the
+record's own `-x` pair is dropped (it describes the unit the record was taken from, not ours); the `.S`
+units compile as `assembler-with-cpp`, which is what a `.S` suffix means.
+
+### 95j. Third CI round: the archive built, the link missed every inherited slot
+
+Run `43892185873` on `e61fec4` is the round that proved the archive: all seven units compiled as the right
+language, the vtables verified against the fixtures, and the step printed
+
+```
+QcomDwc3: 263 original bindings, 7 objects, 568736 bytes, sha d7368fc40d745d21
+```
+
+Then the kernel link failed on exactly the symbols the stubs were supposed to answer:
+
+```
+Undefined symbols for architecture arm64e.kernel:
+  "AppleUSBXDCI::setPowerState(unsigned long, IOService*)", referenced from:
+      vtable for QcomDwc3Xdci in libQcomDwc3.a[2](QcomDwc3.late.o)
+  "AppleUSBXDCI::free()" … "AppleUSBXHCI::handleIsOpen(IOService const*) const" …
+```
+
+Cause: I had kept only the *diversity* lookup for the stubs. It resolves a name by hashing it, and it works
+for the slots the fixture names — but when the native class leaves a slot to the base implementation, clang
+names that entry after the base class **we declared** (`AppleUSBXDCI::free`), while the original slot's
+diversity belongs to whoever introduced the method (`IOUSBDeviceController` in this collection). Those names
+never hash to a slot, so 21 of them were silently skipped. Upstream's builder binds them by *vtable
+position*, which cannot miss: `for slot, (name, _) in enumerate(entries): if name in imports: bind(slot)`.
+That pass is restored as the primary one, with the diversity lookup kept for a direct call that never
+passes through a slot.
+
+The round also gained the check that would have failed the build instead of the link: after the bindings
+are built, every import naming `AppleUSBXDCI`/`AppleUSBXHCI` must have one, or the script stops with the
+list. `bindings: N (M original-class imports, all covered)` is printed either way.
+
+One thing to keep an eye on when the hardware speaks: these inherited slots are bound to the *original*
+implementation's address (fixture slot + collection slide), which is what the reference board does. If the
+device faults on the first `free`/`init`, that binding is the first suspect.
+
+### 95k. Fourth CI round: the kernel links with the USB archive; prelink's anchors were layout-pinned
+
+Run `43898991311` on `4eee689` is the first round in which everything through the kernel link worked:
+
+```
+bindings: 299 (298 original-class imports, all covered)
+QcomDwc3: 299 original bindings, 7 objects, 582896 bytes, sha 63a3eb3dc8cabe2c
+…
+ld: symbol(s) not found for architecture arm64e.kernel   <- kernel-bootstrap.log only, tolerated
+```
+
+The vtable-position pass added 299 stubs where the diversity lookup had found 263, the coverage check
+passed before archiving, and the real link (`kernel.log`, 5149 lines) has no undefined symbols: the
+driver, its two subclasses and their bindings are in the kernel.
+
+Prelink then stopped on the board's *reviewed anchors*:
+
+```
+native:   30075 functions, 1645 diversities
+ValueError: Reviewed native address is not a function start: 0xfffffff007364b28
+```
+
+`fixtures/fileset-26C5035r-symbols.json` pins two identities AppleImage4 reaches through `__DATA_CONST`
+slots (`kalloc_type_impl`, `kfree_type_var_impl`) by *native address*, because both names are ambiguous —
+each also exists as an `_external` alias in `__TEXT_EXEC`, so `named_functions` (which keeps only unique
+names) cannot bind them. An address is a fact about one build: adding the USB archive moved both.
+
+The board's matcher copy now falls back to the symbol name when the recorded address is no longer a
+function start, and *stops with the candidate list* when the name is not unique there. The review itself
+is untouched — the original-side bytes are still hashed against `original_sha256` — only the layout pin is
+replaced by a resolution. Log line when it happens:
+
+```
+reviewed _kalloc_type_impl: recorded 0xfffffff007364b28 is stale after a layout change; bound … by symbol name
+```
+
+`pytest -q` in `kits/XnuPrelink`: 70 passed.
+
+### 95l. Fifth CI round: the anchor fallback refused to guess, and was right to
+
+Run `43907588798` on `03f8e75` reached prelink again and stopped inside the fallback added in 95k:
+
+```
+ValueError: Reviewed native address is not a function start: 0xfffffff007364b28 (stale after a layout
+change), and _kalloc_type_impl resolves to 2 function starts: 0xfffffff007368b28, 0xfffffff007551388
+```
+
+Both candidates are real function starts that carry the bare symbol — so name resolution alone cannot pick
+one, and picking the nearer one would have been a guess in an identity review. What the review *also*
+records is the distance between the two reviewed functions: `kalloc_type_impl` at `0x…64b28` and
+`kfree_type_var_impl` at `0x…65020`, i.e. `+0x4f8`, and both live in one production unit, so that
+distance survives a layout shift even though the absolute addresses do not.
+
+`resolve_reviewed_layout()` therefore resolves the pinned group *together*: every combination of one
+candidate per reviewed function is checked against every recorded pairwise distance, and the round
+proceeds only when exactly one combination survives. It says so in the log —
+
+```
+reviewed _kalloc_type_impl: recorded 0xfffffff007364b28 is stale after a layout change;
+  bound 0xfffffff007368b28 by the recorded distance to the other reviewed function
+```
+
+— and refuses, listing the candidate pools, when several combinations survive or none does. The
+candidate lists are printed either way, so the next round's log says what this kernel actually offers.
+
+### 95m. Sixth CI round: green — `b251-usbdwc3` is packaged and flashing it is the next step
+
+Run `43913735659` on `88b8de4` is the first round of this route that produced a kernel.
+
+```
+bindings: 299 (298 original-class imports, all covered)
+QcomDwc3: 299 original bindings, 7 objects, 582896 bytes, sha 63a3eb3dc8cabe2c
+…
+reviewed _kalloc_type_impl: recorded 0xfffffff007364b28 is stale after a layout change;
+  bound 0xfffffff007368b28 by the recorded distance to the other reviewed function
+reviewed _kfree_type_var_impl: … bound 0xfffffff007369020 …
+functions: 14062/23976   data: 2619   kext-facing targets named: 3719/3856
+unresolved closure references: 0; stubbed functions: 0
+wrote kernel.macho (139952128 bytes) sha256 bf1fc616bebc044ca4c2aacc18d8a214c6318131173cd471b6b909df2fdcc9c3
+```
+
+The distance rule in 95l picked the same addresses an independent check confirms: in the artifact's own
+`native/native.macho`, `0xfffffff007368b28` carries `_kalloc_type_impl` **and**
+`_kalloc_type_impl_external` and `_kalloc_type_impl_internal` (a global, the real family), while the
+rejected candidate `0xfffffff007551388` carries `_kalloc_type_impl` as a *local* symbol — a private
+clone. A future round can use symbol binding as the first discriminator; the distance rule already
+worked, so it was left alone rather than re-tested through a 35-minute round.
+
+Packaged as **b251-usbdwc3**:
+
+| image | bytes | sha256 (first 16) |
+|---|---|---|
+| `work/flash/vendor_boot_round-b251-usbdwc3.img` (payload: kernel + ADT) | 85,782,528 | `c8f0e3eb53d66659` |
+| `work/flash/boot-round-b251-usbdwc3.img` (firmware, unchanged) | 1,159,168 | `97315c632acfa31f` |
+
+Boot arguments in the packaged payload, read back out of `payload.json`: `usb=1` present,
+`-uketextconsole` present, `qcom-usb-debug=1` absent, command line **971 of 1000 bytes**.
+
+Flash, then read:
+
+```
+fastboot flash vendor_boot_a work/flash/vendor_boot_round-b251-usbdwc3.img
+fastboot boot            work/flash/boot-round-b251-usbdwc3.img
+```
+
+on the panel, with `-uketextconsole`, the two lines this round exists for:
+
+```
+UKE usb: bring-up stage=N gsnpsid=33313130 …
+UKE usb: helper dsts=… dcfg=… gctl=… gusb2phycfg=… retimer=… qmp=… role=… vbus=…
+```
+
+`stage=9` is hardware-ready; a negative value names the step that failed (`-9` xDCI kext load, `-10`
+preModLoad, `-11` postModLoad). Then on a Mac: `ioreg -p IOUSB -l -w0 | grep -E 'idVendor|idProduct|Device
+Speed'`. §95e has the branch table for each reading, and §95f the four risks: the prelink data budget did
+not bite this round (the collection emitted with nothing stubbed), the two DWC3 owners stayed linked and
+only one is switched on, the QMP table is still SM8550's, and the retimer was not re-derived for cliffs.
+
+## 96. 2026-11-17: b251-usbdwc3 flashed, and the log named two reasons it could never have worked
+
+The round's kernel booted (eight CPUs started, `security policy loaded`, kexts starting) and printed not one
+`UKE usb:` line. Two independent causes, both mine, both now fixed; neither is a hardware finding.
+
+### 96a. The call site was compiled out
+
+`offline-legacy-start.patch` calls `native_legacy_display_late_probe()` — the function that used to call
+`uke_usb_probe()` — inside
+
+```c
+#if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
+```
+
+and `configs/uke-macos_defconfig:99` says `# CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set`. The built kernel
+proves it: `native/native.macho` from run `43913735659` defines `_uke_usb_probe`, `_qcom_dwc3_bring_up`,
+`_native_usb_stats`, `_armcpu_spi_mask` and `_sm8550_gcc_update32`, and has no
+`_native_legacy_display_late_probe` at all. `2f4e573`+`88b8de4` therefore shipped a driver that was linked
+(force-load worked) and unreachable. My earlier claim that this hook is unconditional was wrong: I read the
+hunk body and not the guard above it.
+
+Two corrections to that first reading, both from disassembling the b251 kernel rather than trusting the
+patch text:
+
+- `offline-legacy-start.patch` is not in either core series at all (`patches/xnu/series`,
+  `patches/xnu-12377/series`), so the display late probe was never compiled in — not merely gated. The
+  diagnosis is therefore stronger than "the guard is off", which is why the fix does not try to turn that
+  guard on.
+- `#if XNU_QCOM_USB_DEBUG` *is* live. `qcom_usb_start_worker_once()` is inlined into `bsd_autoconf` in
+  `b251-usbdwc3`'s native kernel (a compare-and-swap once-guard, states 0–4, `QCOM USB WORKER start
+  failed`), so `CONFIG_XNU_QCOM_USB_DEBUG=y` does reach the compiler by a path this repository does not
+  own — `scripts/build-xnu-4k-baseline.sh` does not name it and no device patch defines it. I first
+  recorded the opposite here; the disassembly is the evidence, and it also means the bsd-init hook that
+  patch adds has been running, with its output going to the pram path rather than to the panel.
+
+### 96b. `IOSleep` cannot return on this machine
+
+The panel also carries the long-standing timer finding in the same frame: `Proc: 0 timer interrupts, 0 IPIs
+in the first 10 s after registration`, `uke-stall-probe: samples=0`, and `fileset-wait: … (Infinite)`
+everywhere. `IOSleep()` is a wait with a timeout on that timer, so it never wakes. The worker opened with
+`IOSleep(3000)` and the driver takes eleven `IOSleep`s of its own (`QcomDwc3.cpp:83,224,225,270,305,599,645,
+651,662,678,849`). Even with the call site fixed, the first line would have been that 3 s sleep.
+
+### 96c. What changed
+
+| change | where |
+| --- | --- |
+| the call site, once, at the top of `bsd_autoconf()` | `patches/xnu/zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch` (new) |
+| a **weak** no-op `uke_usb_probe()` so every configuration still links | same patch |
+| `IOSleep` → a spin on the timebase | `drivers/QcomDwc3/QcomDwc3.cpp` (`#define IOSleep` → `uke_delay_ms`), `package/QcomDwc3Platform.c` (`uke_delay_ms` = `IODelay`) |
+| one line per bring-up stage, as it is entered | `QcomDwc3.cpp:stage()` |
+| entry line before anything can block, and a bounded retry of the two kext loads | `package/UsbProbe.cpp` |
+| the old display-probe call site removed | `package/LegacyDisplayProbe.cpp` |
+| `usb=` semantics documented (1 = bring-up only, 4 = + Apple stack, 5 = + diag cycle) | `board.toml` |
+
+Why a weak definition rather than a `#if`: a call from `bsd_init.c` is a link-time reference, and the
+bootstrap configuration links without the archives — an undefined pac-signed import is a hard failure there
+(that is the `l_…$auth_ptr$ia$` error `zzzzzzzzzzzzzzzzz-uke-bsd-init-hook.patch` records). A weak
+definition keeps every configuration linkable; where `build/qcom-dwc3/libQcomDwc3.a` is linked, its strong
+definition wins. No core repository change, no new configuration key.
+
+`usb=1` deliberately stops after the bring-up: this is the first round whose question is "does the
+controller come up, and where does it stop", not "does the Apple stack enumerate". `usb=4` is the stack
+half and needs only a payload rebuild once the bring-up reading is in hand.
+
+Checked before pushing: the new patch applies both alone and after its sibling
+(`zzzzzzzzzzzzzzzzzz-qcom-usb-debug-worker.patch`), `check-patch-copies.py` and `check-patch-hygiene.py`
+(35 patches, 0 problems) pass, `porting-record.py check` passes (14 areas), the command line is still 971 of
+1000 bytes, and `QcomDwc3Platform.c` compiles clean freestanding.
