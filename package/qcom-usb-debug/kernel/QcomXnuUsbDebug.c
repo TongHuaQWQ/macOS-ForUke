@@ -1613,7 +1613,7 @@ int qcom_usb_debug_init(void)
     if (usb_diag_enabled) {
         const int board = qcom_usb_board_init();
         if (board != 0) {
-            printf("QCOMUSB BOARD stage=%d\n", -board);
+            IOLog("QCOMUSB BOARD stage=%d\n", -board);
             fail(QCOM_USB_DEBUG_BOARD_INIT_FAILED, board);
             goto out;
         }
