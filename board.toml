@@ -832,6 +832,12 @@ kernel_args = [
   # the freestanding UFS writer in package/UfsLog.cpp. They are short on purpose -- the command line
   # is capped at 1000 bytes and 949 were already in use.
   #
+  # RESOLVED 2026-11-20 (user decision: "follow upstream"): the userdata ring stays. Upstream's own
+  # convention for this board is the same one — Allenwdk/UniXNU-uke records it as "UkeLastLog writes a
+  # 16 KiB record into the last 32 MiB of userdata every 2 s" (docs/RECOVERY-LOG.md, with sheng-log=1 in
+  # board.toml kernel_args), and upstream's log-capture guide places the reference region inside userdata
+  # as well. So this is not a local preference: it is the upstream layout, and the slot-B pair below is the
+  # divergence. The 32 MiB cost against /data is accepted with it, as upstream accepts it.
   # MERGE NOTE (branch usb-on-macos, ci-b276-storage4 x ci-b250-ufsclk). Both lines moved this window and
   # both were reviewed; the two pairs are mutually exclusive, because the arguments themselves are the
   # conflict:
