@@ -35,6 +35,7 @@
 #include <pexpert/pexpert.h>
 #include <kern/thread.h>
 #include <kern/debug.h>
+#include <kern/machine.h>
 extern kmod_info_t g_kernel_kmod_info;
 extern "C" bool qcom_dwc3_bring_up(void);
 extern "C" void qcom_dwc3_publish(void);
@@ -73,6 +74,7 @@ static void report_forever(const char *where) {
 // later on AppleImage4's output. A line every second survives that, because the console's scrollback always
 // holds the most recent second.
 static void reporter(void *, wait_result_t) {
+    ml_set_interrupts_enabled(TRUE);   // see worker(): every line below is an IOLog
     for (unsigned beat = 1;; ++beat) {
         if (beat == 3) {
             // A binary test the panel cannot lose. Two rounds of photographs show the console's tail full of
@@ -96,6 +98,12 @@ static void reporter(void *, wait_result_t) {
     }
 }
 static void worker(void *, wait_result_t) {
+    // IOLog asserts when it is called with interrupts disabled
+    // ("ml_get_interrupts_enabled() || ... : IOLog called with interrupts disabled", the
+    // 2026-11-21 boot). This thread is started from the first statement of bsd_autoconf(),
+    // where that CPU is not known to have them on, and every line below is an IOLog. Turn
+    // them on once, before the first one; the bring-up only spins on the timebase after this.
+    ml_set_interrupts_enabled(TRUE);
     unsigned mode = 0;
     PE_parse_boot_argn("usb", &mode, sizeof mode);
     IOLog("UKE usb: worker entered usb=%u\n", mode);
