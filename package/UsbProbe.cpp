@@ -35,8 +35,11 @@
 #include <pexpert/pexpert.h>
 #include <kern/thread.h>
 #include <kern/debug.h>
-#include <kern/machine.h>
 extern kmod_info_t g_kernel_kmod_info;
+// Declared here rather than through <kern/machine.h>: this translation unit is compiled into an
+// LTO kernel, and pulling that header in changed the LTO closure enough to leave the mockfs and
+// verified-root references unresolved in the link (run 44780653673). One prototype is all we use.
+extern "C" boolean_t ml_set_interrupts_enabled(boolean_t enable);
 extern "C" bool qcom_dwc3_bring_up(void);
 extern "C" void qcom_dwc3_publish(void);
 extern "C" void qcom_dwc3_diag(bool);
