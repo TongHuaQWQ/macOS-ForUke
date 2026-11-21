@@ -49,7 +49,14 @@ namespace {
 // TCSR (0x1f40000, live.dts:14344 tcsr@1f40000, the syscon behind tcsr-mutex), the apps RSC
 // (rsc@17a00000, live.dts:6320) and the USB interrupt are not.
 constexpr uint64_t kCore = 0x0a600000, kAppleWindow = kCore + 0xc000, kQscratch = kCore + 0xf8800, kGcc = 0x100000, kTcsr = 0x1f40000,
-    kPhy = 0x088e3000, kSmmu = 0x15000000, kRsc = 0x17a00000, kCmdDb = 0x81c60000;
+    kPhy = 0x088e3000, kSmmu = 0x15000000, kCmdDb = 0x81c60000;
+// The apps RSC is three 64 KiB drive windows, not one block (live DT, rsc@17a00000):
+//   reg = <0x17a00000 0x10000  0x17a10000 0x10000  0x17a20000 0x10000>
+//   reg-names = "drv-0", "drv-1", "drv-2", and the AP talks through drv-2
+//   (apps_rsc_drv2 = "/soc/rsc@17a00000/drv@2").
+// The 2026-11-21 usb5 boot read drv-0 instead and the very first word of that unpowered
+// window aborted: far 0xfffffff5d42800 equalled the window base right after stage 22.
+constexpr uint64_t kRsc = 0x17a20000;
 // kIrq is the GIC INTID: Linux SPI 265 (work/re/data/ufs-cliffs.json host.irq.intid is 297 for UFS, and
 // this board's USB node is interrupts = <0 265 4>), i.e. 265 + 32.
 constexpr uint32_t kCmdDbSize = 0x20000, kIrq = 265 + 32, kSid = 0x40;
@@ -100,8 +107,8 @@ bool powerRails() {
     // 2026-11-21 boots stop: 'stage 2' then 'platform error #1 ... (ignored)' and nothing after, with no
     // chance for a line placed past the fault to appear. stage 21/22/23 mark the sub-steps so the next
     // photograph says which one was reached even if the console's tail is overwritten.
-    IOLog("qcom-dwc3: cmd-db map=%p rsc map=%p size=%u readable=%u\n", dbw.va, rsc.va,
-          (unsigned)kCmdDbSize, (unsigned)kCmdDbReadable);
+    IOLog("qcom-dwc3: cmd-db map=%p rsc map=%p size=%u readable=%u rsc_pa=%llx\n", dbw.va, rsc.va,
+          (unsigned)kCmdDbSize, (unsigned)kCmdDbReadable, (unsigned long long)kRsc);
     if (ok) {
         stage(21);
         /* Bounded by the header's own length, not by kCmdDbSize. The 2026-11-21 boot shows why:
