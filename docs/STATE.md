@@ -6885,3 +6885,53 @@ kernel (built from `ci-b297`, `usb-rails=1`) but the **command line came from th
 which sits on `usb-on-macos` with `usb-rails=0`. Since `usb-rails` is read at run time, both panels of
 that evening are identical. A vote experiment has to package with `--device` pointing at a worktree of the
 experiment branch.
+
+## 100. 2026-11-21: TLMM is 0xf000000 -- the fourth stall, the same cause
+
+The `usb9` panel is the best one so far, and it is worth reading in full because four stages fall in one boot:
+
+    mark tcsrcc clkref 1ff1118 00000001 -> 00000001      stage 4: the gate was already open
+    stage 5
+    mark smmu idr0 4c017e64 idr1 60000047 groups 110
+    mark smmu slot 0 bank 69 pages 128                   the SMMU context is real
+    stage 6
+    mark spmi apid 553 of 896
+    mark eusb2 repeater enable / 19p2m                   the repeater answered (bit 7), or stage(-6)
+    stage 7
+    mark eusb2 phy table
+    UKE usb: wait 2 ms at stage 7
+    mark orientation gpio tlmm                           <- last line
+
+So GDSC, the clkref gate, the SMMU identity context, the SPMI arbiter, the repeater and the eUSB2 PHY table
+all work. `IOBufferMemoryDescriptor` also works from this early thread, which was the open question about
+stage 5.
+
+The stall is the next statement: this driver read its orientation pin from TLMM at **0xf100000**. This
+board's TLMM is `pinctrl@f000000`, `reg = <0xf000000 0x1000000>` (live.dts:7701, same node in the vendor
+DT). Each pin owns a 0x1000 page, so 0xf100000 + 11*0x1000 is GPIO **267**, past the last pin: an
+unimplemented page, a load that never completes, the kernel gone with nothing printed.
+
+Two more inherited-from-sheng items came out of the same review, both now constants with their evidence:
+
+| constant | what this board actually has | evidence |
+| --- | --- | --- |
+| `kBoardHasRetimer = false` | no redriver/retimer node anywhere; `usb_qmp_dp_phy` is there | grep ps5169/retimer/redriver in live.dts and vendor_boot.dts: nothing |
+| `kBoardHasOrientationGpio = false` | usb0 has no `orientation-gpios` | device/dt/vendor_boot.dts:13882 |
+
+`retimerInit()` (GPIO 7 as reset, GPIO 28/29 as bus, qupv3 clocks) stays compiled and referenced for boards
+that have one. `followOrientation()` takes the same two guards -- it runs on every cable change and had the
+same wrong base.
+
+**The pattern, for whoever reads this next.** Four silent stops in a row (usb6, usb7, usb8, usb9), and not
+one of them was hardware:
+
+| round | what was wrong | this board's value |
+| --- | --- | --- |
+| usb6/usb7 | the AMC mode bits cleared in one store | `__tcs_set_trigger()`'s order |
+| usb8 | `gTcsrMap[0x118]/[0x108]` -- sheng's 0x1fd5000 offsets, landing in tcsr_mutex | 0x01ff1118 (measured) |
+| usb9 | TLMM at 0xf100000 | 0xf000000 |
+| usb9 | PS5169 retimer and orientation GPIO -- sheng's board has them, this one does not | absent |
+
+The reason these cost a round each instead of a line of output: a store to an unimplemented address on this
+fabric does not fault, it never returns, so there is no exception and no panic text. The mark lines through
+stages 4 to 9 are the countermeasure -- the last one on the panel names the register group.
