@@ -6819,3 +6819,31 @@ test `RSC_DRV_STATUS` alone for "busy" — `control` keeps its AMC bits after a 
 testing it there made the second rail look busy forever.
 
 Round record: `work/analysis/2026-11-21-usb7-tcs-order.md`.
+
+## 98. 2026-11-21: the rails are not the wall, and stage 4 is
+
+Two panels from the same evening, read against each other:
+
+| image | panel | what it settles |
+| --- | --- | --- |
+| usb7 (vote, `ci-b294`) | `rsc tcs=2 ctl=00000000 sts=00000001 irqen=00000005 irqsts=00000000`, then `vote 1..5` (`0x40d00=7`, `=880`, `+4=1`, then `0x40f00=7`, `=1200`), then the bus stops on the sixth | the AMC-bit order fix works (usb6 died on the fourth vote, these five completed and were confirmed through `CMD_STATUS`), the cmd-db addresses are real, and the TCS is clean and idle on entry -- but six triggers in a row on one TCS still stop it, which is something rpmh-rsc.c never does: `claim_tcs_for_req()` picks a new free TCS per request |
+| usb7b (no vote, `ci-b295`) | `stage 1`, `stage 2`, `rails skipped`, `stage 3`, `stage 4` | **stage 3 passed**, i.e. both USB30 GDSCs collapsed and read back powered on the power the bootloader left. The vote is not needed to get there, and the wall is inside `clocksAndResets()` |
+
+So the round after this one spends its photograph on stage 4 rather than on the RSC:
+
+* `usb-rails=0` is a boot argument now (board.toml carries it; the line is 972 of 1000 bytes) and the
+  vote keeps its own round. Nothing about the vote is declared fine -- it stops at trigger six.
+* every register group of stages 4 to 9 prints `qcom-dwc3: mark <group>` first: `bcr usb30 039000`,
+  `rcg master 03902c`, `rcg mockutmi 039044`, `branch 039088 039018`, `branch 03908c 039024 039028`,
+  `tcsr clkref 1f40000`, `bcr qusb2phy 012000`, `eusb2 repeater enable`/`19p2m`, `eusb2 phy table`,
+  `utmi clock select`, `retimer ps5169`, `qmp usb3 phy`, `smmu map`/`idr0`/`slot`, `apple window`,
+  + `gsnpsid`. Every one of those steps is inside a bounded wait already, so a boot that stops at a
+  mark is a store that never completed -- an unclocked block, not a loop.
+* the SPMI mark carries the APID the arbiter scan picked (`mark spmi apid %d of %u`), because a wrong
+  APID is the other way the repeater step can hang.
+
+Parallel experiment (`ci-b297`): the vote rotates over all three ACTIVE TCSes and accepts either
+`CMD_STATUS` ISSUED+COMPL or the TCS's own `IRQ_STATUS` bit as done, reporting `bycmd=`/`byirq=`
+counts. If that survives 17 votes, the fix belongs in the canonical path; if it stops at the same
+place, the RSC is refusing something else and the answer will come from the rail-by-rail record
+already printed.
