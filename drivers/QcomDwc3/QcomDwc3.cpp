@@ -46,10 +46,13 @@ namespace {
 // The DWC3 global, device and OTG registers in the window Apple's class addresses: base + 0xc000.
 // uke / SM7675 "cliffs". Every address below is the board's own, not sheng's SM8550: the DWC3 wrapper,
 // the Apple register window, QSCRATCH, GCC, the eUSB2 PHY and the apps SMMU happen to be identical, but
-// TCSR (0x1f40000, live.dts:14344 tcsr@1f40000, the syscon behind tcsr-mutex), the apps RSC
-// (rsc@17a00000, live.dts:6320) and the USB interrupt are not.
-constexpr uint64_t kCore = 0x0a600000, kAppleWindow = kCore + 0xc000, kQscratch = kCore + 0xf8800, kGcc = 0x100000, kTcsr = 0x1f40000,
-    kPhy = 0x088e3000, kSmmu = 0x15000000, kCmdDb = 0x81c60000;
+// TCSR (0x1f40000 is this board's tcsrcc, live.dts:13408; the tcsr-mutex syscon is the same base with a
+// different node identity, live.dts:14342), the apps RSC (rsc@17a00000, live.dts:6320) and the USB
+// interrupt are not.
+constexpr uint64_t kCore = 0x0a600000, kAppleWindow = kCore + 0xc000, kQscratch = kCore + 0xf8800, kGcc = 0x100000,
+    // The TCSR clock controller's base (tcsrcc@1f40000, live.dts:13408). Note that its USB2 clkref gate is NOT at
+    // an offset inside the first page: it is at +0xb1118, which is clkrefGate()'s business (0x01ff1118).
+    kTcsr = 0x1f40000, kPhy = 0x088e3000, kSmmu = 0x15000000, kCmdDb = 0x81c60000;
 // The apps RSC is three 64 KiB drive windows, not one block (live DT, rsc@17a00000):
 //   reg = <0x17a00000 0x10000  0x17a10000 0x10000  0x17a20000 0x10000>
 //   reg-names = "drv-0", "drv-1", "drv-2", and the AP talks through drv-2
@@ -268,6 +271,27 @@ bool rcg(uint32_t cmd, uint32_t cfg) {
     barrier();
     return waitBits(c, 1u, 0, 10);
 }
+// The USB2 PHY's reference clock gate lives in the TCSR clock controller (tcsrcc@1f40000, compatible
+// "qcom,pineapple-tcsrcc", live.dts:13408): a clk_branch2 register, bit 0 enables it. Both of this board's own
+// implementations already do exactly this and nothing else --
+//   package/UkeUsbBoard.cpp:64   refClock(): tcsrcc 0x01f40000 + 0xb1118, static_assert(pa == 0x01ff1118)
+//   package/qcom-usb-debug/kernel/QcomUsbBoardInit.c:118  the same pair, in C
+// and docs/USB2-20261115.md:42 read CBCR=0x00000001 back out of that address under TWRP, so it is measured on
+// this unit. The two writes this driver inherited instead -- 0x1fd5108 and 0x1fd5118, sheng's SM8550 TCSR --
+// were rebased onto this board's base and so aimed at 0x1f40118, inside the tcsr_mutex aperture
+// (live.dts:14342, syscon@1f40000 + 0x20000). That block does not implement that address, the store never
+// completes, and the kernel goes with it: the usb8 panel's last line is the mark immediately before it.
+bool clkrefGate(uint64_t pa) {
+    Region r = {};
+    if (!mapRegion(r, pa & ~0xfffull, 0x1000)) return false;
+    volatile uint32_t *reg = r.va + (pa & 0xfffu) / 4;
+    const uint32_t before = *reg;
+    if (!(before & 1u)) {*reg = before | 1u; barrier(); IODelay(20);}
+    const uint32_t after = *reg;
+    (void)r;
+    IOLog("qcom-dwc3: mark tcsrcc clkref %06llx %08x -> %08x\n", (unsigned long long)pa, (unsigned)before, (unsigned)after);
+    return (after & 1u) != 0;
+}
 bool clocksAndResets() {
     // gcc-sm8550.c: USB30_PRIM_BCR 0x39000, QUSB2PHY_PRIM_BCR 0x12000; the core reset of dwc3_qcom_probe, the PHY reset of its init.
     volatile uint32_t *core = gGcc.va + 0x39000 / 4, *phy = gGcc.va + 0x12000 / 4;
@@ -283,10 +307,8 @@ bool clocksAndResets() {
     if (!branch(0x39088) || !branch(0x39018)) return false;
     mark("branch 03908c 039024 039028");
     if (!branch(0x3908c) || !branch(0x39024) || !branch(0x39028)) return false;
-    mark("tcsr clkref 1f40000");
-    gTcsrMap.va[0x118 / 4] = gTcsrMap.va[0x118 / 4] | 1u;
-    gTcsrMap.va[0x108 / 4] = gTcsrMap.va[0x108 / 4] | 1u;
-    barrier();
+    mark("tcsrcc usb2 clkref 1ff1118");
+    if (!clkrefGate(0x01ff1118ull)) return false;
     mark("bcr qusb2phy 012000");
     *phy = *phy | 1u; barrier(); IODelay(150);
     *phy = *phy & ~1u; barrier();
