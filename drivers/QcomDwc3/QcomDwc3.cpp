@@ -53,6 +53,11 @@ constexpr uint64_t kCore = 0x0a600000, kAppleWindow = kCore + 0xc000, kQscratch 
 // kIrq is the GIC INTID: Linux SPI 265 (work/re/data/ufs-cliffs.json host.irq.intid is 297 for UFS, and
 // this board's USB node is interrupts = <0 265 4>), i.e. 265 + 32.
 constexpr uint32_t kCmdDbSize = 0x20000, kIrq = 265 + 32, kSid = 0x40;
+// How much of the cmd-db window this board answers on. The 2026-11-21 boot faulted at
+// far=0xfffffff16d58c000 — page offset 0xc000, i.e. 48 KiB in — with the platform error
+// counter still reading #1, so everything below 0xc000 is readable and the window ends
+// there. Read that far and no further; the header length can only lower it.
+constexpr uint32_t kCmdDbReadable = 0xc000;
 constexpr unsigned kOwnedTcs = 2;   // shared with the microphone rail under the same lock
 struct Region {IOMemoryMap *map; volatile uint32_t *va;};
 Region gGcc, gScratch, gPhy, gTcsrMap;
@@ -92,8 +97,25 @@ bool powerRails() {
     Region dbw = {}, rsc = {};
     bool ok = mapRegion(dbw, kCmdDb, kCmdDbSize) && mapRegion(rsc, kRsc, 0x10000);
     if (ok) {
-        for (uint32_t i = 0; i < kCmdDbSize; i += 4) {const uint32_t w = dbw.va[i / 4]; memcpy(db + i, &w, 4);}
-        const QcomRscLayout layout = qcom_rsc_layout(rsc.va[0]);
+        /* Bounded by the header's own length, not by kCmdDbSize. The 2026-11-21 boot shows why:
+         * the sweep below aborted at 'qcom-dwc3: stage 2' with
+         *   platform error #1 far=0xfffffff16d58c000 pc=0xfffffff00bbea9ac (ignored)
+         * i.e. 48 KiB into the 128 KiB window — this board's cmd-db block does not have 128 KiB of
+         * readable space, and everything past its real end is an unpowered slave that answers with
+         * an asynchronous abort. Linux reads cmd_db_header.len for the same reason
+         * (drivers/soc/qcom/cmd-db.c). Word 3 is that length in the downstream header; when it is
+         * not a plausible value, clamp to the first 64 KiB instead of 128 KiB. */
+        uint32_t length = dbw.va[3];
+        if (length < 16 || length > kCmdDbSize || (length & 3)) { length = kCmdDbReadable; }
+        if (length > kCmdDbReadable) { length = kCmdDbReadable; }
+        for (uint32_t i = 0; i < length; i += 4) {const uint32_t w = dbw.va[i / 4]; memcpy(db + i, &w, 4);}
+        for (uint32_t i = length; i < kCmdDbSize; i += 4) {const uint32_t zero = 0; memcpy(db + i, &zero, 4);}
+        const uint32_t rscWord = rsc.va[0];
+        const QcomRscLayout layout = qcom_rsc_layout(rscWord);
+        // One line, before any vote: the previous boot ended in stage 2 with no stage 3 and no
+        // verdict line, so the next wall has to be visible from the panel.
+        IOLog("qcom-dwc3: cmd-db len=%u rsc=%08x tcs_stride=%u\n", (unsigned)length,
+              (unsigned)rscWord, (unsigned)layout.tcs_stride);
         AppsSmmuLock guard;
         auto send = [&](uint32_t address, uint32_t value) {
             QcomRpmhWrite writes[16];
@@ -107,7 +129,11 @@ bool powerRails() {
             {"ldoe1", 880}, {"ldoe3", 1200}, {"ldob15", 1800}, {"ldob5", 3104}, {"ldof3", 912}};
         for (unsigned i = 0; i < sizeof rails / sizeof rails[0] && ok; ++i) {
             QcomRpmhResource res;
-            if (qcom_cmd_db_find(db, kCmdDbSize, rails[i].name, &res)) {ok = false; break;}
+            if (qcom_cmd_db_find(db, kCmdDbSize, rails[i].name, &res)) {
+                IOLog("qcom-dwc3: rail %s not in cmd-db\n", rails[i].name);
+                ok = false;
+                break;
+            }
             send(res.address + 8, 7);
             send(res.address, rails[i].mv);
             send(res.address + 4, 1);
