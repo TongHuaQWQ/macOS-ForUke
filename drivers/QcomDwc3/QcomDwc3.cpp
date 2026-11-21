@@ -151,9 +151,12 @@ bool powerRails() {
         AppsSmmuLock guard;
         // The AP's TCS block, addressed the way rpmh-rsc.c addresses it: DRV base + qcom,tcs-offset (0xd00 in this board's DT,
         // live.dts:6332), then one block per TCS, each block's registers at the layout's offsets inside it.
-        const uint32_t tcsBase = kRscTcsBase + layout.tcs_stride * kOwnedTcs;
-        // rpmh_rsc_probe() leaves the interrupts of the active TCSes enabled, and IRQ_STATUS only latches for an enabled one.
-        rsc.va[(kRscTcsBase + layout.irq_enable) / 4] |= 1u << kOwnedTcs;
+        //
+        // EXPERIMENT (ci-b297): the vote rotates over the three ACTIVE TCSes instead of re-arming one. Six triggers in a row on
+        // the same TCS is something rpmh-rsc.c never does -- it claims a different free TCS per request -- and the 2026-11-21
+        // usb7 boot stopped on the sixth trigger with the TCS reporting idle and every earlier vote complete.
+        constexpr unsigned kTcsCount = 3;
+        for (unsigned i = 0; i < kTcsCount; ++i) rsc.va[(kRscTcsBase + layout.irq_enable) / 4] |= 1u << (kOwnedTcs - kTcsCount + 1 + i);
         // What the DRV says about itself, before anything is written: DRV_PRNT_CHLD_CONFIG (drv base + 0x0c) carries the TCS count of
         // each DRV id in bits 6*id+5:6*id and the commands per TCS in 31:27 (rpmh-rsc.c, DRV_NUM_TCS_/DRV_NCPT_), and bit 24 is the
         // hardware solver. A TCS count that does not reach ours, or zero commands per TCS, would explain a trigger that never
@@ -163,8 +166,9 @@ bool powerRails() {
               (unsigned)((config >> (6 * kDrvIdForPanel)) & 0x3f), (unsigned)((config >> 27) & 0x1f), (unsigned)((config >> 24) & 1));
         // State of the TCS this boot inherits: RSC_DRV_CONTROL still carries the bootloader's AMC mode bits, RSC_DRV_STATUS is zero
         // while the TCS is busy, and the interrupt registers say whether anything is in flight. Printed once, before any vote.
+        const uint32_t firstBase = kRscTcsBase + layout.tcs_stride * kOwnedTcs;
         IOLog("qcom-dwc3: rsc tcs=%u ctl=%08x sts=%08x irqen=%08x irqsts=%08x\n", (unsigned)kOwnedTcs,
-              (unsigned)rsc.va[(tcsBase + layout.control) / 4], (unsigned)rsc.va[(tcsBase + layout.status) / 4],
+              (unsigned)rsc.va[(firstBase + layout.control) / 4], (unsigned)rsc.va[(firstBase + layout.status) / 4],
               (unsigned)rsc.va[(kRscTcsBase + layout.irq_enable) / 4], (unsigned)rsc.va[(kRscTcsBase + layout.irq_status) / 4]);
         // One register write of the sequence. A masked write is the read-modify-write rpmh-rsc.c's write_tcs_reg() uses to touch the
         // AMC mode bits one at a time, and every write is read back before the next one, which is what its write_tcs_reg_sync() buys.
@@ -183,22 +187,28 @@ bool powerRails() {
         // board's other USB path already decodes). Both waits are bounded on the timebase: nothing here sleeps on the timer that
         // never fires. A one-line record goes out per vote, because a vote that stalls the RSC takes the whole kernel with it and
         // the panel is the only channel -- the last line then says which write it was.
-        unsigned votes = 0, completed = 0;
+        unsigned votes = 0, completed = 0, byCmd = 0, byIrq = 0;
         auto send = [&](uint32_t address, uint32_t value) {
             const unsigned index = ++votes;
-            IOLog("qcom-dwc3: vote %u %08x=%u\n", index, (unsigned)address, (unsigned)value);
+            const unsigned tcs = kOwnedTcs - kTcsCount + 1 + (index - 1) % kTcsCount;
+            const uint32_t tcsBase = kRscTcsBase + layout.tcs_stride * tcs;
+            IOLog("qcom-dwc3: vote %u tcs%u %08x=%u\n", index, tcs, (unsigned)address, (unsigned)value);
             volatile uint32_t *status = rsc.va + (tcsBase + layout.status) / 4;
             for (unsigned i = 0; i < 200 && !*status; ++i) IODelay(10);
             if (!*status) {IOLog("qcom-dwc3: vote %u tcs busy\n", index); return false;}
             QcomRpmhWrite writes[16];
-            const unsigned n = qcom_rpmh_active_request(&layout, kOwnedTcs, &address, &value, 1, 1, writes, sizeof writes / sizeof writes[0]);
+            const unsigned n = qcom_rpmh_active_request(&layout, tcs, &address, &value, 1, 1, writes, sizeof writes / sizeof writes[0]);
             if (!n) {IOLog("qcom-dwc3: vote %u not described\n", index); return false;}
             for (unsigned i = 0; i < n; ++i) apply(writes[i]);
             volatile uint32_t *cmd = rsc.va + (tcsBase + layout.cmd_status) / 4;
+            volatile uint32_t *irqStatus = rsc.va + (kRscTcsBase + layout.irq_status) / 4;
             constexpr uint32_t kIssuedAndComplete = (1u << 8) | (1u << 16);
             unsigned polls = 0;
             for (; polls < 500; ++polls) {
-                if ((*cmd & kIssuedAndComplete) == kIssuedAndComplete) break;
+                // Either signal means the request is retired: the command's own ISSUED+COMPL pair, or this TCS's bit in IRQ_STATUS,
+                // which is the flag rpmh-rsc.c's tcs_tx_done() acts on and its own debug dump prints as COMPLETED.
+                if ((*cmd & kIssuedAndComplete) == kIssuedAndComplete) {++byCmd; break;}
+                if (*irqStatus & (1u << tcs)) {++byIrq; break;}
                 IODelay(10);
             }
             if (polls == 500) {
@@ -206,7 +216,7 @@ bool powerRails() {
                       (unsigned)rsc.va[(kRscTcsBase + layout.irq_status) / 4], (unsigned)rsc.va[(tcsBase + layout.control) / 4]);
                 return false;
             }
-            const unsigned m = qcom_rpmh_finish(&layout, kOwnedTcs, writes, sizeof writes / sizeof writes[0]);
+            const unsigned m = qcom_rpmh_finish(&layout, tcs, writes, sizeof writes / sizeof writes[0]);
             for (unsigned i = 0; i < m; ++i) apply(writes[i]);
             ++completed;
             return true;
@@ -240,7 +250,7 @@ bool powerRails() {
             if (send(res.address, 1u << 30 | 1u << 29 | vote << 14 | vote)) native_usb_stats[9] = native_usb_stats[9] | 0x80000000u;
             else ok = false;
         } else ok = false;
-        IOLog("qcom-dwc3: rails votes=%u completed=%u\n", votes, completed);
+        IOLog("qcom-dwc3: rails votes=%u completed=%u bycmd=%u byirq=%u\n", votes, completed, byCmd, byIrq);
     }
     (void)dbw; (void)rsc;   // ml_io_map windows live for the boot
 
