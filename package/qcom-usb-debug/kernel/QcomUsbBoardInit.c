@@ -87,6 +87,14 @@ static void upd(const struct regs *r, unsigned offset, uint32_t mask, uint32_t v
   wr(r, offset, (rd(r, offset) & ~mask) | value);
 }
 
+/* One entry of QcomRpmh's write list: a masked entry is a read-modify-write, which is how the AMC
+ * mode bits are cleared one at a time (rpmh-rsc.c write_tcs_reg()). */
+static void apply_write(const struct regs *r, unsigned base, const QcomRpmhWrite *w) {
+  uint32_t word = w->mask == QCOM_RPMH_WHOLE_WORD ? w->value
+                                                 : (rd(r, base + w->offset) & ~w->mask) | (w->value & w->mask);
+  wr(r, base + w->offset, word);
+}
+
 static int wait_for(const struct regs *r, unsigned offset, uint32_t mask, uint32_t value, unsigned count) {
   for (unsigned i = 0; i < count; ++i) {
     if ((rd(r, offset) & mask) == value) return 1;
@@ -143,7 +151,7 @@ static int voteRails(int superSpeed) {
   QcomRscLayout layout = qcom_rsc_layout(rscId);
   const unsigned tcs = kDrvOffset + kUsbTcs * layout.tcs_stride;
   const unsigned kV3TcsStatus = 0x28, kV3CmdStatus = 0x40;
-  const uint32_t kTriggered = 1u << 24, kIssuedAndComplete = (1u << 8) | (1u << 16);
+  const uint32_t kIssuedAndComplete = (1u << 8) | (1u << 16);
   int ok = supportedRscVersion(rscId);
   const struct {
     const char *name;
@@ -169,21 +177,23 @@ static int voteRails(int superSpeed) {
     values[0] = 7;
     values[1] = rails[i].mv;
     values[2] = 1;
+    /* RSC_DRV_STATUS alone says whether the TCS is free (rpmh-rsc.c tcs_is_free); the control register
+     * keeps its AMC mode bits after a transfer, so it is printed, never tested. */
     uint32_t status = rd(&rsc, tcs + kV3TcsStatus);
     uint32_t control = rd(&rsc, tcs + layout.control);
-    if (!status || (control & kTriggered)) {
+    if (!status) {
       IOLog("[usb] uke rpmh busy resource=%s tcs=%u status=%08x control=%08x\n", rails[i].name, kUsbTcs,
              status, control);
       ok = 0;
       continue;
     }
     QcomRpmhWrite writes[20];
-    unsigned n = qcom_rpmh_active_request(&layout, kUsbTcs, addresses, values, 3, writes, 20);
+    unsigned n = qcom_rpmh_active_request(&layout, kUsbTcs, addresses, values, 3, 1, writes, 20);
     if (!n) {
       ok = 0;
       continue;
     }
-    for (unsigned w = 0; w < n; ++w) wr(&rsc, kDrvOffset + writes[w].offset, writes[w].value);
+    for (unsigned w = 0; w < n; ++w) apply_write(&rsc, kDrvOffset, &writes[w]);
     for (unsigned c = 0; c < 3; ++c) {
       unsigned offset = tcs + kV3CmdStatus + c * layout.cmd_stride;
       if (!wait_for(&rsc, offset, kIssuedAndComplete, kIssuedAndComplete, 5000)) {
@@ -196,7 +206,7 @@ static int voteRails(int superSpeed) {
     }
     if (!ok) continue;
     unsigned done = qcom_rpmh_finish(&layout, kUsbTcs, writes, 20);
-    for (unsigned w = 0; w < done; ++w) wr(&rsc, kDrvOffset + writes[w].offset, writes[w].value);
+    for (unsigned w = 0; w < done; ++w) apply_write(&rsc, kDrvOffset, &writes[w]);
   }
   /* The clock and bus votes the OEM's eusb2 node carries: xo.lvl = 3 and an SN2 bandwidth request of
    * 60 MB/s (full speed) or 2.5 GB/s (super speed), scaled by the level's unit. */
@@ -216,14 +226,13 @@ static int voteRails(int superSpeed) {
     values[1] = 1u << 30 | 1u << 29 | vote << 14 | vote;
     uint32_t status = rd(&rsc, tcs + kV3TcsStatus);
     uint32_t control = rd(&rsc, tcs + layout.control);
+    (void)control;
     QcomRpmhWrite writes[20];
-    unsigned n = (!status || (control & kTriggered))
-                     ? 0
-                     : qcom_rpmh_active_request(&layout, kUsbTcs, addresses, values, 2, writes, 20);
+    unsigned n = !status ? 0 : qcom_rpmh_active_request(&layout, kUsbTcs, addresses, values, 2, 1, writes, 20);
     if (!n) {
       ok = 0;
     } else {
-      for (unsigned w = 0; w < n; ++w) wr(&rsc, kDrvOffset + writes[w].offset, writes[w].value);
+      for (unsigned w = 0; w < n; ++w) apply_write(&rsc, kDrvOffset, &writes[w]);
       for (unsigned c = 0; c < 2; ++c) {
         unsigned offset = tcs + kV3CmdStatus + c * layout.cmd_stride;
         if (!wait_for(&rsc, offset, kIssuedAndComplete, kIssuedAndComplete, 5000)) {
@@ -233,7 +242,7 @@ static int voteRails(int superSpeed) {
       }
       if (ok) {
         unsigned done = qcom_rpmh_finish(&layout, kUsbTcs, writes, 20);
-        for (unsigned w = 0; w < done; ++w) wr(&rsc, kDrvOffset + writes[w].offset, writes[w].value);
+        for (unsigned w = 0; w < done; ++w) apply_write(&rsc, kDrvOffset, &writes[w]);
       }
     }
   } else {

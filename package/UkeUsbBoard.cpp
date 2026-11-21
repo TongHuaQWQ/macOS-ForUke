@@ -106,20 +106,30 @@ bool voteRails(bool superSpeed) {
     const auto layout = qcom_rsc_layout(rscId);
     const unsigned tcs = kDrvOffset + kUsbTcs * layout.tcs_stride;
     constexpr unsigned kV3TcsStatus = 0x28, kV3CmdStatus = 0x40;
-    constexpr unsigned kTriggered = 1u << 24, kIssuedAndComplete = (1u << 8) | (1u << 16);
+    constexpr unsigned kIssuedAndComplete = (1u << 8) | (1u << 16);
     bool ok = supportedRscVersion(rscId);
     auto submit = [&](const char *resource, const uint32_t *addr, const uint32_t *val, unsigned count) {
+        /* RSC_DRV_STATUS alone says whether the TCS is free (rpmh-rsc.c tcs_is_free). The control
+         * register keeps its AMC mode bits after a transfer -- the next request clears them -- so it
+         * is reported, never tested. */
         const uint32_t status = rsc.read(tcs + kV3TcsStatus);
-        const uint32_t control = rsc.read(tcs + layout.control);
-        if (!status || (control & kTriggered)) {
+        if (!status) {
             printf("[usb] uke rpmh busy resource=%s tcs=%u status=%08x control=%08x\n",
-                   resource, kUsbTcs, status, control);
+                   resource, kUsbTcs, status, rsc.read(tcs + layout.control));
             return false;
         }
         QcomRpmhWrite writes[20];
-        const unsigned n = qcom_rpmh_active_request(&layout, kUsbTcs, addr, val, count, writes, 20);
+        const unsigned n = qcom_rpmh_active_request(&layout, kUsbTcs, addr, val, count, 1, writes, 20);
         if (!n) return false;
-        for (unsigned i = 0; i < n; ++i) rsc.write(kDrvOffset + writes[i].offset, writes[i].value);
+        /* A masked entry is a read-modify-write: that is how the AMC mode bits are cleared one at a
+         * time, which the hardware requires and a single write to zero does not do. */
+        for (unsigned i = 0; i < n; ++i) {
+            const unsigned offset = kDrvOffset + writes[i].offset;
+            const uint32_t word = writes[i].mask == QCOM_RPMH_WHOLE_WORD
+                                      ? writes[i].value
+                                      : (rsc.read(offset) & ~writes[i].mask) | (writes[i].value & writes[i].mask);
+            rsc.write(offset, word);
+        }
         for (unsigned i = 0; i < count; ++i) {
             const unsigned offset = tcs + kV3CmdStatus + i * layout.cmd_stride;
             if (!rsc.wait(offset, kIssuedAndComplete, kIssuedAndComplete, 5000)) {

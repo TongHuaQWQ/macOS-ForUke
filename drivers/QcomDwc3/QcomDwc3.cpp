@@ -57,6 +57,9 @@ constexpr uint64_t kCore = 0x0a600000, kAppleWindow = kCore + 0xc000, kQscratch 
 // The 2026-11-21 usb5 boot read drv-0 instead and the very first word of that unpowered
 // window aborted: far 0xfffffff5d42800 equalled the window base right after stage 22.
 constexpr uint64_t kRsc = 0x17a20000;
+// qcom,tcs-offset of that DRV (live.dts:6332): the TCS blocks start 0xd00 bytes into the window, and rpmh-rsc.c adds the DRV's
+// tcs-offset to the base before any register offset of its tables.
+constexpr uint32_t kRscTcsBase = 0xd00;
 // kIrq is the GIC INTID: Linux SPI 265 (work/re/data/ufs-cliffs.json host.irq.intid is 297 for UFS, and
 // this board's USB node is interrupts = <0 265 4>), i.e. 265 + 32.
 constexpr uint32_t kCmdDbSize = 0x20000, kIrq = 265 + 32, kSid = 0x40;
@@ -65,7 +68,11 @@ constexpr uint32_t kCmdDbSize = 0x20000, kIrq = 265 + 32, kSid = 0x40;
 // counter still reading #1, so everything below 0xc000 is readable and the window ends
 // there. Read that far and no further; the header length can only lower it.
 constexpr uint32_t kCmdDbReadable = 0xc000;
-constexpr unsigned kOwnedTcs = 2;   // shared with the microphone rail under the same lock
+// The TCS this driver votes in, inside the ACTIVE group of this board's DT (live.dts:6336):
+//   qcom,tcs-config = <ACTIVE 3>, <SLEEP 2>, <WAKE 2>, <CONTROL 0>, <FAST_PATH 1>
+// rpmh-rsc.c numbers the groups in that order, so ACTIVE is TCS 0, 1 and 2 and the last one is ours --
+// out of the way of the TCS the bootloader's last vote may still hold.
+constexpr unsigned kOwnedTcs = 2;
 struct Region {IOMemoryMap *map; volatile uint32_t *va;};
 Region gGcc, gScratch, gPhy, gTcsrMap;
 bool gSuperSpeed;
@@ -133,13 +140,56 @@ bool powerRails() {
         IOLog("qcom-dwc3: cmd-db len=%u rsc=%08x tcs_stride=%u\n", (unsigned)length,
               (unsigned)rscWord, (unsigned)layout.tcs_stride);
         AppsSmmuLock guard;
+        // The AP's TCS block, addressed the way rpmh-rsc.c addresses it: DRV base + qcom,tcs-offset (0xd00 in this board's DT,
+        // live.dts:6332), then one block per TCS, each block's registers at the layout's offsets inside it.
+        const uint32_t tcsBase = kRscTcsBase + layout.tcs_stride * kOwnedTcs;
+        // rpmh_rsc_probe() leaves the interrupts of the active TCSes enabled, and IRQ_STATUS only latches for an enabled one.
+        rsc.va[(kRscTcsBase + layout.irq_enable) / 4] |= 1u << kOwnedTcs;
+        // state of the TCS this boot inherits: RSC_DRV_CONTROL still carries the bootloader's AMC mode bits, RSC_DRV_STATUS is zero
+        // while the TCS is busy, and the interrupt registers say whether anything is in flight. Printed once, before any vote.
+        IOLog("qcom-dwc3: rsc tcs=%u ctl=%08x sts=%08x irqen=%08x irqsts=%08x\n", (unsigned)kOwnedTcs,
+              (unsigned)rsc.va[(tcsBase + layout.control) / 4], (unsigned)rsc.va[(tcsBase + layout.status) / 4],
+              (unsigned)rsc.va[(kRscTcsBase + layout.irq_enable) / 4], (unsigned)rsc.va[(kRscTcsBase + layout.irq_status) / 4]);
+        // One register write of the sequence. A masked write is the read-modify-write rpmh-rsc.c's write_tcs_reg() uses to touch the
+        // AMC mode bits one at a time, and every write is read back before the next one, which is what its write_tcs_reg_sync() buys.
+        auto apply = [&](const QcomRpmhWrite &w) {
+            volatile uint32_t *slot = rsc.va + (kRscTcsBase + w.offset) / 4;
+            *slot = w.mask == QCOM_RPMH_WHOLE_WORD ? w.value : (*slot & ~w.mask) | (w.value & w.mask);
+            (void)*slot;
+            barrier();
+        };
+        // One active-only vote. rpmh_rsc_send_data() claims a free TCS, so RSC_DRV_STATUS has to be non-zero (idle) before the buffer
+        // is reprogrammed, and the command is waited for through RSC_DRV_CMD_STATUS -- bits 8 and 16 are the issue and the completion
+        // of this TCS's command (the pair this board's other USB path already decodes). Both waits are bounded on the timebase:
+        // nothing here sleeps on the timer that never fires. A one-line record goes out per vote, because a vote that stalls the RSC
+        // takes the whole kernel with it and the panel is the only channel -- the last line then says which write it was.
+        unsigned votes = 0, completed = 0;
         auto send = [&](uint32_t address, uint32_t value) {
+            const unsigned index = ++votes;
+            IOLog("qcom-dwc3: vote %u %08x=%u\n", index, (unsigned)address, (unsigned)value);
+            volatile uint32_t *status = rsc.va + (tcsBase + layout.status) / 4;
+            for (unsigned i = 0; i < 200 && !*status; ++i) IODelay(10);
+            if (!*status) {IOLog("qcom-dwc3: vote %u tcs busy\n", index); return false;}
             QcomRpmhWrite writes[16];
-            const unsigned n = qcom_rpmh_active_request(&layout, kOwnedTcs, &address, &value, 1, writes, 16);
-            for (unsigned i = 0; i < n; ++i) rsc.va[(0xd00 + writes[i].offset) / 4] = writes[i].value;
-            IOSleep(2);
-            const unsigned m = qcom_rpmh_finish(&layout, kOwnedTcs, writes, 16);
-            for (unsigned i = 0; i < m; ++i) rsc.va[(0xd00 + writes[i].offset) / 4] = writes[i].value;
+            const unsigned n = qcom_rpmh_active_request(&layout, kOwnedTcs, &address, &value, 1, 1, writes, sizeof writes / sizeof writes[0]);
+            if (!n) {IOLog("qcom-dwc3: vote %u not described\n", index); return false;}
+            for (unsigned i = 0; i < n; ++i) apply(writes[i]);
+            volatile uint32_t *cmd = rsc.va + (tcsBase + layout.cmd_status) / 4;
+            constexpr uint32_t kIssuedAndComplete = (1u << 8) | (1u << 16);
+            unsigned polls = 0;
+            for (; polls < 500; ++polls) {
+                if ((*cmd & kIssuedAndComplete) == kIssuedAndComplete) break;
+                IODelay(10);
+            }
+            if (polls == 500) {
+                IOLog("qcom-dwc3: vote %u stuck cmd=%08x sts=%08x irq=%08x ctl=%08x\n", index, (unsigned)*cmd, (unsigned)*status,
+                      (unsigned)rsc.va[(kRscTcsBase + layout.irq_status) / 4], (unsigned)rsc.va[(tcsBase + layout.control) / 4]);
+                return false;
+            }
+            const unsigned m = qcom_rpmh_finish(&layout, kOwnedTcs, writes, sizeof writes / sizeof writes[0]);
+            for (unsigned i = 0; i < m; ++i) apply(writes[i]);
+            ++completed;
+            return true;
         };
         static const struct {const char *name; uint32_t mv;} rails[] = {
             {"ldoe1", 880}, {"ldoe3", 1200}, {"ldob15", 1800}, {"ldob5", 3104}, {"ldof3", 912}};
@@ -150,13 +200,15 @@ bool powerRails() {
                 ok = false;
                 break;
             }
-            send(res.address + 8, 7);
-            send(res.address, rails[i].mv);
-            send(res.address + 4, 1);
+            if (!send(res.address + 8, 7) || !send(res.address, rails[i].mv) || !send(res.address + 4, 1)) {
+                IOLog("qcom-dwc3: rail %s not voted\n", rails[i].name);
+                ok = false;
+                break;
+            }
             native_usb_stats[9] = native_usb_stats[9] | (1u << i);
         }
         QcomRpmhResource res;
-        if (ok && !qcom_cmd_db_find(db, kCmdDbSize, "xo.lvl", &res)) send(res.address, 3); else ok = false;
+        if (ok && !qcom_cmd_db_find(db, kCmdDbSize, "xo.lvl", &res)) {if (!send(res.address, 3)) ok = false;} else ok = false;
         // SN2 carries qnm_aggre1_noc: vote = ceil(ceil(kBps * width / buswidth) * 1000 / unit), buswidth 16, 2500 MB/s peak.
         if (ok && !qcom_cmd_db_find(db, kCmdDbSize, "SN2", &res)) {
             uint32_t vote = 0x400;
@@ -165,9 +217,10 @@ bool powerRails() {
                 const uint64_t x = (((2500000ull * res.levels[2] + 15) / 16) * 1000 + unit - 1) / unit;
                 vote = x < 1 ? 1 : x > 0x3fff ? 0x3fff : (uint32_t)x;
             }
-            send(res.address, 1u << 30 | 1u << 29 | vote << 14 | vote);
-            native_usb_stats[9] = native_usb_stats[9] | 0x80000000u;
+            if (send(res.address, 1u << 30 | 1u << 29 | vote << 14 | vote)) native_usb_stats[9] = native_usb_stats[9] | 0x80000000u;
+            else ok = false;
         } else ok = false;
+        IOLog("qcom-dwc3: rails votes=%u completed=%u\n", votes, completed);
     }
     (void)dbw; (void)rsc;   // ml_io_map windows live for the boot
 
@@ -656,7 +709,10 @@ bool bringUp() {
         !mapRegion(gScratch, kQscratch & ~0xfffull, 0x1000)) {stage(-1); return false;}
     gScratch.va += (kQscratch & 0xfff) / 4;
     stage(2);
-    if (!powerRails()) {stage(-2); return false;}
+    // A rail this driver could not vote does not end the probe: the bootloader powered the USB core to hand this image over, so the
+    // core, the PHY and the wrapper are very likely still up, and the stages below say far more than a boot that stops here. The
+    // `rails votes=... completed=...` line is the record of what was missing, and the next stage's own verdict follows either way.
+    if (!powerRails()) IOLog("qcom-dwc3: rails not voted here, carrying on with what the bootloader left\n");
     stage(3);
     if (!gdsc(0x50018, 6) || !gdsc(0x39004, 5)) {stage(-3); return false;}
     stage(4);
