@@ -752,7 +752,14 @@ kernel_args = [
   # archives still runs build-qcom-usb-debug.py, so it stays buildable), the line below keeps
   # qcom-usb-debug= off, and uke_usb=0 keeps the old probe driver inert. Going back to the CDC-ACM console
   # is those three flipped and libQcomDwc3.a dropped from CONFIG_XNU_EXTRA_LD_ARCHIVES.
-  "usb=1",
+  # usb=4: this round is the Apple stack, not the bring-up. The bring-up needs no round of its own any more -- usb10
+  # reported stage=9 with the ladder intact (gsnpsid=33313130, both USB30 GDSCs powered f8222f80/f8222800, smmu=00450000,
+  # repeater=02290180 = APID 553 answering with bit 7 set) and the kernel went on into userland afterwards with no panic.
+  # 4 is upstream's next level (package/UsbProbe.cpp): load com.apple.driver.AppleUSBXDCI and ...usb.AppleUSBXHCI, run the
+  # subclass static init between preModLoad and postModLoad, then qcom_dwc3_publish(), which walks its own ladder --
+  # stage 10 the nub ("usb-drd0") registered, 11 the controller started, 12 the role thread, and negative stages -12..-17
+  # naming which of those failed. Same byte count as "usb=1", so the 1000-byte command line is untouched.
+  "usb=4",
   # usb-rails=0 keeps the board's RPMh vote out of this round and uses the power the bootloader left behind. It is not a shortcut
   # past a hardware finding: on 2026-11-21 the vote ran (votes 1-5 of 17 completed, the sixth stopped the bus) and, with the vote
   # skipped entirely, both USB30 GDSCs collapsed and read back powered -- stage 3 passed on that same inherited power. So the two
