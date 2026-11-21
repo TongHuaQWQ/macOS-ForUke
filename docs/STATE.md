@@ -6966,3 +6966,41 @@ the subclass static init between `preModLoad` and `postModLoad`, then `qcom_dwc3
 own ladder -- 10 nub registered, 11 controller started, 12 role thread, and -12..-17 naming a failure.
 After that the target is upstream's README sentence: enumerate as 05ac:12ab, Trust dialog, pair with a Mac,
 lockdown sessions, service start.
+
+## 102. 2026-11-22: usb=4 -- the kext loads, the nub publishes, then an instruction abort
+
+    qcom-dwc3: stage 9
+    UKE usb: bring-up stage=9 gsnpsid=33313130 gdsc=f8222f80/f8222800 smmu=00450000 repeater=02290180
+    UKE usb: xdci load -> 0 after 1 attempt(s)
+    qcom-dwc3: stage 10
+    [register dump]
+
+Two results worth keeping, independent of the crash:
+
+* `xdci load -> 0` -- `OSKextLoadKextWithIdentifier("com.apple.driver.AppleUSBXDCI")` returns success on the **first**
+  attempt, from the thread this driver starts at the top of `bsd_autoconf()`. The kext system is ready that early,
+  so the Apple-stack half does not need to move to a later hook.
+* `stage 10` -- `QcomDwc3Nub` (this port's own `IOService` subclass) attaches to the platform and publishes as
+  `usb-drd0`. The metaclass registration path (`preModLoad` → static init → `postModLoad`) and our subclass
+  plumbing are therefore sound.
+
+The crash is an instruction abort:
+
+    pc 0xfffffff00f7da6a0   lr 0xfffffff00c4369f4   cpsr 0x42400204
+    esr 0x0000000086000006  far 0xfffffff00f7da6a0
+
+ESR 0x86000006 is EC 0x21 (instruction abort, no exception-level change) with ISS 6 (level 2 translation fault),
+and `pc == far` sits past the end of the kernel's text. So the kernel branched to an address that is not code
+-- a call through a corrupted pointer, which on this ABI means a PAC-authenticated vtable or callback slot that
+did not land where it should.
+
+Between `stage 10` and `stage 11` there are exactly four such calls, and each one now prints a mark plus, for the
+alloc, the two addresses that have to agree (the metaclass this kernel registered and the isa the allocator
+stored): `OSTypeAlloc(QcomDwc3Xdci)`, `init()`, `attach()`, `start()`. `start()` is split further into the
+provider map and the handover to `AppleUSBXDCI::start()`, and a parallel build (`ci-b302`) also marks every
+`XDCI_*` callback that Apple's start drives (`desired-power`, `power-on`, `parameters`, `controller-reset`), so
+a death inside Apple's own reset sequence still names a callback.
+
+The host side agrees that the controller is alive in device mode: the Linux dmesg shows a new full-speed device
+pulling up and stalling its descriptor reads (`error -32`), which is what a DWC3 with the pullup on and no
+software answering leaves behind. (The `18d1:d00d` "Product: Android" line before it is ABL's fastboot.)
