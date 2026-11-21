@@ -158,11 +158,15 @@ bool powerRails() {
             (void)*slot;
             barrier();
         };
-        // One active-only vote. rpmh_rsc_send_data() claims a free TCS, so RSC_DRV_STATUS has to be non-zero (idle) before the buffer
-        // is reprogrammed, and the command is waited for through RSC_DRV_CMD_STATUS -- bits 8 and 16 are the issue and the completion
-        // of this TCS's command (the pair this board's other USB path already decodes). Both waits are bounded on the timebase:
-        // nothing here sleeps on the timer that never fires. A one-line record goes out per vote, because a vote that stalls the RSC
-        // takes the whole kernel with it and the panel is the only channel -- the last line then says which write it was.
+        // One active-only vote. rpmh_rsc_send_data() claims a free TCS through find_free_tcs(), which polls RSC_DRV_STATUS until it
+        // reads non-zero, and claim_tcs_for_req() refuses a second request to an address that is still in flight -- "the h/w does
+        // not like if we send a request to the same address, when one is already in-flight or being processed". Three votes per rail
+        // go to the same VREG resource (offset, +4, +8), so each one has to be finished before the next: that is what the STATUS
+        // poll below buys, and why this driver reuses one TCS instead of running them past each other. The command is then waited
+        // for through RSC_DRV_CMD_STATUS -- bits 8 and 16 are the issue and the completion of this TCS's command (the pair this
+        // board's other USB path already decodes). Both waits are bounded on the timebase: nothing here sleeps on the timer that
+        // never fires. A one-line record goes out per vote, because a vote that stalls the RSC takes the whole kernel with it and
+        // the panel is the only channel -- the last line then says which write it was.
         unsigned votes = 0, completed = 0;
         auto send = [&](uint32_t address, uint32_t value) {
             const unsigned index = ++votes;

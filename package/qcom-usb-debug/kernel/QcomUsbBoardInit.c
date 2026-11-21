@@ -177,7 +177,7 @@ static int voteRails(int superSpeed) {
     values[0] = 7;
     values[1] = rails[i].mv;
     values[2] = 1;
-    /* RSC_DRV_STATUS alone says whether the TCS is free (rpmh-rsc.c tcs_is_free); the control register
+    /* RSC_DRV_STATUS alone says whether the TCS is free (rpmh-rsc.c find_free_tcs); the control register
      * keeps its AMC mode bits after a transfer, so it is printed, never tested. */
     uint32_t status = rd(&rsc, tcs + kV3TcsStatus);
     uint32_t control = rd(&rsc, tcs + layout.control);

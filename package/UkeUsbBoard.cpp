@@ -109,7 +109,7 @@ bool voteRails(bool superSpeed) {
     constexpr unsigned kIssuedAndComplete = (1u << 8) | (1u << 16);
     bool ok = supportedRscVersion(rscId);
     auto submit = [&](const char *resource, const uint32_t *addr, const uint32_t *val, unsigned count) {
-        /* RSC_DRV_STATUS alone says whether the TCS is free (rpmh-rsc.c tcs_is_free). The control
+        /* RSC_DRV_STATUS alone says whether the TCS is free (rpmh-rsc.c find_free_tcs). The control
          * register keeps its AMC mode bits after a transfer -- the next request clears them -- so it
          * is reported, never tested. */
         const uint32_t status = rsc.read(tcs + kV3TcsStatus);
