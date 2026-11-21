@@ -820,7 +820,7 @@ void followOrientation() {
     Region tlmm = {};
     if (!mapRegion(tlmm, 0xf100000, 0x10000)) return;
     const uint32_t reverse = tlmm.va[(11 * 0x1000 + 4) / 4] & 1u;
-    tlmm.map->release();
+    (void)tlmm;   // an ml_io_map window lives for the boot; mapRegion leaves Region::map null, so nothing is released here
     if (gSuperSpeed && reverse != native_usb_stats[34]) {
         gSuperSpeed = superSpeedInit();
         if (!gSuperSpeed) selectUtmiClock();
