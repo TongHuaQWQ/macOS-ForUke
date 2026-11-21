@@ -6935,3 +6935,34 @@ one of them was hardware:
 The reason these cost a round each instead of a line of output: a store to an unimplemented address on this
 fabric does not fault, it never returns, so there is no exception and no panic text. The mark lines through
 stages 4 to 9 are the countermeasure -- the last one on the panel names the register group.
+
+## 101. 2026-11-21: the bring-up ladder is green -- stage 9
+
+    qcom-dwc3: mark gsnpsid 33313130
+    qcom-dwc3: stage 9
+    UKE usb: bring-up stage=9 gsnpsid=33313130 gdsc=f8222f80/f8222800 smmu=00450000 repeater=02290180 rpmh=0
+    UKE usb: alive #1 (up) ... beats ... uke-heartbeat 16
+
+| reading | meaning |
+| --- | --- |
+| `stage 9` | all nine: map, rails (skipped), GDSC, clock/reset, SMMU, repeater, PHY table, Apple window, GSNPSID |
+| `gsnpsid=33313130` | a DWC_usb31-family id through the Apple window at 0xa6c120 (the check accepts `3331xxxx`) |
+| `gdsc=f8222f80/f8222800` | both USB30 GDSCs report powered (bit 31) |
+| `smmu=00450000` | the SID 0x40 stage-1 context is live (`slot 0 bank 69 pages 128`) |
+| `repeater=02290180` | APID 553 (`0x229`), one try, status `0x80` = bit 7 ready |
+| `rpmh=0` | nothing voted -- `usb-rails=0`; stage 3 already proved the bootloader's power is enough |
+| helper `dsts/dcfg/gctl/gusb2phycfg = 0` | not a fault: `native_usb_stats[15..18]` are filled by the role-start path, i.e. only with `usb=2` sampling |
+
+The second photograph, minutes later, is the kernel in userland (AppleImage4, IONVRAM sync,
+AppleARMSFarmInit, CoreAnalyticsHub). No panic, no stall.
+
+**The four silent stops are closed**, and the chain is worth having in one place: the AMC write order, then
+the TCSR clkref address, then the TLMM base, then two pieces of hardware this board does not have. The
+driver's `bringUp()` is now line for line upstream's (stage 1 to 9); what differs is board data and the
+`mark`/diagnostic lines that found those four.
+
+Next round is `usb=4`, upstream's second half: load `com.apple.driver.AppleUSBXDCI` (+ AppleUSBXHCI), run
+the subclass static init between `preModLoad` and `postModLoad`, then `qcom_dwc3_publish()`, which has its
+own ladder -- 10 nub registered, 11 controller started, 12 role thread, and -12..-17 naming a failure.
+After that the target is upstream's README sentence: enumerate as 05ac:12ab, Trust dialog, pair with a Mac,
+lockdown sessions, service start.
