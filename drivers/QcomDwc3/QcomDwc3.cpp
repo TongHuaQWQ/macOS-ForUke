@@ -96,7 +96,14 @@ bool powerRails() {
     if (!db) return false;
     Region dbw = {}, rsc = {};
     bool ok = mapRegion(dbw, kCmdDb, kCmdDbSize) && mapRegion(rsc, kRsc, 0x10000);
+    // Both mappings and the sweep length are printed before the sweep, because the sweep is where the
+    // 2026-11-21 boots stop: 'stage 2' then 'platform error #1 ... (ignored)' and nothing after, with no
+    // chance for a line placed past the fault to appear. stage 21/22/23 mark the sub-steps so the next
+    // photograph says which one was reached even if the console's tail is overwritten.
+    IOLog("qcom-dwc3: cmd-db map=%p rsc map=%p size=%u readable=%u\n", dbw.va, rsc.va,
+          (unsigned)kCmdDbSize, (unsigned)kCmdDbReadable);
     if (ok) {
+        stage(21);
         /* Bounded by the header's own length, not by kCmdDbSize. The 2026-11-21 boot shows why:
          * the sweep below aborted at 'qcom-dwc3: stage 2' with
          *   platform error #1 far=0xfffffff16d58c000 pc=0xfffffff00bbea9ac (ignored)
@@ -110,7 +117,9 @@ bool powerRails() {
         if (length > kCmdDbReadable) { length = kCmdDbReadable; }
         for (uint32_t i = 0; i < length; i += 4) {const uint32_t w = dbw.va[i / 4]; memcpy(db + i, &w, 4);}
         for (uint32_t i = length; i < kCmdDbSize; i += 4) {const uint32_t zero = 0; memcpy(db + i, &zero, 4);}
+        stage(22);
         const uint32_t rscWord = rsc.va[0];
+        stage(23);
         const QcomRscLayout layout = qcom_rsc_layout(rscWord);
         // One line, before any vote: the previous boot ended in stage 2 with no stage 3 and no
         // verdict line, so the next wall has to be visible from the panel.
