@@ -693,6 +693,13 @@ OSDefineMetaClassAndStructors(QcomDwc3Nub, IOService)
 
 // Whether the device stack may have the core: false while the core is in the host role or going there.
 static volatile bool gDeviceStackAllowed = true;
+// Apple's start() drives its reset sequence through the callbacks below, and a crash inside one of them looks exactly like a
+// crash in start(). Each callback marks itself, but only the first few times: XDCI_DESIRED_POWER in particular is called on
+// every power transition, and the panel holds one screenful.
+uint32_t gXdciCallbackMarks[4];
+void callbackMark(unsigned index, const char *what) {
+    if (gXdciCallbackMarks[index]++ < 3) IOLog("qcom-dwc3: mark %s\n", what);
+}
 class QcomDwc3Xdci : public AppleUSBXDCI {
     OSDeclareDefaultStructors(QcomDwc3Xdci)
     uint32_t read(uint32_t offset) {return (*reinterpret_cast<volatile uint32_t **>(reinterpret_cast<uint8_t *>(this) + 0x450))[offset / 4];}
@@ -717,8 +724,12 @@ public:
     bool XDCI_KEEP_CONFIGURATIONS() override {return false;}
     bool XDCI_TRANSPORT_ACTIVE() override {return true;}
     // The power the family asks for at each change, including when configd's description starts the stack: off while the host role has the core.
-    uint32_t XDCI_DESIRED_POWER() override {return gDeviceStackAllowed ? AppleUSBXDCI::XDCI_DESIRED_POWER() : 0;}
+    uint32_t XDCI_DESIRED_POWER() override {
+        callbackMark(0, "xdci desired-power");
+        return gDeviceStackAllowed ? AppleUSBXDCI::XDCI_DESIRED_POWER() : 0;
+    }
     IOReturn XDCI_POWER_ON() override {
+        callbackMark(1, "xdci power-on");
         native_usb_stats[12] = native_usb_stats[12] + 1;
         vbusOverride(true);
         native_usb_stats[15] = read(0x70c);
@@ -731,11 +742,14 @@ public:
     }
     // One event buffer and interrupter; the Linux driver has one as well. The scale and the periodic count are read in the reset.
     void XDCI_PARAMETERS() override {
+        callbackMark(2, "xdci parameters");
         uint32_t *fields = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(this) + 0x2628);
         fields[0] = 1; fields[1] = 0; fields[2] = 4; fields[3] = 4;
     }
     IOReturn XDCI_CONTROLLER_RESET() override {
+        callbackMark(3, "xdci controller-reset: super");
         const IOReturn result = AppleUSBXDCI::XDCI_CONTROLLER_RESET();
+        IOLog("qcom-dwc3: mark xdci controller-reset -> %d\n", (int)result);
         native_usb_stats[14] = (uint32_t)result;
         if (result != kIOReturnSuccess) return result;
         uint32_t *fields = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(this) + 0x2628);
