@@ -73,6 +73,8 @@ constexpr uint32_t kCmdDbReadable = 0xc000;
 // rpmh-rsc.c numbers the groups in that order, so ACTIVE is TCS 0, 1 and 2 and the last one is ours --
 // out of the way of the TCS the bootloader's last vote may still hold.
 constexpr unsigned kOwnedTcs = 2;
+// qcom,drv-id of the node this driver talks through (live.dts:6331, drv@2): DRV_PRNT_CHLD_CONFIG gives each DRV id its own field.
+constexpr unsigned kDrvIdForPanel = 2;
 struct Region {IOMemoryMap *map; volatile uint32_t *va;};
 Region gGcc, gScratch, gPhy, gTcsrMap;
 bool gSuperSpeed;
@@ -145,7 +147,14 @@ bool powerRails() {
         const uint32_t tcsBase = kRscTcsBase + layout.tcs_stride * kOwnedTcs;
         // rpmh_rsc_probe() leaves the interrupts of the active TCSes enabled, and IRQ_STATUS only latches for an enabled one.
         rsc.va[(kRscTcsBase + layout.irq_enable) / 4] |= 1u << kOwnedTcs;
-        // state of the TCS this boot inherits: RSC_DRV_CONTROL still carries the bootloader's AMC mode bits, RSC_DRV_STATUS is zero
+        // What the DRV says about itself, before anything is written: DRV_PRNT_CHLD_CONFIG (drv base + 0x0c) carries the TCS count of
+        // each DRV id in bits 6*id+5:6*id and the commands per TCS in 31:27 (rpmh-rsc.c, DRV_NUM_TCS_/DRV_NCPT_), and bit 24 is the
+        // hardware solver. A TCS count that does not reach ours, or zero commands per TCS, would explain a trigger that never
+        // completes -- and neither can be read from the panel any other way.
+        const uint32_t config = rsc.va[0x0c / 4];
+        IOLog("qcom-dwc3: rsc drv=%u prnt=%08x tcs=%u ncpt=%u solver=%u\n", (unsigned)kDrvIdForPanel, (unsigned)config,
+              (unsigned)((config >> (6 * kDrvIdForPanel)) & 0x3f), (unsigned)((config >> 27) & 0x1f), (unsigned)((config >> 24) & 1));
+        // State of the TCS this boot inherits: RSC_DRV_CONTROL still carries the bootloader's AMC mode bits, RSC_DRV_STATUS is zero
         // while the TCS is busy, and the interrupt registers say whether anything is in flight. Printed once, before any vote.
         IOLog("qcom-dwc3: rsc tcs=%u ctl=%08x sts=%08x irqen=%08x irqsts=%08x\n", (unsigned)kOwnedTcs,
               (unsigned)rsc.va[(tcsBase + layout.control) / 4], (unsigned)rsc.va[(tcsBase + layout.status) / 4],
