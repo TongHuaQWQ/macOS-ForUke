@@ -1100,7 +1100,35 @@ extern "C" void qcom_dwc3_publish(void) {
         // calls and nothing else, so each one now names itself: alloc (the metaclass), init, attach, start. The metaclass and
         // the object's isa are printed too, because "the class we registered" and "the class the allocator used" have to be
         // the same object for any of the four to be real calls.
-        IOLog("qcom-dwc3: mark xdci meta=%p\n", (void *)&QcomDwc3Xdci::gMetaClass);
+        // The two panels of 2026-11-22 both stopped between "mark xdci alloc" and the isa print, so the fault is inside
+        // OSTypeAlloc() itself -- before any of the four calls, and before any virtual dispatch of ours. OSTypeAlloc is
+        // one indirect call into libkern, so it is split here into the parts that can be wrong, cheapest first:
+        //   1. what the metaclass believes about itself (name, class size, superclass) -- ours and the base's;
+        //   2. a control: allocate one of this port's own plain IOService subclasses, which already worked at stage 10;
+        //   3. the base class on its own, with none of our overrides in it;
+        //   4. ours.
+        // Whichever line is last is the one that is wrong, and (2) versus (3) separates "the allocator is broken now"
+        // from "Apple's class cannot be constructed through this ABI" from "our subclass cannot".
+        IOLog("qcom-dwc3: mark xdci meta self=%p name=%s size=%u super=%p\n", (void *)&QcomDwc3Xdci::gMetaClass,
+              QcomDwc3Xdci::gMetaClass.getClassName(), (unsigned)QcomDwc3Xdci::gMetaClass.getClassSize(),
+              (void *)QcomDwc3Xdci::gMetaClass.getSuperClass());
+        // The base metaclass is the first thing this driver touches that lives in Apple's kext rather than in this
+        // kernel's own objects: `&AppleUSBXDCI::gMetaClass` is a symbol the prelink had to bind, and it is also what
+        // the bound constructor installs into the object. Printing it and then reading through it separates "the
+        // binding is right" (the reads answer) from "the binding points outside the image" (a data abort here,
+        // before anything of ours runs).
+        IOLog("qcom-dwc3: mark xdci base meta at %p\n", (void *)&AppleUSBXDCI::gMetaClass);
+        const OSMetaClass *baseMeta = &AppleUSBXDCI::gMetaClass;
+        IOLog("qcom-dwc3: mark xdci base meta size=%u super=%p name=%s\n", (unsigned)baseMeta->getClassSize(),
+              (void *)baseMeta->getSuperClass(), baseMeta->getClassName());
+        IOLog("qcom-dwc3: mark xdci base size=%u super=%p isa_size=%u\n", (unsigned)AppleUSBXDCI::gMetaClass.getClassSize(),
+              (void *)AppleUSBXDCI::gMetaClass.getSuperClass(), (unsigned)sizeof(QcomDwc3Xdci));
+        mark("xdci ctl alloc");
+        QcomDwc3Nub *control = OSTypeAlloc(QcomDwc3Nub);
+        IOLog("qcom-dwc3: mark xdci ctl alloc -> %p\n", (void *)control);
+        mark("xdci base alloc");
+        AppleUSBXDCI *probe = OSTypeAlloc(AppleUSBXDCI);
+        IOLog("qcom-dwc3: mark xdci base alloc -> %p\n", (void *)probe);
         mark("xdci alloc");
         QcomDwc3Xdci *controller = OSTypeAlloc(QcomDwc3Xdci);
         if (controller) IOLog("qcom-dwc3: mark xdci isa=%p\n", *(void **)controller);
