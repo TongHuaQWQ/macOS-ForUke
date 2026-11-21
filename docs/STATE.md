@@ -6847,3 +6847,41 @@ Parallel experiment (`ci-b297`): the vote rotates over all three ACTIVE TCSes an
 counts. If that survives 17 votes, the fix belongs in the canonical path; if it stops at the same
 place, the RSC is refusing something else and the answer will come from the rail-by-rail record
 already printed.
+
+## 99. 2026-11-21: the clkref gate is at 0x01ff1118, and sheng's TCSR offsets are not
+
+The `usb8` panel (with `usb-rails=0` and a mark on every register group) narrowed the wall to a single
+pair of stores. Everything before them is on screen and good: GDSC (stage 3 passed without the RPMh vote),
+both RCGs, both branch groups. The last line is
+
+    qcom-dwc3: mark tcsr clkref 1f40000
+
+and the next mark never printed, so the boot died in
+
+    gTcsrMap.va[0x118 / 4] |= 1u;    gTcsrMap.va[0x108 / 4] |= 1u;
+
+Those two offsets are `sheng`'s, taken verbatim from an SM8550 whose TCSR is at 0x1fd5000
+(`work/analysis/refs/unixnu-qcomdwc3/QcomDwc3.cpp:40`). Rebasing the base to this board's 0x1f40000 and
+leaving the offsets aimed them at 0x1f40108/0x1f40118, inside the tcsr_mutex aperture
+(`live.dts:14342`, `syscon@1f40000` + 0x20000). That block does not implement those addresses, a store to
+an unimplemented address on this fabric never completes, and the core that issued it stops -- no fault, no
+panic text. Same ending as usb6 and usb7, different cause.
+
+This board's USB2 clkref gate is in the TCSR clock controller at +0xb1118, i.e. **0x01ff1118**:
+
+| evidence | where |
+| --- | --- |
+| this repository's own board implementation, already run on this unit | `package/UkeUsbBoard.cpp:64` `refClock()`, `static_assert(pa == 0x01ff1118)` |
+| the same pair in the C implementation | `package/qcom-usb-debug/kernel/QcomUsbBoardInit.c:118` |
+| a measured read of that address (single-clock regmap dump under TWRP) | `docs/USB2-20261115.md:42`, `CBCR=0x00000001` |
+| the OEM node | `live.dts:13408`, `clock-controller@1f40000` = `qcom,pineapple-tcsrcc` |
+
+`clocksAndResets()` now calls `clkrefGate(0x01ff1118)`: map the page, read the clk_branch2 register, set
+bit 0 only when it is clear, delay, read back, and print the address with both values in its own mark
+line. `kTcsr` stays mapped but is never written again.
+
+Also recorded here so it does not cost another round: the `usb8b-tcsrotate` image carried the right
+kernel (built from `ci-b297`, `usb-rails=1`) but the **command line came from the local device checkout**,
+which sits on `usb-on-macos` with `usb-rails=0`. Since `usb-rails` is read at run time, both panels of
+that evening are identical. A vote experiment has to package with `--device` pointing at a worktree of the
+experiment branch.
