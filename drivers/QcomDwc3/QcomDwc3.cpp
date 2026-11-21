@@ -699,11 +699,17 @@ class QcomDwc3Xdci : public AppleUSBXDCI {
     void write(uint32_t offset, uint32_t value) {(*reinterpret_cast<volatile uint32_t **>(reinterpret_cast<uint8_t *>(this) + 0x450))[offset / 4] = value; barrier();}
 public:
     bool start(IOService *provider) override {
+        // Two marks inside start(), because the 2026-11-22 crash was an instruction abort and "which of start()'s two halves"
+        // decides the next round: the map of the provider's memory, or Apple's own start, which runs its reset sequence
+        // through the XDCI_* overrides below.
+        mark("xdci start: map provider");
         uint8_t *self = reinterpret_cast<uint8_t *>(this);
         IOMemoryMap *map = provider->mapDeviceMemoryWithIndex(0, kIOMapInhibitCache);
         if (!map) return false;
         *reinterpret_cast<IOMemoryMap **>(self + 0x448) = map;
         *reinterpret_cast<uint64_t *>(self + 0x450) = map->getVirtualAddress();
+        IOLog("qcom-dwc3: mark xdci start: window=%llx\n", (unsigned long long)map->getVirtualAddress());
+        mark("xdci start: super");
         return AppleUSBXDCI::start(provider);
     }
     // True keeps the family's already selected configuration list (IOUSBDeviceController builds it when this is false): Apple's SoC
@@ -1088,9 +1094,21 @@ extern "C" void qcom_dwc3_publish(void) {
         nub->registerService();
         OSSafeReleaseNULL(ranges); OSSafeReleaseNULL(range); OSSafeReleaseNULL(zero);
         stage(10);
+        // Four separate calls, four marks. The 2026-11-22 usb=4 boot got `xdci load -> 0` and this `stage 10` and then died
+        // in an instruction abort (esr 0x86000006 = instruction abort, same EL, level 2 translation fault; pc 0xfffffff00f7da6a0,
+        // past the end of the kernel's text), which is a jump through a pointer that is not code. That is one of these four
+        // calls and nothing else, so each one now names itself: alloc (the metaclass), init, attach, start. The metaclass and
+        // the object's isa are printed too, because "the class we registered" and "the class the allocator used" have to be
+        // the same object for any of the four to be real calls.
+        IOLog("qcom-dwc3: mark xdci meta=%p\n", (void *)&QcomDwc3Xdci::gMetaClass);
+        mark("xdci alloc");
         QcomDwc3Xdci *controller = OSTypeAlloc(QcomDwc3Xdci);
+        if (controller) IOLog("qcom-dwc3: mark xdci isa=%p\n", *(void **)controller);
+        mark("xdci init");
         if (!controller || !controller->init()) {stage(-14); break;}
+        mark("xdci attach");
         if (!controller->attach(nub)) {stage(-15); break;}
+        mark("xdci start");
         const bool started = controller->start(nub);
         native_usb_stats[19] = started;
         if (!started) {stage(-16); break;}
