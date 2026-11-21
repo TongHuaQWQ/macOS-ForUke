@@ -6779,3 +6779,43 @@ Checked before pushing: the new patch applies both alone and after its sibling
 (`zzzzzzzzzzzzzzzzzz-qcom-usb-debug-worker.patch`), `check-patch-copies.py` and `check-patch-hygiene.py`
 (35 patches, 0 problems) pass, `porting-record.py check` passes (14 areas), the command line is still 971 of
 1000 bytes, and `QcomDwc3Platform.c` compiles clean freestanding.
+
+## 97. 2026-11-21: the RSC stopped answering because the AMC bits were cleared in one store
+
+The `usb6` panel got past everything stage 2 had been hiding — cmd-db readable to 48 KiB, `drv-2` at
+`0x17a20000`, `rsc=00030200` (RSC 3.2, so the version-3 table and `tcs_stride=672` are right), and both
+`ldoe1` and `ldoe3` found in the database — and then died four rail votes later with nothing printed at
+all: no fault, no stage 3, no verdict. The last line was the fourth `UKE usb: wait 2 ms at stage 23`,
+i.e. the `IOSleep(2)` inside the fourth `send()`; the writes after it never returned.
+
+`qcom_rpmh_active_request()` was clearing `RSC_DRV_CONTROL` with a single store of zero, at the start of a
+request and again in `qcom_rpmh_finish()`. `drivers/soc/qcom/rpmh-rsc.c`'s `__tcs_set_trigger()` forbids
+exactly that:
+
+    HW req: Clear the DRV_CONTROL and enable TCS again. While clearing ensure that the AMC mode trigger
+    is cleared and then the mode enable is cleared.
+
+An AMC put into that state does not answer the next trigger, and a store with no response stops the core
+that issued it — which is why the panel simply ends, and why no panic line exists to read. The same file
+gives the two other details the old sequence got wrong: `rpmh_rsc_send_data()` clears the previous
+transfer's `CMD_ENABLE`/`CMD_WAIT_FOR_CMPL` *before* writing the buffer, and `tcs_tx_done()` never touches
+`control` when it reclaims a TCS.
+
+What is in the tree now:
+
+| change | where |
+| --- | --- |
+| `QcomRpmhWrite` carries a `mask`; a masked entry is a read-modify-write | `package/QcomRpmh.h` |
+| the write list is mainline's, register for register: masks off, buffer, `WAIT_FOR_CMPL`, `CMD_ENABLE`, then trigger-off / enable-off / enable-on / trigger-on | `package/QcomRpmh.c` |
+| `qcom_rpmh_finish()` clears the masks and acknowledges `IRQ_CLEAR`, and leaves `control` alone | same |
+| `irq_enable` (0x00) and `cmd_status` (v3 `0x40`, v2 `0x3c`) in both register tables | same |
+| a vote waits for `RSC_DRV_STATUS` to be idle and for `CMD_STATUS` bits 8+16, both bounded on the timebase, and prints one line per vote | `drivers/QcomDwc3/QcomDwc3.cpp` |
+| a rail that cannot be voted no longer ends the probe; `rails votes=… completed=…` records it | same |
+| order, addresses, masks and "no store may clear both AMC bits" pinned on the host | `drivers/QcomDwc3/tests/rpmh_host.cpp` (new) |
+
+The twin `package/qcom-usb-debug/soc/QcomRpmh.{c,h}` stays byte-identical, and both other call sites
+(`package/UkeUsbBoard.cpp`, `package/qcom-usb-debug/kernel/QcomUsbBoardInit.c`) now apply the mask and
+test `RSC_DRV_STATUS` alone for "busy" — `control` keeps its AMC bits after a completed transfer, so
+testing it there made the second rail look busy forever.
+
+Round record: `work/analysis/2026-11-21-usb7-tcs-order.md`.
