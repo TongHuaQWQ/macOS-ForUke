@@ -60,11 +60,21 @@ bool gSuperSpeed;
 // Every stage is logged as it is entered, not only reported once bringUp() returns: a round that hangs in
 // a later stage has to say which ones were reached, and the panel is the only channel on this board.
 void stage(int value) {native_usb_stats[0] = (uint32_t)value; IOLog("qcom-dwc3: stage %d\n", value);}
+// Mapped through ml_io_map(), not through IODeviceMemory::map().
+//
+// The 2026-11-21 boot (image usb2) shows why: the worker starts, prints its first line and
+// "wait 250 ms at stage 0", and then never reaches stage 1, while the panel is full of
+// "Fileset-wait: IOResources timeout 18446744073709551615 (Infinite)" and
+// "Couldn't alloc class NativeVFS". This probe runs from the first statement of
+// bsd_autoconf(), before IOKit's boot has published IOResources, and
+// IODeviceMemory::map() waits on exactly those services. ml_io_map() is the pre-IOKit path
+// (the same one QcomXnuUsbDebug uses for its own windows) and never waits on a service.
+extern "C" vm_offset_t ml_io_map(vm_offset_t phys, vm_size_t size);
+
 bool mapRegion(Region &r, uint64_t pa, uint64_t bytes) {
-    IODeviceMemory *d = IODeviceMemory::withRange(pa, bytes);
-    r.map = d ? d->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
-    OSSafeReleaseNULL(d);
-    r.va = r.map ? reinterpret_cast<volatile uint32_t *>(r.map->getVirtualAddress()) : nullptr;
+    r.map = nullptr;
+    const vm_offset_t va = ml_io_map(static_cast<vm_offset_t>(pa), static_cast<vm_size_t>(bytes));
+    r.va = va ? reinterpret_cast<volatile uint32_t *>(va) : nullptr;
     return r.va != nullptr;
 }
 void barrier() {__asm__ volatile("dsb sy" ::: "memory");}
@@ -117,8 +127,8 @@ bool powerRails() {
             native_usb_stats[9] = native_usb_stats[9] | 0x80000000u;
         } else ok = false;
     }
-    if (dbw.map) dbw.map->release();
-    if (rsc.map) rsc.map->release();
+    (void)dbw; (void)rsc;   // ml_io_map windows live for the boot
+
     IOFreeData(db, kCmdDbSize);
     return ok;
 }
@@ -227,7 +237,7 @@ bool repeater(bool init, bool host) {
         }
     }
     Region *regions[] = {&core, &cnfg, &obs, &chn};
-    for (Region *r : regions) if (r->map) r->map->release();
+    (void)regions;   // ml_io_map windows live for the boot
     return ok;
 }
 void phyInit() {
@@ -363,7 +373,7 @@ bool superSpeedInit() {
     if (!mapRegion(tlmm, 0xf100000, 0x10000)) return false;
     const bool reverse = tlmm.va[(11 * 0x1000 + 4) / 4] & 1u;                   // orientation-gpios, tlmm 11, active high
     native_usb_stats[34] = reverse;
-    tlmm.map->release();
+    (void)tlmm;
     return retimerInit(reverse) && qmpInit(reverse);
 }
 Region gSmmu;
@@ -623,7 +633,7 @@ bool bringUp() {
     if (!mapRegion(window, kAppleWindow, 0x1000)) {stage(-8); return false;}
     const uint32_t id = window.va[0x120 / 4];
     native_usb_stats[1] = id;
-    window.map->release();
+    (void)window;
     if ((id & 0xffff0000u) != 0x55330000u && (id & 0xffff0000u) != 0x33310000u && (id & 0xffff0000u) != 0x33320000u) {stage(-9); return false;}
     stage(9);
     return true;
