@@ -53,6 +53,17 @@ constexpr uint64_t kCore = 0x0a600000, kAppleWindow = kCore + 0xc000, kQscratch 
     // The TCSR clock controller's base (tcsrcc@1f40000, live.dts:13408). Note that its USB2 clkref gate is NOT at
     // an offset inside the first page: it is at +0xb1118, which is clkrefGate()'s business (0x01ff1118).
     kTcsr = 0x1f40000, kPhy = 0x088e3000, kSmmu = 0x15000000, kCmdDb = 0x81c60000;
+// TLMM is pinctrl@f000000, reg = <0xf000000 0x1000000> (live.dts:7701; the same node in the vendor DT). The
+// 0xf100000 this driver inherited sits one MiB into that aperture, which is not "the same block shifted": each pin
+// has its own 0x1000 page, so 0xf100000 + n*0x1000 is GPIO 256+n. Pins past this SoC's last one are not implemented,
+// and reading one stopped the bus on the 2026-11-21 usb9 boot (the panel's last line was the mark before it).
+constexpr uint64_t kTlmm = 0xf000000;
+// Two things this board does not have, and sheng's does. This board's DT declares usb_qmp_dp_phy (ssphy@88e8000) and
+// no redriver/retimer node at all -- grep ps5169/retimer/redriver in live.dts and vendor_boot.dts finds nothing --
+// and usb0 carries no orientation-gpios property. So the PS5169 bring-up (GPIO 7 as its reset, GPIO 28/29 as its
+// bus, and the qupv3 clocks behind it) is another board's wiring, and the orientation pin is unknown here. Both are
+// left out rather than pointed at pins that may belong to a panel or a touch controller.
+constexpr bool kBoardHasRetimer = false, kBoardHasOrientationGpio = false;
 // The apps RSC is three 64 KiB drive windows, not one block (live DT, rsc@17a00000):
 //   reg = <0x17a00000 0x10000  0x17a10000 0x10000  0x17a20000 0x10000>
 //   reg-names = "drv-0", "drv-1", "drv-2", and the AP talks through drv-2
@@ -81,6 +92,8 @@ constexpr unsigned kDrvIdForPanel = 2;
 struct Region {IOMemoryMap *map; volatile uint32_t *va;};
 Region gGcc, gScratch, gPhy, gTcsrMap;
 bool gSuperSpeed;
+// The orientation pin's last sample, read once when the board declares one (kBoardHasOrientationGpio).
+uint32_t gTlmmOrientation;
 // Every stage is logged as it is entered, not only reported once bringUp() returns: a round that hangs in
 // a later stage has to say which ones were reached, and the panel is the only channel on this board.
 void stage(int value) {native_usb_stats[0] = (uint32_t)value; IOLog("qcom-dwc3: stage %d\n", value);}
@@ -440,7 +453,7 @@ bool retimerWrite(GeniI2c *bus, volatile uint32_t *se, uint8_t reg, uint8_t valu
 }
 bool retimerInit(bool reverse) {
     Region tlmm = {}, engine = {};
-    bool ok = mapRegion(tlmm, 0xf100000, 0x30000) && mapRegion(engine, 0xa80000, 0x4000);
+    bool ok = mapRegion(tlmm, kTlmm, 0x30000) && mapRegion(engine, 0xa80000, 0x4000);
     native_usb_stats[32] = 1u << 16;
     if (!ok) return false;
     // Reset released, then wait out the part's start (Linux: 20 ms).
@@ -522,14 +535,17 @@ bool qmpInit(bool reverse) {
 }
 // The USB 3 path, or false for USB 2 only with the UTMI clock in place of the PIPE clock (a USB 2 cable still works on the former).
 bool superSpeedInit() {
-    mark("orientation gpio tlmm");
-    Region tlmm = {};
-    if (!mapRegion(tlmm, 0xf100000, 0x10000)) return false;
-    const bool reverse = tlmm.va[(11 * 0x1000 + 4) / 4] & 1u;                   // orientation-gpios, tlmm 11, active high
+    // Neither of the two pins sheng's board consults exists here (see kBoardHasRetimer / kBoardHasOrientationGpio
+    // above). The orientation read is skipped rather than aimed at a guess: a wrong pin would report a wrong flip and
+    // swap the SuperSpeed lanes, which is worse than not swapping them.
+    const bool reverse = kBoardHasOrientationGpio ? (gTlmmOrientation & 1u) != 0 : false;
     native_usb_stats[34] = reverse;
-    (void)tlmm;
-    mark("retimer ps5169");
-    if (!retimerInit(reverse)) return false;
+    if (!kBoardHasRetimer) {
+        mark("retimer none on this board");
+    } else {
+        mark("retimer ps5169");
+        if (!retimerInit(reverse)) return false;
+    }
     mark("qmp usb3 phy");
     return qmpInit(reverse);
 }
@@ -893,8 +909,9 @@ void setCoreRole(int role) {
 }
 // qmp_combo_typec_switch_set and ps5169: the lanes follow the plug. The GPIO means something once a cable is in.
 void followOrientation() {
+    if (!kBoardHasOrientationGpio) return;   // this board declares no orientation pin; see kBoardHasRetimer
     Region tlmm = {};
-    if (!mapRegion(tlmm, 0xf100000, 0x10000)) return;
+    if (!mapRegion(tlmm, kTlmm, 0x10000)) return;
     const uint32_t reverse = tlmm.va[(11 * 0x1000 + 4) / 4] & 1u;
     (void)tlmm;   // an ml_io_map window lives for the boot; mapRegion leaves Region::map null, so nothing is released here
     if (gSuperSpeed && reverse != native_usb_stats[34]) {
