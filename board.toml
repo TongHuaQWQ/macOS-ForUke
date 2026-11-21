@@ -753,6 +753,12 @@ kernel_args = [
   # qcom-usb-debug= off, and uke_usb=0 keeps the old probe driver inert. Going back to the CDC-ACM console
   # is those three flipped and libQcomDwc3.a dropped from CONFIG_XNU_EXTRA_LD_ARCHIVES.
   "usb=1",
+  # usb-rails=0 keeps the board's RPMh vote out of this round and uses the power the bootloader left behind. It is not a shortcut
+  # past a hardware finding: on 2026-11-21 the vote ran (votes 1-5 of 17 completed, the sixth stopped the bus) and, with the vote
+  # skipped entirely, both USB30 GDSCs collapsed and read back powered -- stage 3 passed on that same inherited power. So the two
+  # questions are separable, and this round spends its photograph on the second one: the clock and PHY groups of stages 4 to 9,
+  # each of which now prints its own `qcom-dwc3: mark <group>` line before touching a block. The vote keeps its own round.
+  "usb-rails=0",
   # Arms the userdata half of UkeLastLog (UkeLastLog.c:789; the pram half needs panic_region and stays
   # off). The transport is freestanding - UfsLog.cpp/UfsLogKernel.c map the UFS host and the apps SMMU
   # themselves - so it does NOT need CONFIG_XNU_NATIVE_UFS, contrary to the 2026-11-17 report from the

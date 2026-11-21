@@ -81,6 +81,11 @@ bool gSuperSpeed;
 // Every stage is logged as it is entered, not only reported once bringUp() returns: a round that hangs in
 // a later stage has to say which ones were reached, and the panel is the only channel on this board.
 void stage(int value) {native_usb_stats[0] = (uint32_t)value; IOLog("qcom-dwc3: stage %d\n", value);}
+// A breadcrumb inside a stage. stage() says which step of bringUp() a boot reached; these say which register group inside that
+// step, because the steps below touch blocks whose clock may not be running yet and a store to an unclocked block on this SoC does
+// not fault -- it never completes, and the whole kernel goes with it (that is how the 2026-11-21 usb6/7 boots ended). One line
+// each, so the tail of the panel names the group the boot died in.
+void mark(const char *what) {IOLog("qcom-dwc3: mark %s\n", what);}
 // Mapped through ml_io_map(), not through IODeviceMemory::map().
 //
 // The 2026-11-21 boot (image usb2) shows why: the worker starts, prints its first line and
@@ -91,6 +96,8 @@ void stage(int value) {native_usb_stats[0] = (uint32_t)value; IOLog("qcom-dwc3: 
 // IODeviceMemory::map() waits on exactly those services. ml_io_map() is the pre-IOKit path
 // (the same one QcomXnuUsbDebug uses for its own windows) and never waits on a service.
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys, vm_size_t size);
+// PE_parse_boot_argn() is already declared by the headers this unit includes -- forceHostThread() below has parsed `usb-back` with
+// it since the role work, so `usb-rails` needs no new import.
 
 bool mapRegion(Region &r, uint64_t pa, uint64_t bytes) {
     r.map = nullptr;
@@ -264,14 +271,23 @@ bool rcg(uint32_t cmd, uint32_t cfg) {
 bool clocksAndResets() {
     // gcc-sm8550.c: USB30_PRIM_BCR 0x39000, QUSB2PHY_PRIM_BCR 0x12000; the core reset of dwc3_qcom_probe, the PHY reset of its init.
     volatile uint32_t *core = gGcc.va + 0x39000 / 4, *phy = gGcc.va + 0x12000 / 4;
+    mark("bcr usb30 039000");
     *core = *core | 1u; barrier(); IODelay(20);
     *core = *core & ~1u; barrier();
     // Master 200 MHz from GPLL0 (source 1, half divider 5), mock UTMI 19.2 MHz from XO, as the dtsi assigns them.
-    if (!rcg(0x3902c, 1u << 8 | 5u) || !rcg(0x39044, 0)) return false;
-    if (!branch(0x39088) || !branch(0x39018) || !branch(0x3908c) || !branch(0x39024) || !branch(0x39028)) return false;
+    mark("rcg master 03902c");
+    if (!rcg(0x3902c, 1u << 8 | 5u)) return false;
+    mark("rcg mockutmi 039044");
+    if (!rcg(0x39044, 0)) return false;
+    mark("branch 039088 039018");
+    if (!branch(0x39088) || !branch(0x39018)) return false;
+    mark("branch 03908c 039024 039028");
+    if (!branch(0x3908c) || !branch(0x39024) || !branch(0x39028)) return false;
+    mark("tcsr clkref 1f40000");
     gTcsrMap.va[0x118 / 4] = gTcsrMap.va[0x118 / 4] | 1u;
     gTcsrMap.va[0x108 / 4] = gTcsrMap.va[0x108 / 4] | 1u;
     barrier();
+    mark("bcr qusb2phy 012000");
     *phy = *phy | 1u; barrier(); IODelay(150);
     *phy = *phy & ~1u; barrier();
     return true;
@@ -308,6 +324,7 @@ bool spmiWrite(const Spmi &s, uint8_t addr, uint8_t value) {
 // init powers it and tunes it; every call sets the mode: eusb2_repeater_set_mode, host forces the 19.2 MHz clock enable on.
 bool repeater(bool init, bool host) {
     Region core = {}, cnfg = {}, obs = {}, chn = {};
+    mark("spmi map c400000");
     if (!mapRegion(core, 0xc400000, 0x3000) || !mapRegion(cnfg, 0xc42d000, 0x1000 * 2)) return false;
     Spmi s = {core.va, cnfg.va, nullptr, nullptr, 0, 0, -1};
     const uint32_t count = core.va[0x4 / 4] & 0x7ffu;
@@ -317,10 +334,12 @@ bool repeater(bool init, bool host) {
         const int owner = (int)(cnfg.va[i] & 7u);
         if (s.apid < 0 || owner == 0) s.apid = (int)i;
     }
+    IOLog("qcom-dwc3: mark spmi apid %d of %u\n", s.apid, (unsigned)count);
     bool ok = s.apid >= 0 && mapRegion(obs, 0xc440000, 0x20ull * (uint32_t)(s.apid + 1)) && mapRegion(chn, 0xc500000, 0x1000ull * (uint32_t)(s.apid + 1));
     if (ok) {
         s.obs = obs.va; s.chn = chn.va;
         if (init) {
+            mark("eusb2 repeater enable");
             // eusb2_repeater_reset(enable) -> init(): out of reset, then the twelve tuning bytes of the mode in
             // use. This port is a device, so the device sequence is the one that matters (QcomEusb2Phy.h has the
             // DT lines); the host variant is here because the DT has it and a role change re-selects it.
@@ -329,6 +348,7 @@ bool repeater(bool init, bool host) {
             for (uint8_t i = 0; i < kQcomRepeaterTuneBytes; ++i)
                 ok = ok && spmiWrite(s, (uint8_t)(kQcomRepeaterTuneFirst + i), tune[i]);
         }
+        mark("eusb2 repeater 19p2m");
         const uint8_t force = host ? 1u << 6 : 0;   // F_CLK_19P2M_EN, V_CLK_19P2M_EN
         ok = ok && spmiWrite(s, kQcomRepeaterForceEn5, force) && spmiWrite(s, kQcomRepeaterForceVal5, force);
         if (init) {
@@ -349,6 +369,8 @@ bool repeater(bool init, bool host) {
     return ok;
 }
 void phyInit() {
+    // The table is twenty-odd writes into an eUSB2 PHY that the QUSB2PHY GDSC and its clock have to be running for.
+    mark("eusb2 phy table");
     for (const auto &w : kQcomEusb2Init) {
         volatile uint32_t *reg = gPhy.va + w.offset / 4;
         *reg = (*reg & ~(uint32_t)w.mask) | w.value;
@@ -357,6 +379,7 @@ void phyInit() {
 }
 // dwc3_qcom_select_utmi_clk: no PIPE clock until the QMP PHY runs.
 void selectUtmiClock() {
+    mark("utmi clock select");
     volatile uint32_t *cfg = gScratch.va + 0x8 / 4;
     *cfg = *cfg | 1u << 8; barrier(); IOSleep(1);
     *cfg = *cfg | 1u | 1u << 3; barrier(); IOSleep(1);
@@ -477,12 +500,16 @@ bool qmpInit(bool reverse) {
 }
 // The USB 3 path, or false for USB 2 only with the UTMI clock in place of the PIPE clock (a USB 2 cable still works on the former).
 bool superSpeedInit() {
+    mark("orientation gpio tlmm");
     Region tlmm = {};
     if (!mapRegion(tlmm, 0xf100000, 0x10000)) return false;
     const bool reverse = tlmm.va[(11 * 0x1000 + 4) / 4] & 1u;                   // orientation-gpios, tlmm 11, active high
     native_usb_stats[34] = reverse;
     (void)tlmm;
-    return retimerInit(reverse) && qmpInit(reverse);
+    mark("retimer ps5169");
+    if (!retimerInit(reverse)) return false;
+    mark("qmp usb3 phy");
+    return qmpInit(reverse);
 }
 Region gSmmu;
 // Apple's controller driver does no cache maintenance: Apple's fabric is coherent. Here coherence comes from the SMMU's output
@@ -494,6 +521,7 @@ unsigned gSmmuBank, gSmmuPages;
 constexpr uint32_t kCbSctlr = 0x0, kCbTcr2 = 0x10, kCbTtbr0 = 0x20, kCbTtbr1 = 0x28, kCbTcr = 0x30, kCbMair0 = 0x38, kCbMair1 = 0x3c, kCbFsr = 0x58,
     kCbTlbiAsid = 0x610, kCbTlbSync = 0x7f0, kCbTlbStatus = 0x7f4;
 bool smmuIdentity() {
+    mark("smmu map 15000000");
     if (!mapRegion(gSmmu, kSmmu, 0xd0000)) return false;
     AppsSmmuLock guard;
     if (!guard.ready()) return false;
@@ -511,6 +539,7 @@ bool smmuIdentity() {
         if (((smr ^ kSid) & 0xffff & ~((smr >> 16) & 0x7fff)) == 0) {IOLog("qcom-dwc3: stream already mapped %x %x\n", smr, s2cr); return false;}
         if (((s2cr >> 16) & 3) == 0) used[(s2cr & 127) / 64] |= 1ull << ((s2cr & 127) % 64);
     }
+    IOLog("qcom-dwc3: mark smmu idr0 %08x idr1 %08x groups %u\n", (unsigned)idr0, (unsigned)idr1, groups);
     if (slot == 0xffffffffu) return false;
     // The last bank is the shared bypass bank. Take the highest bank no stream uses and no firmware left enabled.
     unsigned bank = 0xffffffffu;
@@ -521,6 +550,7 @@ bool smmuIdentity() {
         break;
     }
     if (bank == 0xffffffffu) return false;
+    IOLog("qcom-dwc3: mark smmu slot %u bank %u pages %u\n", slot, bank, pages);
     gSmmuTable = IOBufferMemoryDescriptor::withOptions((IOOptionBits)kIODirectionInOut | (IOOptionBits)kIOMemoryPhysicallyContiguous, 4096, 4096);
     if (!gSmmuTable || gSmmuTable->prepare() != kIOReturnSuccess) return false;
     uint64_t *table = static_cast<uint64_t *>(gSmmuTable->getBytesNoCopy());
@@ -725,7 +755,16 @@ bool bringUp() {
     // A rail this driver could not vote does not end the probe: the bootloader powered the USB core to hand this image over, so the
     // core, the PHY and the wrapper are very likely still up, and the stages below say far more than a boot that stops here. The
     // `rails votes=... completed=...` line is the record of what was missing, and the next stage's own verdict follows either way.
-    if (!powerRails()) IOLog("qcom-dwc3: rails not voted here, carrying on with what the bootloader left\n");
+    //
+    // `usb-rails=0` skips the whole vote. It exists because the two are separable questions -- "does the RSC take our votes" and
+    // "does the controller come up" -- and the 2026-11-21 boots showed the second one can be answered without the first: with the
+    // vote skipped, both USB30 GDSCs collapsed and read back powered (stage 3 passed) on the power the bootloader had already left.
+    unsigned rails = 1;
+    if (PE_parse_boot_argn("usb-rails", &rails, sizeof rails) && !rails) {
+        IOLog("qcom-dwc3: rails skipped (usb-rails=0), bootloader power state only\n");
+    } else if (!powerRails()) {
+        IOLog("qcom-dwc3: rails not voted here, carrying on with what the bootloader left\n");
+    }
     stage(3);
     if (!gdsc(0x50018, 6) || !gdsc(0x39004, 5)) {stage(-3); return false;}
     stage(4);
@@ -740,10 +779,12 @@ bool bringUp() {
     gSuperSpeed = superSpeedInit();
     if (!gSuperSpeed) selectUtmiClock();
     stage(8);
+    mark("apple window a6c000");
     Region window = {};
     if (!mapRegion(window, kAppleWindow, 0x1000)) {stage(-8); return false;}
     const uint32_t id = window.va[0x120 / 4];
     native_usb_stats[1] = id;
+    IOLog("qcom-dwc3: mark gsnpsid %08x\n", (unsigned)id);
     (void)window;
     if ((id & 0xffff0000u) != 0x55330000u && (id & 0xffff0000u) != 0x33310000u && (id & 0xffff0000u) != 0x33320000u) {stage(-9); return false;}
     stage(9);
