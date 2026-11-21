@@ -712,7 +712,10 @@ bool bringUp() {
     // A rail this driver could not vote does not end the probe: the bootloader powered the USB core to hand this image over, so the
     // core, the PHY and the wrapper are very likely still up, and the stages below say far more than a boot that stops here. The
     // `rails votes=... completed=...` line is the record of what was missing, and the next stage's own verdict follows either way.
-    if (!powerRails()) IOLog("qcom-dwc3: rails not voted here, carrying on with what the bootloader left\n");
+    // EXPERIMENT, ci-b295 only: this image never writes the RPMh TCS, so the bootloader's power state is used as it stands. It answers
+    // the question the panel cannot: is the RSC vote needed at all before the controller, the PHY and the wrapper are readable?
+    IOLog("qcom-dwc3: rails skipped by this image (bootloader state only)\n");
+    (void)powerRails;
     stage(3);
     if (!gdsc(0x50018, 6) || !gdsc(0x39004, 5)) {stage(-3); return false;}
     stage(4);
