@@ -614,22 +614,27 @@ def main():
     # difference is the section's own shift. Data pointers do not go through that path -- `&gMetaClass` read
     # back the right Apple metaclass in the same boot -- so the trampoline loads its target from a literal and
     # branches through a register, which is the representation that is already proven correct.
-    text, addresses, literals = '.text\n.p2align 2\n', '', '.section __DATA_CONST,__const\n.p2align 3\n'
+    # The trampoline's target lives in the *same* section the trampolines already use. Two builds that
+    # introduced a section of their own into this archive (run 44929858813, which instantiated an abstract
+    # Apple class and so dragged Apple's abstract vtable in, and the first version of this change, which put
+    # the literals in __DATA_CONST) both failed the kernel link with six storage symbols undefined --
+    # _mockfs_*, _corecrypto_kext_start and the two _native_verified_block_* -- while builds that only
+    # changed code inside __text linked. Nothing here needs a section of its own, so nothing here adds one.
+    text, addresses = '.text\n.p2align 2\n', ''
     for name, va in sorted(bindings.items()):
         if name in data_only:
             # Absolute, reached through GOT entries: a plain pointer the emitter neither signs nor moves.
             addresses += f'.globl {name}\n.set {name}, {va:#x}\n'
         else:
             addresses += f'.globl {name}.original\n.set {name}.original, {va:#x}\n'
-            literals += f'{name}.slot:\n .quad {name}.original\n'
             text += (f'.globl {name}\n{name}:\n bti c\n'
-                     f' adrp x16, {name}.slot@PAGE\n ldr x16, [x16, {name}.slot@PAGEOFF]\n br x16\n')
+                     f' adrp x16, {name}.slot@PAGE\n ldr x16, [x16, {name}.slot@PAGEOFF]\n br x16\n'
+                     f'.p2align 3\n{name}.slot:\n .quad {name}.original\n.p2align 2\n')
     (OUT / 'usb-bindings.S').write_text(text)
     (OUT / 'usb-addresses.S').write_text(addresses)
-    (OUT / 'usb-literals.S').write_text(literals)
-    for stem in ('usb-bindings', 'usb-addresses', 'usb-literals'):
+    for stem in ('usb-bindings', 'usb-addresses'):
         compile_unit(OUT / f'{stem}.S', c_record, OUT / f'{stem}.o', [], 'assembler-with-cpp')
-    objects += [OUT / 'usb-bindings.o', OUT / 'usb-addresses.o', OUT / 'usb-literals.o']
+    objects += [OUT / 'usb-bindings.o', OUT / 'usb-addresses.o']
 
     # The static initialisers must not run before uke_usb_probe asks for them (the driver registers its
     # classes only after the hardware answered), so they leave __mod_init_func and the one constructor
