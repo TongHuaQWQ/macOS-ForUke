@@ -86,6 +86,16 @@ name = "QcomDwc3"
 kind = "driver"
 local = "drivers/QcomDwc3"
 
+# Qualcomm Bluetooth over GENI UART (upstream UniXNU/QcaBluetooth@fa52814 extended with WCN6750
+# SoC support via qbt_boot_soc(), standalone fork at work/push/QcaBluetooth@7db9642).
+# Kept as a local feed override (same first-wins reason as QcomDwc3 and ArmCpu) so both
+# TongHuaQWQ/UniXNU@macos and local checkouts build our WCN6750-enabled copy via
+# scripts/build-qca-bluetooth.py.
+[[source]]
+name = "QcaBluetooth"
+kind = "driver"
+local = "drivers/QcaBluetooth"
+
 # The instrumented ArmCpu. prepareGic() fails silently by design, so on a board where the timer never ticks
 # there is no way to tell "the driver never matched" from "mapGic/initDistributor/wakeRedistributor returned
 # false". This copy reports each step and prints IGROUPR0/ISENABLER0 for PPI 27 once the GIC is up.

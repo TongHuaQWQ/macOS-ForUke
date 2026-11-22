@@ -1,0 +1,19 @@
+{
+  "device": "uke",
+  "chipset": "WCN6750",
+  "source": "Xiaomi Pad 7 stock BTFM.bin (241122.1.VOZCNXM.FACTORY_15.0; BTFW.MOSELLE.1.2.0-00268.2-PATCHZ-1.78998.3)",
+  "files": {
+    "msbtfw12.mbn": {
+      "bytes": 105956,
+      "sha256": "8b7d7531ffe3ecae9f7af9239370465409c88cf84b3431c17c271c3f22b6cae6"
+    },
+    "msbtfw12.tlv": {
+      "bytes": 93744,
+      "sha256": "4e18f59150a83961e86934d322e2b43beabd7171d61fcf78dee012f1a93254e0"
+    },
+    "msnv12.bin": {
+      "bytes": 6206,
+      "sha256": "4a039a6819077dfefbe2b933ee44476e802c2986d78826b9271f4b8c8faaa609"
+    }
+  }
+}

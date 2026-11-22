@@ -57,6 +57,9 @@ include = [
   # and kernel.py:archive_plan requires every selected component with a kernel build recipe to appear
   # in [kernel] archives. Restore these three lines together with the GPU archive entries.
   # "Adreno740", "AdrenoMetal",
+  # QcaBluetooth and QcomDwc3 are materialized through feeds.toml local overrides (drivers/QcaBluetooth,
+  # drivers/QcomDwc3) and compiled by scripts/build-qca-bluetooth.py and scripts/build-qcom-dwc3.py,
+  # keeping compatibility with older local UniXNU catalogs whose components.toml predates them.
   "GopFramebuffer", "QcomGeniSpi",
   "XnuPrelink", "DarwinBoot", "VerifiedRoot", "AirNir", "AdrenoPM4", "AdrenoFirmware", "ArmSmmu4K",
 ]
@@ -207,6 +210,8 @@ data_gib = 210
 skip_setup = false
 gpu_addon = false
 trust_components = ["StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
+bluetooth_tool = "scripts/build-bluetooth-userspace.py"
+bluetooth_target = "macos27"
 enabled = false
 
 [kernel]
@@ -328,6 +333,12 @@ archives = [
   # diversity, and emits the branch stubs that bind them to the prelinked collection's own code.
   # configs/uke-macos_defconfig force-loads the archive; `usb=1` decides at boot whether it runs.
   "build-qcom-dwc3.py",
+  # libQcaBluetooth.a (drivers/QcaBluetooth + SM7675 UART10 + WCN6750 WcnPower + BluetoothProbe):
+  # upstream QcaBluetooth extended with WCN6750 (3 Mbaud, msbtfw12/msnv12) and macOS 27.3 /dev/cu.BLTH
+  # (qbt_tty.c). BluetoothFirmware.c is compiled by build-sheng-source-storage.py into libShengUfs.a
+  # (matching upstream sheng). configs/uke-macos_defconfig force-loads libQcaBluetooth.a; `bluetooth=1`
+  # enables the worker thread at boot.
+  "build-qca-bluetooth.py",
   # libUkeUfsLog.a (package/UfsLog.cpp + package/UfsLogKernel.c): the freestanding UFS transport that
   # gives UkeLastLog.c's userdata half its native_ufs_log_* symbols without CONFIG_XNU_NATIVE_UFS.
   # configs/uke-macos_defconfig force-loads it through CONFIG_XNU_EXTRA_LD_ARCHIVES, so a configuration
@@ -771,6 +782,12 @@ kernel_args = [
   # nothing asks. With the counter in the beat line (`pwron=`) one panel then says which of the two it is: a
   # family that never powered the core (pwron=0, pullup forced, link still dead) or one that cannot connect.
   "usb-conn=1",
+  # Qualcomm WCN6750 Bluetooth over SM7675 UART10 (QUPv3_1 SE2 @ 0x888000, 3 Mbaud, /dev/cu.BLTH).
+  # The background worker waits for native_gpu_addon_stage >= 1 (staged /private/var/ngpu/firmware/qca)
+  # before powering WCN6750 rails, so early boot is unaffected. Add `log-bluetooth=2` (controller RX/
+  # process trace) or `log-bluetooth=3` (HCI ring buffer) or `bt-rails=0` (skip RPMh vote) when
+  # debugging (keep total kernel_args <= 1000 bytes; currently 995/1000 with bluetooth=1).
+  "bluetooth=1",
   # Arms the userdata half of UkeLastLog (UkeLastLog.c:789; the pram half needs panic_region and stays
   # off). The transport is freestanding - UfsLog.cpp/UfsLogKernel.c map the UFS host and the apps SMMU
   # themselves - so it does NOT need CONFIG_XNU_NATIVE_UFS, contrary to the 2026-11-17 report from the

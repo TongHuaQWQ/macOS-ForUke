@@ -200,6 +200,11 @@ zzzzzzzzzzzzzzzzzzz-uke-kext-registration-lock-order.patch
 # build/qcom-dwc3/libQcomDwc3.a wins wherever that archive is linked.
 zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch
 
+# uke-bluetooth-start: the board entry for Qualcomm WCN6750 Bluetooth (drivers/QcaBluetooth,
+# package/BluetoothProbe.cpp). Calls sheng_bluetooth_probe() from bsd_autoconf() right after
+# uke_usb_probe(), with a weak stub so bootstrap builds without libQcaBluetooth.a still link.
+zzzzzzzzzzzzzzzzzzzz-uke-bluetooth-start.patch
+
 # uke-boot-marks.patch is NOT applied: its uke_mark() calls ml_io_map() at _arm_init+0x34,
 # which is before arm_vm_init() at +0x768, so the bootstrap pmap is not up yet. The official entry
 # probe (patch-xnu-entry-probe.py) asked the same questions without touching the kernel source:

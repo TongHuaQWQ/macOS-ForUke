@@ -238,7 +238,11 @@ CONFIG_XNU_QCOM_USB_DEBUG=n
 # CDC-ACM console stays buildable (bash package/qcom-usb-debug/scripts/check-component.sh --fast proves it
 # in seconds), it is simply not linked. Flipping back is this key plus the three boot arguments named at
 # the usb=1 block in board.toml.
-CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a -Wl,-force_load,{tree}/build/software-aes/libSoftwareAES.a -Wl,-force_load,{tree}/build/qcom-dwc3/libQcomDwc3.a"
+# The fourth archive is Qualcomm WCN6750 Bluetooth (drivers/QcaBluetooth + SM7675 UART10 + WcnPower +
+# BluetoothProbe, built by scripts/build-qca-bluetooth.py). Started from bsd_autoconf() by
+# patches/xnu/zzzzzzzzzzzzzzzzzzzz-uke-bluetooth-start.patch (gated by `bluetooth=1` in kernel_args);
+# BluetoothFirmware.c is already compiled into libShengUfs.a by build-sheng-source-storage.py.
+CONFIG_XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,{tree}/build/uke-ufs-log/libUkeUfsLog.a -Wl,-force_load,{tree}/build/software-aes/libSoftwareAES.a -Wl,-force_load,{tree}/build/qcom-dwc3/libQcomDwc3.a -Wl,-force_load,{tree}/build/qca-bluetooth/libQcaBluetooth.a"
 # The source storage runtime and where its root-policy tables travel. These keys are the official ones —
 # Allenwdk/UniXNU-uke sets exactly this set for this device (configs/uke_ipados27_defconfig:20-23) — and
 # they reach the scripts through xnu_env(), which turns every CONFIG_XNU_* into the XNU_* variable of the

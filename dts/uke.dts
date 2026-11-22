@@ -14,6 +14,17 @@
     #address-cells = <2>;
     #size-cells = <2>;
 
+    // Export the WCN6750 Bluetooth radio before launchd evaluates bluetoothd's
+    // device-tree condition. BluetoothProbe fills local-mac-address at runtime.
+    bluetooth {
+        device_type = "bluetooth";
+        compatible = "qcom,wcn6750-bt";
+        unixnu,adt-name = "bluetooth";
+        transport-encoding = <1>;
+        transport-speed = <3000000>;
+        status = "okay";
+    };
+
     // The high DRAM window the kernel owns: base 0x8C0000000, 5 GiB
     // (0x8C0000000..0xA0000000). One contiguous range: the ADT hand-off requires it,
     // and scripts/unixnu/devicetree.py refuses a payload.dram_size that disagrees.

@@ -1,0 +1,24 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1133,9 +1133,21 @@
+ 	kprintf("UKE usb: no driver archive in this kernel (weak stub)\n");
+ }
+ 
++/*
++ * uke-bluetooth-start: board entry for Qualcomm WCN6750 Bluetooth (drivers/QcaBluetooth,
++ * package/BluetoothProbe.cpp). Called from bsd_autoconf() right after uke_usb_probe(),
++ * matching the same weak-stub pattern so configurations without libQcaBluetooth.a still link.
++ */
++__attribute__((weak)) void
++sheng_bluetooth_probe(void)
++{
++	kprintf("UKE bluetooth: no driver archive in this kernel (weak stub)\n");
++}
++
+ kern_return_t
+ bsd_autoconf(void)
+ {
+ 	uke_usb_probe();
++	sheng_bluetooth_probe();
+ 	kprintf("bsd_autoconf: calling kminit\n");
+ 	kminit();
