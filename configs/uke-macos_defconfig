@@ -134,10 +134,10 @@ CONFIG_XNU_NATIVE_PAN=y
 #       device-qualified.
 #
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
-# CONFIG_XNU_NATIVE_RAM_BLOCK is not set
+CONFIG_XNU_NATIVE_RAM_BLOCK=y
 # CONFIG_XNU_VERIFIED_ROOT_PROBE is not set
-# CONFIG_XNU_OWNER_ROOT_AUDIT is not set
-# CONFIG_XNU_OWNER_ROOT_TRUST is not set
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
 # The SystemOS owner cache and its union mount are ON for the storage round: the mount is what the APFS
 # container failure was blocking on, and the policy directory now exists. The audited trust switches
 # above stay off, which is why CONFIG_XNU_BRINGUP_OWNER_CACHE is on; VERIFIED_ROOT_PROBE additionally
@@ -146,11 +146,10 @@ CONFIG_XNU_NATIVE_PAN=y
 # refuse this board's 40d8282e…/14330ed9… images; that generalisation is the root-trust milestone.
 CONFIG_XNU_OWNER_CACHE_MOUNT=y
 CONFIG_XNU_OWNER_CACHE_STARTUP=y
-# No Data volume this round: the payload still has [payload.runtime] enabled = false, so no seed is
-# installed and OWNER_DATA_MOUNT's build guard (requires OWNER_BOOT_MANIFEST) would demand one that
-# cannot exist yet. The seed identity is recorded below so the next round has one place to read it.
-# CONFIG_XNU_OWNER_BOOT_MANIFEST is not set
-# CONFIG_XNU_OWNER_DATA_MOUNT is not set
+# Owner boot manifest and writable macOS Data volume (matches UniXNU-sheng/configs/sheng_macos_defconfig);
+# data.dbr (BB2462E2-040E-4F82-9C69-CACB7A872551) and owner-trust.bundle are already generated in runtime/.
+CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+CONFIG_XNU_OWNER_DATA_MOUNT=y
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 # CONFIG_XNU_BOOT_PROGRESS is not set
 # CONFIG_XNU_NATIVE_ADRENO is not set

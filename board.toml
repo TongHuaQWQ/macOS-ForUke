@@ -1001,18 +1001,11 @@ kernel_args = [
   # above when driver matching is the question again -- the two are 22 and 8 bytes.
   # "io=0x10",
 ]
-# Fixups of signed text, applied by the kernel after signature validation (patches/xnu/native-text-fixup.patch); they reach it as
-# /chosen/text-fixups, not on the command line. Each is <file name>,<file offset>,<original>,<replacement>, in hex. uke runs the
-# same 21H461 iPadOS build as sheng, so sheng's fixup list applies verbatim.
+# macOS 27.3 (26C5035r) signed-text fixup (from UniXNU-sheng/board.toml): QuartzCore's
+# IOMFBDisplay::framebuffer_pixel_format keeps 8-bit BGRA instead of half-float under vmm-present.
+# Replaces the obsolete iPadOS 17 (21H461) fixups (including the BTAudioHALPlugin disable stub).
 text_fixups = [
-  # +[AWAttentionAwarenessConfiguration initialize] (21H461) only forces +[AWClientPreferences initialize] and deadlocks
-  # SpringBoard startup against it (ABBA between the main thread and Siri's SASMyriadController); it returns at once instead.
-  "dyld_shared_cache_arm64.15,421e8bc,28ad1bb0008544f9,c0035fd6008544f9",
-  "dyld_shared_cache_arm64.13,1b05bec,44008052,24008052",
-  "dyld_shared_cache_arm64.13,1b05b08,44008052,24008052",
-  # BTAudioHALPlugin's factory returns NULL, so audiomxd skips it: with bluetoothd disabled (sheng-lite) the plugin reconnects to the
-  # audio device and hangs audiomxd's startup (int-141), which keeps the speaker from ever being ready.
-  "BTAudioHALPlugin,38bec,ffc300d1f44f01a9,000080d2c0035fd6",
+  "dyld_shared_cache_arm64e.03,5de1134,08060037,1f2003d5",
 ]
 
 [payload.adt]
