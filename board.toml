@@ -638,6 +638,7 @@ kernel_args = [
   # which is why -uketextconsole is restored in this round.
   # "armcpu-skip-gic=1",
   "armcpu-spi-ipi=1",
+  "armcpu-self-ipi=1",
   # armcpu-probe DROPPED 2026-11-15: the 2026-11-15 11:51 photo shows that boot ending in
   #   panic(cpu 0): "ArmCpu: uke interrupt-path diagnostics -- read the lines above"  @ArmCpu.cpp:546
   # which is this switch, i.e. our own diagnostic, not a fault (ArmCpu.cpp:535-546: probe==1 ->
