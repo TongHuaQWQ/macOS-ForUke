@@ -1,0 +1,1096 @@
+diff --git a/bsd/kern/kern_newsysctl.c b/bsd/kern/kern_newsysctl.c
+index 6bdf244..9a6262e 100644
+--- a/bsd/kern/kern_newsysctl.c
++++ b/bsd/kern/kern_newsysctl.c
+@@ -1957,7 +1957,13 @@ found:
+ 	lck_rw_done(&sysctl_geometry_lock);
+ 
+ #if CONFIG_MACF
+-	if (!from_kernel) {
++	/*
++	 * Reading the page size (hw.pagesize, which getpagesize() and sysconf(_SC_PAGESIZE) ask) is left to everyone: the GPU's
++	 * userspace -- the Metal plugin, its Vulkan bridge and driver -- sizes its mappings by it inside WebKit's GPU process, whose
++	 * sandbox refuses the read, and a page size of -1 refused every IOSurface it was to draw into.
++	 */
++	const bool page_size_read = namelen == 2 && name[0] == CTL_HW && name[1] == HW_PAGESIZE && req->newptr == USER_ADDR_NULL;
++	if (!from_kernel && !page_size_read) {
+ 		error = mac_system_check_sysctlbyname(kauth_cred_get(),
+ 		    namestring,
+ 		    name,
+diff --git a/bsd/kern/lockdown_mode.c b/bsd/kern/lockdown_mode.c
+index 1c104b3..324460f 100644
+--- a/bsd/kern/lockdown_mode.c
++++ b/bsd/kern/lockdown_mode.c
+@@ -83,6 +83,22 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, lockdown_mode_init_async);
+ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, lockdown_mode_init);
+ #endif
+ 
++int get_lockdown_mode_state(void);
++
++/*
++ * Darwin 26 libsystem reads Lockdown Mode through this name (os_lockdown_mode_enabled aborts when the
++ * lookup fails). It reports the same state once lockdown_mode_init has run.
++ */
++static int
++sysctl_lockdown_mode_state_public SYSCTL_HANDLER_ARGS
++{
++#pragma unused(oidp, arg1, arg2)
++	int state = get_lockdown_mode_state();
++	return SYSCTL_OUT(req, &state, sizeof(state));
++}
++SYSCTL_PROC(_security_mac, OID_AUTO, lockdown_mode_state_public, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
++    0, 0, sysctl_lockdown_mode_state_public, "I", "Lockdown Mode state");
++
+ int
+ get_lockdown_mode_state(void)
+ {
+diff --git a/bsd/miscfs/bindfs/bind_vfsops.c b/bsd/miscfs/bindfs/bind_vfsops.c
+index 199a91b..7ccec6c 100644
+--- a/bsd/miscfs/bindfs/bind_vfsops.c
++++ b/bsd/miscfs/bindfs/bind_vfsops.c
+@@ -222,6 +222,8 @@ bindfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
+ 	vfs_setfsprivate(mp, xmp);
+ 	vfs_getnewfsid(mp);
+ 	vfs_setlocklocal(mp);
++	/* Paths from file IDs (fsgetpath, volfs): mount_lookupby_volfsid only finds a mount that says it can. See bindfs_vget. */
++	mp->mnt_kern_flag |= MNTK_PATH_FROM_ID;
+ 
+ 	/* fill in the stat block */
+ 	sp = vfs_statfs(mp);
+@@ -413,13 +415,10 @@ bindfs_vfs_getattr(struct mount * mp, struct vfs_attr * vfap, vfs_context_t ctx)
+ 	if (bindfs_vfs_getlowerattr(vnode_mount(bind_mp->bindm_lowerrootvp), &vfa, ctx) == 0) {
+ 		if (VFSATTR_IS_SUPPORTED(&vfa, f_capabilities)) {
+ 			memcpy(&capabilities, &vfa.f_capabilities, sizeof(capabilities));
+-			/* don't support vget */
+-			capabilities.capabilities[VOL_CAPABILITIES_FORMAT] &= ~(VOL_CAP_FMT_PERSISTENTOBJECTIDS | VOL_CAP_FMT_PATH_FROM_ID);
+-
++			/* File IDs are the lower file system's and bindfs_vget resolves them, so its persistent object IDs and paths
++			 * from IDs are kept (CoreFoundation gives no file ID, which LaunchServices records bundles by, without them). */
+ 			capabilities.capabilities[VOL_CAPABILITIES_FORMAT] |= VOL_CAP_FMT_HIDDEN_FILES; /* Always support UF_HIDDEN */
+ 
+-			capabilities.valid[VOL_CAPABILITIES_FORMAT] &= ~(VOL_CAP_FMT_PERSISTENTOBJECTIDS | VOL_CAP_FMT_PATH_FROM_ID);
+-
+ 			capabilities.valid[VOL_CAPABILITIES_FORMAT] |= VOL_CAP_FMT_HIDDEN_FILES; /* Always support UF_HIDDEN */
+ 
+ 			/* dont' support interfaces that only make sense on a writable file system
+@@ -539,6 +538,64 @@ bindfs_vfs_start(__unused struct mount * mp, __unused int flags, __unused vfs_co
+ 	return 0;
+ }
+ 
++/*
++ * Lookup by file ID (fsgetpath, volfs paths). LaunchServices records a bundle's files by volume and file ID and resolves them
++ * back through fsgetpath; without a vfs_vget every bundle seen through a bind mount came back unresolvable, so it was registered
++ * with no platform and its plug-ins with no extension point (a widget extension then looks "restricted" to chronod). bindfs
++ * reports the lower file system's file IDs, so: get the lower vnode, take its path relative to the bound root, and look that
++ * path up from our root -- the vnode returned is ours, named and parented under the mount point, as build_path needs. An ID
++ * outside the bound tree is not found.
++ */
++static int
++bindfs_vget(struct mount * mp, ino64_t ino, struct vnode ** vpp, vfs_context_t ctx)
++{
++	struct bind_mount * bindm = MOUNTTOBINDMOUNT(mp);
++	vnode_t lowervp = NULLVP;
++	char * lowerpath = NULL;
++	char * rootpath = NULL;
++	const char * relative = NULL;
++	size_t rootlen;
++	int len, error;
++
++	*vpp = NULLVP;
++	if (bindm == NULL || bindm->bindm_rootvp == NULLVP || bindm->bindm_lowerrootvp == NULLVP) {
++		return ENOTSUP;
++	}
++	error = VFS_VGET(vnode_mount(bindm->bindm_lowerrootvp), ino, &lowervp, ctx);
++	if (error) {
++		return error;
++	}
++	if (lowervp == bindm->bindm_lowerrootvp) {
++		vnode_put(lowervp);
++		error = vnode_get(bindm->bindm_rootvp);
++		if (error == 0) {
++			*vpp = bindm->bindm_rootvp;
++		}
++		return error;
++	}
++	lowerpath = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_NOFAIL);
++	rootpath = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_NOFAIL);
++	len = MAXPATHLEN;
++	error = vn_getpath(lowervp, lowerpath, &len);
++	vnode_put(lowervp);
++	if (error == 0) {
++		len = MAXPATHLEN;
++		error = vn_getpath(bindm->bindm_lowerrootvp, rootpath, &len);
++	}
++	if (error == 0) {
++		rootlen = strlen(rootpath);
++		if (rootlen == 1 && rootpath[0] == '/') {
++			relative = lowerpath + 1;
++		} else if (strncmp(lowerpath, rootpath, rootlen) == 0 && lowerpath[rootlen] == '/') {
++			relative = lowerpath + rootlen + 1;
++		}
++		error = relative && *relative ? vnode_lookupat(relative, VNODE_LOOKUP_NOFOLLOW, vpp, ctx, bindm->bindm_rootvp) : ENOENT;
++	}
++	kfree_data(lowerpath, MAXPATHLEN);
++	kfree_data(rootpath, MAXPATHLEN);
++	return error;
++}
++
+ extern const struct vnodeopv_desc bindfs_vnodeop_opv_desc;
+ 
+ const struct vnodeopv_desc * bindfs_vnodeopv_descs[] = {
+@@ -552,6 +609,7 @@ struct vfsops bindfs_vfsops = {
+ 	.vfs_root               = bindfs_root,
+ 	.vfs_getattr            = bindfs_vfs_getattr,
+ 	.vfs_sync               = bindfs_sync,
++	.vfs_vget               = bindfs_vget,
+ 	.vfs_init               = bindfs_init,
+ 	.vfs_sysctl             = NULL,
+ 	.vfs_setattr            = NULL,
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index d5cf2b7..c9bcaf3 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2575,8 +2575,9 @@ map_with_linking_np(
+ 	}
+ 
+ 	/* some older devs have s/w page size > h/w page size, no need to support them */
+-	if (info_hdr->mwli_page_size != PAGE_SIZE) {
+-		/* no printf, since this is expected on some devices */
++	if (info_hdr->mwli_page_size != PAGE_SIZE && info_hdr->mwli_page_size != (4 * PAGE_SIZE)) {
++		printf("%s: [%d(%s)]: mwli_page_size(0x%x) != PAGE_SIZE(0x%lx) -- MWL rejected\n",
++		    __func__, proc_getpid(p), p->p_comm, info_hdr->mwli_page_size, (unsigned long)PAGE_SIZE);
+ 		kr = KERN_INVALID_ARGUMENT;
+ 		goto done;
+ 	}
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 6f446e2..770db11 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -356,6 +356,12 @@ arm_init(
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++#if T0SZ_USER != T0SZ_BOOT
++	/* Final TTBR0 size before the first pointer is signed (see TCR_EL1_KVA_ENTRY). */
++	set_tcr(TCR_EL1_KVA_ENTRY);
++	flush_core_tlb();
++#endif /* T0SZ_USER != T0SZ_BOOT */
++
+ 	arm_slide_rebase_and_sign_image();
+ 
+ 	arm_static_if_init(args);
+diff --git a/osfmk/arm/cpu_common.c b/osfmk/arm/cpu_common.c
+index eadffaf..8776f16 100644
+--- a/osfmk/arm/cpu_common.c
++++ b/osfmk/arm/cpu_common.c
+@@ -409,6 +409,21 @@ cpu_immediate_xcall(int cpu_number, broadcastFunc func, void *param)
+ 	return cpu_xcall_internal(SIGPxcallImm, cpu_number, func, param);
+ }
+ 
++/* sheng (UniXNU): a started core whose SIGPdisabled is still set lost the self-IPI that should have cleared it (seen as random early hangs
++ * and UFS root failures under SMP: the I/O thread's wakeup IPI to that core was silently dropped). A core in InitState|StartedState runs and
++ * takes interrupts, so the flag is cleared here and the signal sent. Counted in sheng_sigp_recovered. */
++volatile uint32_t sheng_sigp_recovered;
++bool
++sheng_sigp_recover(cpu_data_t *target_proc)
++{
++	if ((os_atomic_load(&target_proc->cpu_flags, relaxed) & (InitState | StartedState)) != (InitState | StartedState)) {
++		return false;
++	}
++	os_atomic_andnot(&target_proc->cpu_signal, SIGPdisabled, acq_rel);
++	os_atomic_inc(&sheng_sigp_recovered, relaxed);
++	return true;
++}
++
+ static kern_return_t
+ cpu_signal_internal(cpu_data_t *target_proc,
+     cpu_signal_t signal,
+@@ -438,6 +453,9 @@ cpu_signal_internal(cpu_data_t *target_proc,
+ 
+ 		do {
+ 			current_signals = target_proc->cpu_signal;
++			if ((current_signals & SIGPdisabled) == SIGPdisabled && sheng_sigp_recover(target_proc)) {
++				current_signals = target_proc->cpu_signal;
++			}
+ 			if ((current_signals & SIGPdisabled) == SIGPdisabled) {
+ 				ml_set_interrupts_enabled(interruptible);
+ 				return KERN_FAILURE;
+@@ -481,6 +499,9 @@ cpu_signal_internal(cpu_data_t *target_proc,
+ 	} else {
+ 		do {
+ 			current_signals = target_proc->cpu_signal;
++			if ((current_signals & SIGPdisabled) == SIGPdisabled && current_proc != target_proc && sheng_sigp_recover(target_proc)) {
++				current_signals = target_proc->cpu_signal;
++			}
+ 			if ((current_signals & SIGPdisabled) == SIGPdisabled) {
+ 				if (current_proc == target_proc) {
+ 					panic("cpu_signal of self while signals are disabled");
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 944407c..a5e501d 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -335,6 +335,50 @@ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_16k;
+ const struct page_table_attr * const native_pt_attr = &pmap_pt_attr_4k;
+ #endif /* !__ARM_16K_PG__ */
+ 
++#if T0SZ_USER != T0SZ_BOOT
++/* User pmaps: the 4K layout with a TTBR0 root at T0SZ_USER (L0 for a 47-bit range). */
++const struct page_table_attr pmap_pt_attr_4k_user = {
++	.pta_level_info = pmap_table_level_info_4k,
++	.pta_root_level = (T0SZ_USER - 16) / 9,
++	.pta_commpage_level = PMAP_TT_L1_LEVEL,
++	.pta_max_level  = PMAP_TT_L3_LEVEL,
++	.pta_ops = &native_pt_ops,
++	.ap_ro = ARM_PTE_AP(AP_RORO),
++	.ap_rw = ARM_PTE_AP(AP_RWRW),
++	.ap_rona = ARM_PTE_AP(AP_RONA),
++	.ap_rwna = ARM_PTE_AP(AP_RWNA),
++	.ap_xn = ARM_PTE_PNX | ARM_PTE_NX,
++	.ap_x = ARM_PTE_PNX,
++	.pta_page_size  = 4096,
++	.pta_pagezero_size = 4096,
++	.pta_page_shift = 12,
++	.pta_va_valid_mask = ARM_PTE_REGION_MASK(T0SZ_USER),
++};
++const struct page_table_attr * const native_user_pt_attr = &pmap_pt_attr_4k_user;
++_Static_assert((ARM_PTE_REGION_MASK(T0SZ_USER) >> ARM_4K_TT_L0_SHIFT) + 1 == PMAP_ROOT_ALLOC_SIZE / sizeof(tt_entry_t),
++    "the user L0 root must fit the root allocation size");
++
++static inline uint64_t
++pmap_user_tcr(uint64_t tcr)
++{
++	return (tcr & ~((TCR_TSZ_MASK << TCR_T0SZ_SHIFT) | TCR_EPD0_DISABLE)) | (T0SZ_USER << TCR_T0SZ_SHIFT);
++}
++
++/*
++ * Turn TTBR0 walks on at the user range. The caller has pointed TTBR0 at the empty table
++ * (or a user root), so no walk sees a table of the boot format.
++ */
++MARK_AS_PMAP_TEXT void
++pmap_apply_user_tcr(void)
++{
++	const uint64_t tcr = get_tcr();
++	if (tcr != pmap_user_tcr(tcr)) {
++		set_tcr(pmap_user_tcr(tcr));
++		flush_core_tlb();
++	}
++}
++#endif /* T0SZ_USER != T0SZ_BOOT */
++
+ 
+ #if DEVELOPMENT || DEBUG
+ int vm_footprint_suspend_allowed = 1;
+@@ -2282,6 +2326,8 @@ pmap_bootstrap(
+ 	/*
+ 	 *	Initialize the kernel pmap.
+ 	 */
++	/* First: the pmap's type selects its page table attributes (see T0SZ_USER). */
++	kernel_pmap->type = PMAP_TYPE_KERNEL;
+ #if ARM_PARAMETERIZED_PMAP
+ 	kernel_pmap->pmap_pt_attr = native_pt_attr;
+ #endif /* ARM_PARAMETERIZED_PMAP */
+@@ -2319,6 +2365,10 @@ pmap_bootstrap(
+ 
+ 	pmap_max_asids = pmap_compute_max_asids();
+ #if HAS_16BIT_ASID
++	/* UniXNU: TCR_EL1.AS is set (TCR_EL1_ASID); on a core with 8-bit ASIDs it is RES0 and the ASIDs above 255 would alias. */
++	if (((__builtin_arm_rsr64("ID_AA64MMFR0_EL1") >> 4) & 0xf) != 2) {
++		panic("pmap: HAS_16BIT_ASID, but ID_AA64MMFR0_EL1 0x%llx has no 16-bit ASIDs", __builtin_arm_rsr64("ID_AA64MMFR0_EL1"));
++	}
+ 	asid_chunk_size = MAX_HW_ASIDS;
+ #else
+ 	pmap_asid_plru = (pmap_max_asids > MAX_HW_ASIDS);
+@@ -6050,7 +6100,8 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
+ 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
+ 		break;
+ 	case VM_WIMG_RT:
+-		if (is_dram_addr(pa)) {
++		/* DRAM outside the gDramBase window (more than one physical range) is still managed memory: Normal, not Device. */
++		if (is_dram_addr(pa) || pa_valid(pa)) {
+ 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_RT);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -6090,7 +6141,8 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
+ 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
+ 		break;
+ 	case VM_WIMG_WCOMB:
+-		if (is_dram_addr(pa)) {
++		/* DRAM outside the gDramBase window (more than one physical range) is still managed memory: Normal, not Device. */
++		if (is_dram_addr(pa) || pa_valid(pa)) {
+ 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -8070,6 +8122,12 @@ pmap_switch_user_ttb(pmap_t pmap, pmap_cpu_data_t *cpu_data_ptr)
+ 
+ 
+ 	if (pmap != kernel_pmap) {
++#if T0SZ_USER != T0SZ_BOOT
++		if (__improbable(get_tcr() != pmap_user_tcr(get_tcr()))) {
++			set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
++			pmap_apply_user_tcr();
++		}
++#endif /* T0SZ_USER != T0SZ_BOOT */
+ 		set_mmu_ttb((pmap->ttep & TTBR_BADDR_MASK) | (((uint64_t)pmap->hw_asid) << TTBR_ASID_SHIFT));
+ 	} else if (!pmap_user_ttb_is_clear()) {
+ 		pmap_clear_user_ttb_internal();
+@@ -8080,6 +8138,9 @@ MARK_AS_PMAP_TEXT void
+ pmap_clear_user_ttb_internal(void)
+ {
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
++#if T0SZ_USER != T0SZ_BOOT
++	pmap_apply_user_tcr();
++#endif /* T0SZ_USER != T0SZ_BOOT */
+ }
+ 
+ void
+@@ -11057,6 +11118,14 @@ pmap_batch_set_cache_attributes_internal(
+ 
+ 			pvh_unlock(pai);
+ 
++			/* UniXNU: as pmap_set_cache_attributes() does, a page leaving write-back loses its lines (pmap_sync_page_attributes_phys).
++			 * This SoC does not keep a page's lines coherent across a change of its attributes: a page made write-combined
++			 * would keep the dirty lines of its cacheable zero-fill, and a later device read through a coherent path could see
++			 * them over data written past the cache. */
++			if (wimg_bits_new != wimg_bits_prev && wimg_bits_new != VM_WIMG_RT) {
++				pmap_sync_wimg(pn, wimg_bits_prev, wimg_bits_new);
++			}
++
+ 			page_index++;
+ 
+ #if XNU_MONITOR
+@@ -13081,7 +13150,7 @@ pmap_user_va_bits(pmap_t pmap __unused)
+ 	uint64_t tcr_value = pmap_get_pt_attr(pmap)->pta_tcr_value;
+ 	return 64 - ((tcr_value >> TCR_T0SZ_SHIFT) & TCR_TSZ_MASK);
+ #else
+-	return 64 - T0SZ_BOOT;
++	return 64 - T0SZ_USER;
+ #endif
+ }
+ 
+@@ -15417,3 +15486,76 @@ pmap_pending_preemption(void)
+ 	return _pmap_pending_preemption_real();
+ }
+ #endif /* SCHED_HYGIENE_DEBUG && (DEBUG || DEVELOPMENT) */
++
++
++/*
++ * UniXNU: the mappings of a managed page in CPU pmaps other than the kernel's, and the first one's pmap and address. A driver that
++ * frees pages it handed out through physical-range mappings (NativeAdreno's BO views, which hold no reference to the pages) asks
++ * first: a page a user task still maps is kept rather than freed under the mapping (pmap_assert_free), and not disconnected either,
++ * since the mapping would fault the page in again from its next owner.
++ */
++unsigned int native_pmap_user_mappings(ppnum_t ppnum, void **first_pmap, uint64_t *first_va, char *first_name);
++unsigned int
++native_pmap_user_mappings(ppnum_t ppnum, void **first_pmap, uint64_t *first_va, char *first_name /* 17 bytes, the process's */)
++{
++	const pmap_paddr_t pa = ptoa(ppnum);
++	unsigned int count = 0;
++
++	if (first_pmap) {
++		*first_pmap = NULL;
++	}
++	if (first_va) {
++		*first_va = 0;
++	}
++	if (first_name) {
++		first_name[0] = 0;
++	}
++	if (!pa_valid(pa)) {
++		return 0;
++	}
++	const unsigned int pai = pa_index(pa);
++	pvh_lock(pai);
++	pv_entry_t **pvh = pai_to_pvh(pai);
++	pt_entry_t *ptep = PT_ENTRY_NULL;
++	pv_entry_t *pvep = PV_ENTRY_NULL;
++	int index = 0;
++	if (pvh_test_type(pvh, PVH_TYPE_PTEP)) {
++		ptep = pvh_ptep(pvh);
++	} else if (pvh_test_type(pvh, PVH_TYPE_PVEP)) {
++		pvep = pvh_pve_list(pvh);
++	}
++	while (ptep != PT_ENTRY_NULL || pvep != PV_ENTRY_NULL) {
++		if (pvep != PV_ENTRY_NULL) {
++			ptep = pve_get_ptep(pvep, index);
++		}
++		if (ptep != PT_ENTRY_NULL && !pvh_ptep_is_iommu(ptep)) {
++			pmap_t pmap = ptep_get_pmap(ptep);
++			if (pmap != kernel_pmap) {
++				if (count == 0) {
++					if (first_pmap) {
++						*first_pmap = pmap;
++					}
++					if (first_va) {
++						*first_va = (uint64_t)ptep_get_va(ptep);
++					}
++#if MACH_ASSERT
++					if (first_name) {
++						strlcpy(first_name, pmap->pmap_procname, 17);
++					}
++#endif /* MACH_ASSERT */
++				}
++				count++;
++			}
++		}
++		if (pvep == PV_ENTRY_NULL) {
++			break;
++		}
++		ptep = PT_ENTRY_NULL;
++		if (++index == PTE_PER_PVE) {
++			index = 0;
++			pvep = pve_next(pvep);
++		}
++	}
++	pvh_unlock(pai);
++	return count;
++}
+diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
+index 4d83b05..57d05d5 100644
+--- a/osfmk/arm/pmap/pmap.h
++++ b/osfmk/arm/pmap/pmap.h
+@@ -295,6 +295,9 @@ extern void set_mmu_ttb(uint64_t);
+ extern void set_mmu_ttb_alternate(uint64_t);
+ extern uint64_t get_tcr(void);
+ extern void set_tcr(uint64_t);
++#if T0SZ_USER != T0SZ_BOOT
++extern void pmap_apply_user_tcr(void);
++#endif
+ extern uint64_t pmap_get_arm64_prot(pmap_t, vm_offset_t);
+ #else /* defined(__arm64__) */
+ #error Unsupported architecture
+diff --git a/osfmk/arm/pmap/pmap_pt_geometry.h b/osfmk/arm/pmap/pmap_pt_geometry.h
+index fc64830..dd93d91 100644
+--- a/osfmk/arm/pmap/pmap_pt_geometry.h
++++ b/osfmk/arm/pmap/pmap_pt_geometry.h
+@@ -168,8 +168,14 @@ extern const struct page_table_ops native_pt_ops;
+ 
+ #else /* ARM_PARAMETERIZED_PMAP */
+ 
++#if T0SZ_USER != T0SZ_BOOT
++/* User pmaps use a wider TTBR0 range than the kernel's TTBR1 (see T0SZ_USER). */
++extern const struct page_table_attr * const native_user_pt_attr;
++#define pmap_get_pt_attr(pmap) ((pmap)->type == PMAP_TYPE_KERNEL ? native_pt_attr : native_user_pt_attr)
++#else
+ /* The page table attributes are fixed (to allow for const propagation) */
+ #define pmap_get_pt_attr(pmap) (native_pt_attr)
++#endif
+ #define pmap_get_pt_ops(pmap) (&native_pt_ops)
+ 
+ #endif /* ARM_PARAMETERIZED_PMAP */
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index c0f7f28..6f6c66f 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2550,6 +2550,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ #endif
+ 
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
++#if T0SZ_USER != T0SZ_BOOT
++	pmap_apply_user_tcr();
++#endif
+ 
+ 	flush_mmu_tlb();
+ 	kva_active = TRUE;
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index 53f9ce5..8312c43 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -139,12 +139,17 @@ uint64_t expecting_ipi_wfe_timeout_mt = 0x0ULL; /* initialized to a non-zero val
+  * loop. The default.
+  */
+ uint32_t idle_proximate_io_wfe_unmasked = 1;
++/* sheng (UniXNU): off Apple silicon the cores belong to a hypervisor that traps WFI and blocks the vCPU but may run WFE in the guest,
++ * so a core awaiting a proximate timer in WFE keeps its physical core awake. Await it in WFI there. */
++/* Measured on the board (2026-10-28): with WFI in the idle path every core went to sleep and nothing woke the system again (boot stalled
++ * 30 s after the data disk started), so the stock WFE polling stays. */
++#define IDLE_PROXIMATE_TIMER_WFE 1
+ #if DEVELOPMENT || DEBUG
+-uint32_t idle_proximate_timer_wfe = 1;
++uint32_t idle_proximate_timer_wfe = IDLE_PROXIMATE_TIMER_WFE;
+ uint32_t idle_proximate_io_wfe_masked = 0;
+ #else
+ /* Issue WFE in lieu of WFI when awaiting a proximate timer. */
+-static uint32_t idle_proximate_timer_wfe = 1;
++static uint32_t idle_proximate_timer_wfe = IDLE_PROXIMATE_TIMER_WFE;
+ /* When recommended, issue WFE with [FI]IRQ masked in the idle loop.
+  * Non-default, retained for experimentation.
+  */
+@@ -379,7 +384,7 @@ cpu_proximate_timer(void)
+ 	return !SetIdlePop();
+ }
+ 
+-#ifdef ARM64_BOARD_CONFIG_T6000
++#if defined(ARM64_BOARD_CONFIG_T6000)
+ int wfe_allowed = 0;
+ #else
+ int wfe_allowed = 1;
+@@ -477,6 +482,9 @@ wfe_to_deadline_or_interrupt(uint32_t cid, uint64_t wfe_deadline, cpu_data_t *cd
+  *	Routine:	cpu_idle
+  *	Function:
+  */
++extern bool sheng_sigp_recover(cpu_data_t *target_proc);
++volatile uint32_t sheng_idle_sigp_cleared, sheng_idle_sigp_refused, sheng_idle_enter[8], sheng_idle_disallowed[8];
++
+ void __attribute__((noreturn))
+ cpu_idle(void)
+ {
+@@ -488,10 +496,20 @@ cpu_idle(void)
+ 	if (__improbable((!idle_enable))) {
+ 		idle_disallowed = true;
+ 	} else if (__improbable(cpu_data_ptr->cpu_signal & SIGPdisabled)) {
+-		idle_disallowed = true;
++		/* sheng (UniXNU): SIGPdisabled leaves a core only when it takes an IPI, and an idle core is never signalled, so a core that
++		 * missed its start-up self-IPI kept this flag and spun in the idle thread at full speed (every cluster read busy=100% on the
++		 * idle desktop). A started core takes interrupts: clear the flag here instead of refusing to idle. */
++		if (sheng_sigp_recover(cpu_data_ptr)) {
++			sheng_idle_sigp_cleared++;
++		} else {
++			sheng_idle_sigp_refused++;
++			idle_disallowed = true;
++		}
+ 	}
+ 
++	sheng_idle_enter[cpu_data_ptr->cpu_number & 7]++;
+ 	if (__improbable(idle_disallowed)) {
++		sheng_idle_disallowed[cpu_data_ptr->cpu_number & 7]++;
+ 		Idle_load_context();
+ 	}
+ 
+@@ -843,8 +861,10 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
+ 	pmap_cpu_data_ptr->pv_free_spill_marker = NULL;
+ #if !CONFIG_SPTM
+ 	pmap_cpu_data_ptr->cpu_nested_pmap = (struct pmap *) NULL;
++#if !HAS_16BIT_ASID
+ 	bzero(&(pmap_cpu_data_ptr->cpu_sw_asids[0]), sizeof(pmap_cpu_data_ptr->cpu_sw_asids));
+ #endif
++#endif
+ #endif /* !XNU_MONITOR */
+ 	cpu_data_ptr->halt_status = CPU_NOT_HALTED;
+ #if __ARM_KERNEL_PROTECT__
+@@ -934,6 +954,18 @@ cpu_start(int cpu)
+ 
+ 		flush_dcache((vm_offset_t)&CpuDataEntries[cpu], sizeof(cpu_data_entry_t), FALSE);
+ 		flush_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
++#if !defined(APPLE_ARM64_ARCH_FAMILY)
++		{
++			/* UniXNU: the new core reads these with its MMU off, uncached, from DRAM (reset_vector, start_cpu, common_start):
++			 * written once at boot, they can still be dirty in this core's caches, and a core that reads a stale
++			 * ResetHandlerData, const_boot_args or cpu_ttep finds no cpu data or builds a wrong address space and spins in the
++			 * early vectors. Write them back to the point of coherency, as the cpu data above. */
++			extern boot_args const_boot_args;
++			flush_dcache((vm_offset_t)&ResetHandlerData, sizeof(ResetHandlerData), FALSE);
++			flush_dcache((vm_offset_t)&const_boot_args, sizeof(const_boot_args), FALSE);
++			flush_dcache((vm_offset_t)&cpu_ttep, sizeof(cpu_ttep), FALSE);
++		}
++#endif
+ #if CONFIG_SPTM
+ 		/**
+ 		 * On SPTM devices, CTRR is configured entirely by the SPTM. Due to this, this logic
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index 51fdc9d..8f83d0a 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -1103,6 +1103,17 @@
+ #endif /* __ARM64_PMAP_SUBPAGE_L1__ */
+ #endif /* __ARM_16K_PG__ */
+ 
++/*
++ * TTBR0 size once a CPU is past its V=P bootstrap. arm64e user code expects pointer
++ * authentication codes above bit 46 (libobjc strips isa with a 43-bit mask), so a native
++ * 4K kernel gives user pmaps four-level tables with a 47-bit range; TTBR1 keeps T1SZ_BOOT.
++ */
++#if defined(BCM2837) && !defined(__ARM_16K_PG__) && defined(__arm64e__)
++#define T0SZ_USER 17ULL
++#else
++#define T0SZ_USER T0SZ_BOOT
++#endif
++
+ #if __ARM64_PMAP_SUBPAGE_L1__ && CONFIG_SPTM
+ #define T0SZ_EARLY_BOOT 17ULL
+ #endif /*__ARM64_PMAP_SUBPAGE_L1__ && CONFIG_SPTM */
+@@ -1182,6 +1193,17 @@
+ #define TCR_EL1_4KB  (TCR_EL1_BASE | (T1SZ_BOOT << TCR_T1SZ_SHIFT) | (TCR_TG0_GRANULE_4KB))
+ #define TCR_EL1_16KB (TCR_EL1_BASE | (T1SZ_BOOT << TCR_T1SZ_SHIFT) | (TCR_TG0_GRANULE_16KB))
+ 
++#define TCR_EPD0_DISABLE        (1ULL << 7)
++
++#if T0SZ_USER != T0SZ_BOOT
++/*
++ * TCR once a CPU runs at kernel addresses: TTBR0 already has its final size, so every pointer
++ * signed from then on (NULL included, it is a TTBR0-range value) carries its PAC at the final
++ * position. TTBR0 walks stay off until it holds a T0SZ_USER-format table.
++ */
++#define TCR_EL1_KVA_ENTRY ((TCR_EL1_BOOT & ~(TCR_TSZ_MASK << TCR_T0SZ_SHIFT)) | (T0SZ_USER << TCR_T0SZ_SHIFT) | TCR_EPD0_DISABLE)
++#endif /* T0SZ_USER != T0SZ_BOOT */
++
+ /*
+  * Bit 55 of the VA is used to select which TTBR to use during a translation table walk.
+  */
+@@ -1807,7 +1829,11 @@
+ 
+ #endif /* HAS_FEAT_XS */
+ 
+-#if HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM
++/*
++ * BCM2837 (the sheng native kernel): real-time memory is Normal non-cacheable, as with HAS_UCNORMAL_MEM, so user code may
++ * use unaligned and vector accesses on real-time-mapped surfaces (Device memory would raise alignment faults).
++ */
++#if HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM || defined(BCM2837)
+ #define CACHE_ATTRINDX_RT CACHE_ATTRINDX_WRITECOMB
+ #else
+ #define CACHE_ATTRINDX_RT CACHE_ATTRINDX_POSTED_COMBINED_REORDERED
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 59993d3..361aabb 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1752,7 +1752,7 @@ user_fault_matches_pac_error_code(vm_offset_t fault_addr, uint64_t pc, bool data
+ 		 * EnhancedPAC2 CPUs don't encode error codes at fixed positions, so
+ 		 * treat all non-canonical address bits like potential poison bits.
+ 		 */
+-		uint64_t mask = fault_addr_bitmask(64 - T0SZ_BOOT, 54);
++		uint64_t mask = fault_addr_bitmask(64 - T0SZ_USER, 54);
+ 		if (!tbi) {
+ 			mask |= fault_addr_bitmask(56, 63);
+ 		}
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 46ba737..eb345e3 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -880,6 +880,15 @@ arm_init_tramp:
+ 	 */
+ 
+ 
++#if T0SZ_USER != T0SZ_BOOT
++	MOV64	x1, TCR_EL1_KVA_ENTRY
++	MSR_TCR_EL1_X1
++	isb		sy
++	tlbi	vmalle1
++	dsb		ish
++	isb		sy
++#endif /* T0SZ_USER != T0SZ_BOOT */
++
+ 	mov		x19, lr
+ 	// Convert CPU data PA to VA and set as first argument
+ 	mov		x0, x21
+diff --git a/osfmk/kern/stack.c b/osfmk/kern/stack.c
+index 1111ccf..069db94 100644
+--- a/osfmk/kern/stack.c
++++ b/osfmk/kern/stack.c
+@@ -154,6 +154,13 @@ roundup_pow2(vm_offset_t size)
+ static vm_offset_t stack_alloc_internal(void);
+ static void stack_free_stack(vm_offset_t);
+ 
++/*
++ * log2 of the stack allocation alignment (stack_addr_mask + 1). Original components measure the stack room left as
++ * sp & ((1 << shift) - 1) and read PAGE_SHIFT_CONST for the shift, which is right only where the lower guard pages
++ * keep the stack base aligned (16 KiB pages). XnuPrelink binds those reads here (reviewed sites in its fixtures).
++ */
++__attribute__((used)) SECURITY_READ_ONLY_LATE(uint32_t) unixnu_kernel_stack_shift;
++
+ static void
+ stack_init(void)
+ {
+@@ -173,8 +180,14 @@ stack_init(void)
+ 		    (void *) kernel_stack_size, PAGE_SIZE);
+ 	}
+ 
+-	stack_addr_mask = roundup_pow2(kernel_stack_size) - 1;
++	/*
++	 * Align the whole allocation (two guard pages below the stack, one above) rather than the stack size alone:
++	 * with 4 KiB pages the stack then starts at least 8 KiB above an aligned address, so sp & stack_addr_mask
++	 * never comes near zero inside a stack (see unixnu_kernel_stack_shift).
++	 */
++	stack_addr_mask = roundup_pow2(kernel_stack_size + ptoa(3)) - 1;
+ 	kernel_stack_mask = ~stack_addr_mask;
++	unixnu_kernel_stack_shift = (uint32_t)__builtin_ctzl(stack_addr_mask + 1);
+ }
+ STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, stack_init);
+ 
+diff --git a/osfmk/mach/arm/vm_param.h b/osfmk/mach/arm/vm_param.h
+index 2adbe8b..dc775f8 100644
+--- a/osfmk/mach/arm/vm_param.h
++++ b/osfmk/mach/arm/vm_param.h
+@@ -302,7 +302,7 @@ extern int PAGE_SHIFT_CONST;
+ 
+ #if XNU_KERNEL_PRIVATE
+ #define VM_KERNEL_STRIP_MASK            (-1ULL << (64 - T1SZ_BOOT))
+-#define VM_USER_STRIP_MASK              (-1ULL >> (T0SZ_BOOT))
++#define VM_USER_STRIP_MASK              (-1ULL >> (T0SZ_USER))
+ #define _VM_KERNEL_STRIP_PTR(_va)       ({((_va) & 1ULL << 55) ? ((_va) | VM_KERNEL_STRIP_MASK) : ((_va) & VM_USER_STRIP_MASK);})
+ #else /* XNU_KERNEL_PRIVATE */
+ 
+diff --git a/osfmk/vm/vm_dyld_pager.c b/osfmk/vm/vm_dyld_pager.c
+index d3cd6e8..caa7f75 100644
+--- a/osfmk/vm/vm_dyld_pager.c
++++ b/osfmk/vm/vm_dyld_pager.c
+@@ -145,12 +145,12 @@ const struct memory_object_pager_ops dyld_pager_ops = {
+ 
+ /* funciton that calculates delta pointer that remains within the same page by using nospec ISA */
+ static inline bool
+-_delta_ptr_within_page_nospec(uint64_t ** __nonnull ptr, uint64_t deltaByteCount, bool *crossing_page, uintptr_t userVA)
++_delta_ptr_within_page_nospec(uint64_t ** __nonnull ptr, uint64_t deltaByteCount, bool *crossing_page, uintptr_t userVA, unsigned int page_shift)
+ {
+-	uintptr_t old_page = (uintptr_t)*ptr >> PAGE_SHIFT;
+-	uintptr_t new_page = ((uintptr_t)*ptr + deltaByteCount) >> PAGE_SHIFT;
++	uintptr_t old_page = (uintptr_t)*ptr >> page_shift;
++	uintptr_t new_page = ((uintptr_t)*ptr + deltaByteCount) >> page_shift;
+ 	uint64_t  nospec_delta = deltaByteCount;
+-	uintptr_t page_offset = (uintptr_t)*ptr & PAGE_MASK;
++	uintptr_t page_offset = (uintptr_t)*ptr & ((1UL << page_shift) - 1);
+ #if __arm64__
+ 	bool      nospec_delta_valid = false;
+ 	SPECULATION_GUARD_ZEROING_XXX(
+@@ -372,7 +372,8 @@ fixupPage64(
+ 	struct mwl_info_hdr                   *hdr = (struct mwl_info_hdr *)link_info;
+ 	uint64_t                              *bindsArray  = (uint64_t *)((uintptr_t)hdr + hdr->mwli_binds_offset);
+ 	uint16_t                              firstStartOffset = segInfo->page_start[pageIndex];
+-	vm_offset_t                           end_contents = contents + PAGE_SIZE;
++	vm_offset_t                           end_contents = contents + segInfo->page_size;
++	unsigned int                          page_shift = __builtin_ctz((uint32_t)segInfo->page_size);
+ 	//  For DYLD_CHAINED_PTR_64 (arm64 and x86_64) and DYLD_CHAINED_PTR_32 (arm64_32) the stride is always 4
+ 	uint64_t                              step_multiplier = 4; // 4-byte stride
+ 	/*
+@@ -428,7 +429,7 @@ fixupPage64(
+ 		}
+ 		/* shifts chain to a delta, chain cannot be used to access outside of page speculatively after this point */
+ 		bool crossing_page = false;
+-		valid_chain = _delta_ptr_within_page_nospec(&chain, delta, &crossing_page, (uintptr_t)userVA);
++		valid_chain = _delta_ptr_within_page_nospec(&chain, delta, &crossing_page, (uintptr_t)userVA, page_shift);
+ 		if (crossing_page) {
+ 			return KERN_FAILURE;
+ 		}
+@@ -590,6 +591,14 @@ signPointer(
+ 		} else {
+ 			*signedAddr = (uintptr_t)pmap_sign_user_ptr((void *)unsignedAddr, key, extendedDiscriminator, pager->dyld_a_key);
+ 		}
++		static int sheng_sign_logged = 0;
++		if (!sheng_sign_logged) {
++			sheng_sign_logged = 1;
++			printf("sheng-sign: unsignedAddr=0x%llx key=%d addrDiv=%d diversity=0x%x disc=0x%llx a_key=0x%llx result=0x%llx\n",
++			    (unsigned long long)unsignedAddr, key, addrDiv, diversity,
++			    (unsigned long long)extendedDiscriminator, (unsigned long long)pager->dyld_a_key,
++			    (unsigned long long)*signedAddr);
++		}
+ 		break;
+ 
+ 	default:
+@@ -619,7 +628,8 @@ fixupPageAuth64(
+ 	uint32_t             link_info_size = pager->dyld_link_info_size;
+ 	struct mwl_info_hdr  *hdr = (struct mwl_info_hdr *)link_info;
+ 	uint64_t             *bindsArray = (uint64_t*)((uintptr_t)link_info + hdr->mwli_binds_offset);
+-	vm_offset_t          end_contents = contents + PAGE_SIZE;
++	vm_offset_t          end_contents = contents + segInfo->page_size;
++	unsigned int         page_shift = __builtin_ctz((uint32_t)segInfo->page_size);
+ 	bool                 valid_chain = false;
+ 	uint64_t             step_multiplier = 8; // always 8-bytes stride for arm64e pages
+ 
+@@ -664,6 +674,12 @@ fixupPageAuth64(
+ 		/* delta that can be used speculatively */
+ 		delta = (value >> 51) & 0x7FF;
+ 		delta *= step_multiplier;
++		static int sheng_fixup64_logged = 0;
++		if (sheng_fixup64_logged < 12) {
++			printf("sheng-chain[%d]: off=0x%llx value=0x%llx\n",
++			    sheng_fixup64_logged, (unsigned long long)((uintptr_t)chain - contents), (unsigned long long)value);
++			sheng_fixup64_logged++;
++		}
+ 		bool isAuth = (value & 0x8000000000000000ULL);
+ 		bool isBind = (value & 0x4000000000000000ULL);
+ 		if (isAuth) {
+@@ -719,7 +735,7 @@ fixupPageAuth64(
+ 			}
+ 		}
+ 		bool crossing_page = false;;
+-		valid_chain = _delta_ptr_within_page_nospec(&chain, delta, &crossing_page, (uintptr_t)userVA);
++		valid_chain = _delta_ptr_within_page_nospec(&chain, delta, &crossing_page, (uintptr_t)userVA, page_shift);
+ 
+ 		if (crossing_page) {
+ 			return KERN_FAILURE;
+@@ -742,7 +758,8 @@ fixupCachePageAuth64(
+ 	void                 *link_info = pager->dyld_link_info;
+ 	uint32_t             link_info_size = pager->dyld_link_info_size;
+ 	struct mwl_info_hdr  *hdr = (struct mwl_info_hdr *)link_info;
+-	vm_offset_t          end_contents = contents + PAGE_SIZE;
++	vm_offset_t          end_contents = contents + segInfo->page_size;
++	unsigned int         page_shift = __builtin_ctz((uint32_t)segInfo->page_size);
+ 	bool                 valid_chain = false;
+ 	uint64_t             step_multiplier = 8; // always 8-bytes stride for arm64e
+ 
+@@ -786,6 +803,13 @@ fixupCachePageAuth64(
+ 		/* delta that can be used speculatively */
+ 		delta = (value >> 52) & 0x7FF;
+ 		delta *= step_multiplier;
++		static int sheng_fixup_logged = 0;
++		if (!sheng_fixup_logged) {
++			sheng_fixup_logged = 1;
++			printf("sheng-fixup: value=0x%llx image_address=0x%llx slide=0x%llx startOff=0x%x pageIndex=%u userVA=0x%llx\n",
++			    (unsigned long long)value, (unsigned long long)hdr->mwli_image_address,
++			    (unsigned long long)hdr->mwli_slide, firstStartOffset, pageIndex, (unsigned long long)userVA);
++		}
+ 		bool isAuth = (value & 0x8000000000000000ULL);
+ 		if (isAuth) {
+ 			bool        addrDiv = ((value & (1ULL << 50)) != 0);
+@@ -806,7 +830,7 @@ fixupCachePageAuth64(
+ 			*chain = target + high8;
+ 		}
+ 		bool crossing_page = false;
+-		valid_chain = _delta_ptr_within_page_nospec(&chain, delta, &crossing_page, (uintptr_t)userVA);
++		valid_chain = _delta_ptr_within_page_nospec(&chain, delta, &crossing_page, (uintptr_t)userVA, page_shift);
+ 		if (crossing_page) {
+ 			return KERN_FAILURE;
+ 		}
+@@ -865,7 +889,14 @@ fixup_page(
+ 		segEndAddress = segStartAddress + seg->page_count * seg->page_size;
+ 		if (segStartAddress <= userVA && userVA < segEndAddress) {
+ 			segInfo = seg;
+-			pageIndex = (uint32_t)(userVA - segStartAddress) / PAGE_SIZE;
++			pageIndex = (uint32_t)(userVA - segStartAddress) / seg->page_size;
++			static int sheng_mwl_logged = 0;
++			if (!sheng_mwl_logged) {
++				sheng_mwl_logged = 1;
++				printf("sheng-mwl: fmt=0x%x hdr_page_size=0x%x seg_page_size=0x%x seg_count=%u pageIndex=%u userVA=0x%llx segStart=0x%llx\n",
++				    hdr->mwli_pointer_format, hdr->mwli_page_size, seg->page_size, seg->page_count, pageIndex,
++				    (unsigned long long)userVA, (unsigned long long)segStartAddress);
++			}
+ 
+ 			/* ensure seg->size fits in link_info_size */
+ 			if ((uintptr_t)seg + seg->size > (uintptr_t)link_info + link_info_size) {
+@@ -954,6 +985,82 @@ fixup_page(
+ 	return KERN_SUCCESS;
+ }
+ 
++/*
++ * Fault one backing page into a kernel buffer (mirrors shared_region_pager_peek).
++ * Used when the fixup page size exceeds PAGE_SIZE so the full fixup page can be assembled.
++ */
++static kern_return_t
++dyld_pager_peek(
++	vm_object_t                    object,
++	vm_object_offset_t             backing_offset,
++	void                           *buffer,
++	struct vm_object_fault_info    *fault_info)
++{
++	vm_page_t page, top_page;
++	vm_prot_t prot;
++	kern_return_t error_code;
++	vm_fault_return_t vmfr;
++	/* The caller's fault_info may have been mutated by the page's own fault (shadow offset); fault the peeked page at its own range. */
++	struct vm_object_fault_info local_fault = *fault_info;
++	local_fault.lo_offset = backing_offset;
++	local_fault.hi_offset = backing_offset + PAGE_SIZE;
++
++retry:
++	vm_page_grab_prime();
++	vm_object_lock(object);
++	vm_object_paging_begin(object);
++	error_code = 0;
++	prot = VM_PROT_READ;
++	page = VM_PAGE_NULL;
++	vmfr = vm_fault_page(object, backing_offset, VM_PROT_READ, FALSE, FALSE, &prot, &page, &top_page, NULL,
++	    &error_code, FALSE, &local_fault, NULL);
++	switch (vmfr) {
++	case VM_FAULT_SUCCESS:
++		break;
++	case VM_FAULT_RETRY:
++		goto retry;
++	case VM_FAULT_MEMORY_SHORTAGE:
++		if (vm_page_wait(local_fault.interruptible)) {
++			goto retry;
++		}
++		return KERN_RESOURCE_SHORTAGE;
++	case VM_FAULT_SUCCESS_NO_VM_PAGE:
++		vm_object_paging_end(object);
++		vm_object_unlock(object);
++		return KERN_MEMORY_ERROR;
++	default:
++		return KERN_MEMORY_ERROR;
++	}
++	vm_object_t page_object = VM_PAGE_OBJECT(page);
++	const void *source = (const void *)phystokv((pmap_paddr_t)VM_PAGE_GET_PHYS_PAGE(page) << PAGE_SHIFT);
++	if (page_object->code_signed) {
++		vm_page_validate_cs_mapped(page, PAGE_SIZE, 0, source);
++	}
++	const bool tainted = page->vmp_cs_tainted;
++	if (!tainted) {
++		bcopy(source, buffer, PAGE_SIZE);
++	}
++	static int sheng_peek_logged = 0;
++	if (sheng_peek_logged < 8) {
++		uint64_t first8 = 0;
++		memcpy(&first8, buffer, sizeof(first8));
++		printf("sheng-peek[%d]: off=0x%llx tainted=%d first8=0x%llx pnum=0x%x page_obj=%p top_obj=%p\n",
++		    sheng_peek_logged, (unsigned long long)backing_offset, tainted, (unsigned long long)first8,
++		    (unsigned int)VM_PAGE_GET_PHYS_PAGE(page), (void *)page_object, (void *)VM_PAGE_OBJECT(top_page));
++		sheng_peek_logged++;
++	}
++	vm_page_wakeup_done(page_object, page);
++	vm_object_paging_end(page_object);
++	vm_object_unlock(page_object);
++	if (top_page != VM_PAGE_NULL) {
++		vm_object_lock(object);
++		VM_PAGE_FREE(top_page);
++		vm_object_paging_end(object);
++		vm_object_unlock(object);
++	}
++	return tainted ? KERN_CODESIGN_ERROR : KERN_SUCCESS;
++}
++
+ /*
+  * dyld_pager_data_request()
+  *
+@@ -991,6 +1098,10 @@ dyld_pager_data_request(
+ 	struct mwl_info_hdr     *hdr;
+ 	uint32_t                r;
+ 	uint64_t                userVA;
++	uint32_t                mwli_page_size;
++	void                   *fixup_buffer = NULL;
++	void                   *fixup_alloc = NULL;
++	uint32_t                i;
+ 
+ 	fault_info.stealth = TRUE;
+ 	fault_info.io_sync = FALSE;
+@@ -1003,6 +1114,7 @@ dyld_pager_data_request(
+ 	assert(os_ref_get_count_raw(&pager->dyld_ref_count) > 1); /* pager is alive */
+ 	assert(pager->dyld_is_mapped); /* pager is mapped */
+ 	hdr = (struct mwl_info_hdr *)pager->dyld_link_info;
++	mwli_page_size = hdr->mwli_page_size;
+ 
+ 	/*
+ 	 * Gather in a UPL all the VM pages requested by VM.
+@@ -1041,6 +1153,20 @@ dyld_pager_data_request(
+ 	assert(src_top_object != VM_OBJECT_NULL);
+ 	vm_object_reference(src_top_object); /* keep the source object alive */
+ 
++	/*
++	 * 16 KiB fixup pages on a 4 KiB kernel: assemble the whole fixup page in a scratch
++	 * buffer, apply the chain once, then copy out the requested 4 KiB part.
++	 */
++	if (mwli_page_size > PAGE_SIZE) {
++		/* The chain walk finds page boundaries from the buffer address, so align it to the fixup page size. */
++		fixup_alloc = kalloc_data(2 * (vm_size_t)mwli_page_size, Z_WAITOK);
++		if (fixup_alloc == NULL) {
++			retval = KERN_RESOURCE_SHORTAGE;
++			goto done;
++		}
++		fixup_buffer = (void *)(((uintptr_t)fixup_alloc + mwli_page_size - 1) & ~((uintptr_t)mwli_page_size - 1));
++	}
++
+ 	/*
+ 	 * Fill in the contents of the pages requested by VM.
+ 	 */
+@@ -1164,6 +1290,16 @@ retry_src_fault:
+ 		 */
+ 		bcopy((const char *)src_vaddr, (char *)dst_vaddr, PAGE_SIZE);
+ 
++		static int sheng_src_logged = 0;
++		if (sheng_src_logged < 4) {
++			uint64_t src8 = 0;
++			memcpy(&src8, (const void *)src_vaddr, sizeof(src8));
++			printf("sheng-src[%d]: off=0x%llx src8=0x%llx src_pnum=0x%x\n",
++			    sheng_src_logged, (unsigned long long)(offset + cur_offset), (unsigned long long)src8,
++			    (unsigned int)VM_PAGE_GET_PHYS_PAGE(src_page));
++			sheng_src_logged++;
++		}
++
+ 		/*
+ 		 * Figure out what the original user virtual address was, based on the offset.
+ 		 */
+@@ -1187,6 +1323,58 @@ retry_src_fault:
+ 				panic("%s(): Range not found for offset 0x%llx", __func__, (long long)cur_offset);
+ 			}
+ 			retval = KERN_FAILURE;
++		} else if (mwli_page_size > PAGE_SIZE) {
++			/* Assemble the whole fixup page, apply the chain once, copy out the requested part. */
++			vm_object_offset_t page_off = offset + cur_offset;
++			vm_object_offset_t base_off = page_off & ~(vm_object_offset_t)(mwli_page_size - 1);
++			uint32_t part = (uint32_t)((page_off - base_off) / PAGE_SIZE);
++			uint64_t base_userVA = userVA - (uint64_t)(page_off - base_off);
++
++			/* The current page's source is already faulted and still mapped: copy it, then read the other parts. */
++			bcopy((const char *)src_vaddr, (char *)fixup_buffer + (vm_offset_t)part * PAGE_SIZE, PAGE_SIZE);
++
++			/*
++			 * The source page and its placeholder in the top object are released before the other parts are read,
++			 * the way the end of this loop releases them. A part that is not resident is paged in from the file, and
++			 * APFS pages a file with integrity verification in by the whole verification block, with a UPL over all
++			 * of its pages that waits, uninterruptibly, for every busy page of the block. A source page held busy
++			 * across the reads is such a page: the thread would wait in vm_object_upl_request for itself (or for a
++			 * thread whose page-in waits for this page), and its paging reference on the file's object would keep
++			 * every later private mapping of the file waiting in vm_object_copy_delayed.
++			 */
++			vm_object_lock(src_page_object);
++			vm_page_wakeup_done(src_page_object, src_page);
++			src_page = VM_PAGE_NULL;
++			vm_object_paging_end(src_page_object);
++			vm_object_unlock(src_page_object);
++			if (top_page != VM_PAGE_NULL) {
++				assert(VM_PAGE_OBJECT(top_page) == src_top_object);
++				vm_object_lock(src_top_object);
++				VM_PAGE_FREE(top_page);
++				vm_object_paging_end(src_top_object);
++				vm_object_unlock(src_top_object);
++				top_page = VM_PAGE_NULL;
++			}
++
++			retval = KERN_SUCCESS;
++			for (i = 0; i < mwli_page_size / PAGE_SIZE; ++i) {
++				if (i == part) {
++					continue;
++				}
++				kr = dyld_pager_peek(src_top_object, base_off + (vm_object_offset_t)i * PAGE_SIZE,
++				    (char *)fixup_buffer + (vm_offset_t)i * PAGE_SIZE, &fault_info);
++				if (kr != KERN_SUCCESS) {
++					retval = kr;
++					break;
++				}
++			}
++			if (retval == KERN_SUCCESS) {
++				if (fixup_page((vm_offset_t)fixup_buffer, base_userVA, pager) != KERN_SUCCESS) {
++					retval = KERN_FAILURE;
++				} else {
++					bcopy((const char *)fixup_buffer + (vm_offset_t)part * PAGE_SIZE, (char *)dst_vaddr, PAGE_SIZE);
++				}
++			}
+ 		} else if (fixup_page(dst_vaddr, userVA, pager) != KERN_SUCCESS) {
+ 			/* KDBG / printf was done under fixup_page() */
+ 			retval = KERN_FAILURE;
+@@ -1198,6 +1386,11 @@ retry_src_fault:
+ 			}
+ 		}
+ 
++		if (src_page == VM_PAGE_NULL) {
++			/* a fixup page larger than a page: its source page is already released (above) */
++			continue;
++		}
++
+ 		assert(VM_PAGE_OBJECT(src_page) == src_page_object);
+ 		assert(src_page->vmp_busy);
+ 		assert(src_page_object->paging_in_progress > 0);
+@@ -1253,6 +1446,9 @@ done:
+ 	if (src_top_object != VM_OBJECT_NULL) {
+ 		vm_object_deallocate(src_top_object);
+ 	}
++	if (fixup_alloc != NULL) {
++		kfree_data(fixup_alloc, 2 * (vm_size_t)mwli_page_size);
++	}
+ 	return retval;
+ }
+ 
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+index 5a5574e..75101bc 100644
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -8,6 +8,13 @@
+ #define NO_MONITOR 1
+ #define NO_ECORE 1
+ 
++/*
++ * UniXNU: 16-bit hardware ASIDs (TCR_EL1.AS), one per address space. With 8 bits the pmap shares each hardware ASID among
++ * several address spaces once more than 255 exist and flushes it from the switching CPU's TLB at every switch between them;
++ * iPadOS runs several hundred processes. Every ARMv8.2+ core (sheng's A510/A715/X3) has 16-bit ASIDs; pmap_bootstrap() checks.
++ */
++#define HAS_16BIT_ASID 1
++
+ #define BCM2837
+ #define ARM_ARCH_TIMER
+ 

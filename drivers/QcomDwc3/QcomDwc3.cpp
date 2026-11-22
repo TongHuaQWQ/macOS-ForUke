@@ -28,6 +28,7 @@ extern "C" {
 int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 int armcpu_spi_mask(uint32_t, bool);
 bool sm8550_gcc_update32(volatile uint32_t *, uint32_t, uint32_t);
+boolean_t ml_set_interrupts_enabled(boolean_t);
 // [0] stage (negative: the step that failed), [1] GSNPSID, [2] GUID-free hardware parameter 0, [3] parameter 3, [4] parameter 7,
 // [5] GDSC USB30, [6] GDSC PHY, [7] SMMU slot | bank << 16, [8] repeater status | poll tries << 8 | SPMI APID << 16,
 // [9] RPMh rails found, [10] VBUS override state,
@@ -990,6 +991,7 @@ void hostStats() {
     OSSafeReleaseNULL(devices); OSSafeReleaseNULL(match);
 }
 void roleThread(void *, wait_result_t) {
+    ml_set_interrupts_enabled(TRUE);
     for (;;) {
         IOLockLock(gRoleLock);
         while (gRoleWanted == gRoleApplied) {

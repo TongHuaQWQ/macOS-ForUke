@@ -211,6 +211,16 @@ zzzzzzzzzzzzzzzzzzzz-uke-bluetooth-start.patch
 # in kernel_args, SourceStorage.cpp/NativeUfs.cpp never start and IOKitBSDInit fails to mount root.
 zzzzzzzzzzzzzzzzzzzzz-uke-source-storage-start.patch
 
+# uke-macos27-userland: port upstream UniXNU-sheng macOS 27.3 4K userland requirements:
+#   * 47-bit TTBR0 user VA (T0SZ_USER=17, 4-level user L0 root) for xzone malloc 455-512 GiB
+#     and arm64e user PAC alignment (fixes pmap.c:6290 illegal VA 0x7b10000000 in launchd);
+#   * 16 KiB dyld chained-fixup page assembly on 4K pages + source-page release before peek
+#     (prevents APFS vm_object_upl_request deadlock);
+#   * Darwin 26 security.mac.lockdown_mode_state_public sysctl, sandbox hw.pagesize read,
+#     bindfs_vget, 4K stack guard alignment, HAS_16BIT_ASID, cpu_start dcache flush, and
+#     sheng_sigp_recover.
+zzzzzzzzzzzzzzzzzzzzzz-uke-macos27-userland.patch
+
 # uke-boot-marks.patch is NOT applied: its uke_mark() calls ml_io_map() at _arm_init+0x34,
 # which is before arm_vm_init() at +0x768, so the bootstrap pmap is not up yet. The official entry
 # probe (patch-xnu-entry-probe.py) asked the same questions without touching the kernel source:

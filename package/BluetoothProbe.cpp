@@ -28,6 +28,7 @@
 extern "C" int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 extern "C" int armcpu_spi_share(uint32_t, void (*)(void *), void *);
 extern "C" int armcpu_spi_mask(uint32_t, bool);
+extern "C" boolean_t ml_set_interrupts_enabled(boolean_t enable);
 extern "C" __attribute__((weak)) volatile int native_gpu_addon_stage = 0;
 extern "C" __attribute__((weak)) volatile uint32_t native_wifi_stats[29] = {};
 extern "C" {
@@ -572,6 +573,7 @@ void powerResult(bool enabled, int error) {
     }
 }
 void worker(void *, wait_result_t) {
+    ml_set_interrupts_enabled(TRUE);
     thread_set_thread_name(current_thread(), "bluetooth");
     struct qbt_platform ops = {
         nullptr, allocate, release, nowNs, writeUart, drained, setRate, flow,
@@ -702,6 +704,7 @@ static int processSeen(struct proc *process, void *found) {
     return 0;
 }
 static void processWatch(void *, wait_result_t) {
+    ml_set_interrupts_enabled(TRUE);
     thread_set_thread_name(current_thread(), "uke-bluetooth-procs");
     for (;;) {
         int found[2] = {0, 0};
