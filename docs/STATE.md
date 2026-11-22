@@ -7105,3 +7105,52 @@ working data binding uses, and position independent so nothing can move it twice
 **Rule worth keeping**: in this port, an absolute address that is *data* survives the prelink; the same
 address reached by a *direct branch* gets the section's shift added a second time. Anything calling into a
 collection symbol has to go through a pointer.
+## 105. 2026-11-22: usb15 -- the boot holds, the stack is live, and the gate is root mount
+
+Three photographs of one boot, minutes apart, all the same story:
+
+    mark xdci start: super
+    QcomDwc3Xdci:: IOUSBDeviceController::prepareDefaults: model Xiaomi Pad 7 version 0.0
+    QcomDwc3Xdci:: IOUSBDeviceController::initSpeedOverride: _speedOverride = (-1).
+    qcom-dwc3: stage 11
+    qcom-dwc3: stage 12
+    UKE usb: alive #1..#60  beat #N stage=12 ... uke-heartbeat 21..37
+
+So the reporter no longer kills the boot, and Apple's device-controller class stays attached for the whole
+time we watched. Sampling the controller live on every beat (qcom_dwc3_sample) gives the state:
+
+| reading | value | meaning |
+| --- | --- | --- |
+| `role=010101` | applied=device, wanted=device, core=device | the role machine decided device and the core is in device mode |
+| `gctl=00102000` | bit 6 = 0 | **GCTL.SOFTCONN is off: the D+ pullup is not enabled, the device is not connected** |
+| `dsts=00d3ea74` | CONNECTSPD = 4 (SuperSpeed), USBLNKST = 4 | SS.Disabled -- the link never starts |
+| `dcfg=00f00000`, `gusb2phycfg=00102500` | non-zero | the core is configured; Apple's reset sequence did run |
+| `stats19=1` | | `QcomDwc3Xdci::start()` returned true |
+
+The host agrees: still `new full-speed USB device ... descriptor read/64, error -32` and nothing else from
+this kernel (the `18d1:d00d Product: Android` entries in the same dmesg are ABL's fastboot).
+
+**What turns SOFTCONN on**: `XDCI_POWER_ON`, which Apple's family calls when configd's
+`USBDeviceConfiguration` plug-in asks the controller for a power state. Without userland there is nothing
+to ask, which is exactly what the panel shows on the same screen, one line above the beats:
+
+    Failed to mount root device ... IOKitBSDInit.cpp:1001
+
+So the USB side of this port is complete up to the point userland takes over:
+
+* bring-up (nine stages), kext load, nub publish, `QcomDwc3Xdci::start()`, the Apple stack attached, role
+  machine in device mode, core configured -- all measured;
+* the first *call* into Apple's code is fixed (STATE 104's double relocation);
+* the deliberate boot-killing panic is gone;
+* what is left on this side is one property (an interrupt specifier for the nub's provider, so the family can
+  attach its device interrupt for EP0 events; `irq=0` today) and it only matters once something powers the
+  core;
+* and what actually blocks the next step is **root mount**, i.e. the storage track, not USB.
+
+Two consequences worth stating plainly:
+
+1. Every remaining USB milestone (enumerate as 05ac:12ab, Trust dialog, pair with a Mac, lockdown, read the
+   log over USB) runs through userland. Upstream reaches them with a working userland; this port does not
+   have one yet.
+2. The other log channel this port built -- sheng-log=1 writing the kernel log into the userdata ring -- is
+   gated by the same storage code that cannot mount root.
