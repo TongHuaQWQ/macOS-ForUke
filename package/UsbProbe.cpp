@@ -43,11 +43,15 @@ extern "C" boolean_t ml_set_interrupts_enabled(boolean_t enable);
 extern "C" bool qcom_dwc3_bring_up(void);
 extern "C" void qcom_dwc3_publish(void);
 extern "C" void qcom_dwc3_diag(bool);
+extern "C" void qcom_dwc3_sample(void);
 extern "C" void qcom_dwc3_static_init(void) __asm__("__GLOBAL__sub_I_QcomDwc3.cpp");
 extern "C" volatile uint32_t native_usb_stats[54];
 extern "C" void qcom_dwc3_host_load(int);
 extern "C" void uke_delay_ms(uint32_t);
 static void trace(const char *where) {
+    // Before anything is printed: if the controller is published, sample its device-mode registers now, so the
+    // numbers on each beat are live rather than whatever the reset left behind. Inert until gGlobals is mapped.
+    qcom_dwc3_sample();
     const int32_t stage = (int32_t)native_usb_stats[0];
     IOLog("UKE usb: %s stage=%d gsnpsid=%08x hwpar=%08x/%08x/%08x gdsc=%x/%x smmu=%08x repeater=%08x rpmh=%u irq=%u stats19=%d stats20=%d kext=%d\n",
           where, (int)stage, (unsigned)native_usb_stats[1], (unsigned)native_usb_stats[2], (unsigned)native_usb_stats[3],
@@ -79,19 +83,13 @@ static void report_forever(const char *where) {
 static void reporter(void *, wait_result_t) {
     ml_set_interrupts_enabled(TRUE);   // see worker(): every line below is an IOLog
     for (unsigned beat = 1;; ++beat) {
-        if (beat == 3) {
-            // A binary test the panel cannot lose. Two rounds of photographs show the console's tail full of
-            // late boot output (AMFI, vm_page_find_contiguous failures, fileset-wait) and not one
-            // "UKE usb: beat" line, although this thread re-prints once a second. Two explanations fit: the
-            // thread never ran, or its IOLog blocks on a console lock held by a stuck thread -- and from
-            // outside those look identical. panic() takes a different path and, with debug=0x14e, spins
-            // instead of resetting, so its text stays on the screen: no panic means the thread never ran, and
-            // a frozen panic screen carries the stage number.
-            panic("UKE usb: stage=%d gsnpsid=%08x gdsc=%x/%x smmu=%08x rep=%08x rpmh=%u",
-                  (int)native_usb_stats[0], (unsigned)native_usb_stats[1], (unsigned)native_usb_stats[5],
-                  (unsigned)native_usb_stats[6], (unsigned)native_usb_stats[7], (unsigned)native_usb_stats[8],
-                  (unsigned)native_usb_stats[9]);
-        }
+        // The deliberate beat-3 panic that used to sit here is gone. It existed to answer "did this thread run
+        // at all" when the console's scrollback was the only channel, and it has answered that many times over.
+        // On 2026-11-22 it became the thing that ended the interesting boot: usb14 reached stage 12 with the
+        // Apple stack live (`IOUSBDeviceController::prepareDefaults: model Xiaomi Pad 7 version 0.0`) and was
+        // then panicked three seconds later by this very line, which is the one thing a boot that is about to
+        // enumerate must not do. `usb=6` still freezes the panel on purpose, from the worker, when a verdict
+        // photograph is what is wanted.
         const int32_t stage = (int32_t)native_usb_stats[0];
         IOLog("UKE usb: beat #%u stage=%d gsnpsid=%08x gdsc=%x/%x smmu=%08x rep=%08x rpmh=%u\n",
               beat, (int)stage, (unsigned)native_usb_stats[1], (unsigned)native_usb_stats[5],

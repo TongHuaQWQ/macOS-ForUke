@@ -1075,6 +1075,26 @@ extern "C" void qcom_dwc3_diag(bool cycle) {
         IOSleep(5);
     }
 }
+// Live sample of the device-mode registers the enumeration has to move, for the printed beats: DSTS (0x70c),
+// DCFG (0x704), GCTL (0x110) and GUSB2PHYCFG (0x200) in the window Apple's class is given, plus the link state
+// from DSTS bits 5:0. Nothing here writes hardware, and nothing touches a window that publish() has not mapped,
+// so the reporter can call it before the stack exists.
+extern "C" void qcom_dwc3_sample(void)
+{
+    if (!gGlobals.va) return;
+    const uint32_t dsts = gGlobals.va[0x70c / 4], dcfg = gGlobals.va[0x704 / 4];
+    native_usb_stats[15] = dsts;
+    native_usb_stats[16] = dcfg;
+    native_usb_stats[17] = gGlobals.va[0x110 / 4];
+    native_usb_stats[18] = gGlobals.va[0x200 / 4];
+    native_usb_stats[26] = dsts;                          // the same register the diag loop calls DSTS
+    // DSTS bits 21:18 are USBLNKST and bits 3:0 the connected speed (dwc3's DWC3_DSTS_USBLNKST /
+    // DWC3_DSTS_CONNECTSPD). [36] accumulates every link state this boot has seen, so one photograph says
+    // whether the link ever left 0 (OnDisconnect) or reached Polling/Configured.
+    native_usb_stats[36] = native_usb_stats[36] | 1u << ((dsts >> 18) & 0xf);
+    native_usb_stats[37] = dsts;
+}
+
 extern "C" void qcom_dwc3_publish(void) {
     do {
         OSData *zero = OSData::withBytes("\0\0\0\0", 1);
