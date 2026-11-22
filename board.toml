@@ -766,6 +766,11 @@ kernel_args = [
   # questions are separable, and this round spends its photograph on the second one: the clock and PHY groups of stages 4 to 9,
   # each of which now prints its own `qcom-dwc3: mark <group>` line before touching a block. The vote keeps its own round.
   "usb-rails=0",
+  # usb-conn=1 asserts GCTL.SOFTCONN from the beat sampler, i.e. pulls the device up by hand. The family does it
+  # in XDCI_POWER_ON, which configd's USBDeviceConfiguration asks for -- and this board has no userland yet, so
+  # nothing asks. With the counter in the beat line (`pwron=`) one panel then says which of the two it is: a
+  # family that never powered the core (pwron=0, pullup forced, link still dead) or one that cannot connect.
+  "usb-conn=1",
   # Arms the userdata half of UkeLastLog (UkeLastLog.c:789; the pram half needs panic_region and stays
   # off). The transport is freestanding - UfsLog.cpp/UfsLogKernel.c map the UFS host and the apps SMMU
   # themselves - so it does NOT need CONFIG_XNU_NATIVE_UFS, contrary to the 2026-11-17 report from the

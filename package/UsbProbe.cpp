@@ -48,6 +48,19 @@ extern "C" void qcom_dwc3_static_init(void) __asm__("__GLOBAL__sub_I_QcomDwc3.cp
 extern "C" volatile uint32_t native_usb_stats[54];
 extern "C" void qcom_dwc3_host_load(int);
 extern "C" void uke_delay_ms(uint32_t);
+// How many services of a class the registry holds right now. The root-mount failure ("Failed to mount root
+// device", IOKitBSDInit.cpp:1001) has two very different causes -- no block device was ever published, or one was
+// published and the mount still failed -- and the panel cannot tell them apart from the boot's own output alone.
+// A count per beat can, and it costs one registry match per class.
+static unsigned countServices(const char *className) {
+    OSIterator *it = IOService::getMatchingServices(IOService::serviceMatching(className));
+    if (!it) return 0;
+    unsigned n = 0;
+    while (it->getNextObject() != nullptr && n < 999) ++n;
+    it->release();
+    return n;
+}
+static bool verboseStorage = true;   // usb-storage=0 turns the registry counts off
 static void trace(const char *where) {
     // Before anything is printed: if the controller is published, sample its device-mode registers now, so the
     // numbers on each beat are live rather than whatever the reset left behind. Inert until gGlobals is mapped.
@@ -59,10 +72,19 @@ static void trace(const char *where) {
           (unsigned)native_usb_stats[7], (unsigned)native_usb_stats[8], (unsigned)native_usb_stats[9],
           (unsigned)native_usb_stats[11], (int32_t)native_usb_stats[19], (int32_t)native_usb_stats[20],
           (int32_t)native_usb_stats[21]);
-    IOLog("UKE usb: helper dsts=%08x dcfg=%08x gctl=%08x gusb2phycfg=%08x retimer=%08x qmp=%08x role=%08x vbus=%08x\n",
+    // pwron/pwroff/reset are XDCI_POWER_ON, XDCI_POWER_OFF and XDCI_CONTROLLER_RESET as Apple's family called
+    // them: zero on all three means the family never powered this core, which is the difference between "the
+    // device stack is not being asked" and "the device stack cannot connect".
+    IOLog("UKE usb: helper dsts=%08x dcfg=%08x gctl=%08x gusb2phycfg=%08x retimer=%08x qmp=%08x role=%08x vbus=%08x"
+          " pwron=%u pwroff=%u reset=%d\n",
           (unsigned)native_usb_stats[15], (unsigned)native_usb_stats[16], (unsigned)native_usb_stats[17],
           (unsigned)native_usb_stats[18], (unsigned)native_usb_stats[32], (unsigned)native_usb_stats[33],
-          (unsigned)native_usb_stats[44], (unsigned)native_usb_stats[10]);
+          (unsigned)native_usb_stats[44], (unsigned)native_usb_stats[10], (unsigned)native_usb_stats[12],
+          (unsigned)native_usb_stats[13], (int32_t)native_usb_stats[14]);
+    if (verboseStorage) {
+        IOLog("UKE usb: root blockstorage=%u media=%u ufs=%u\n", countServices("IOBlockStorageDevice"),
+              countServices("IOMedia"), countServices("AppleUFSController"));
+    }
 }
 // The video console keeps only its last screenful, and this board has no other channel until USB itself
 // works. A thread that re-states the bring-up verdict every few seconds therefore does two things at once:
@@ -72,7 +94,13 @@ static void report_forever(const char *where) {
     for (unsigned beat = 1;; ++beat) {
         IOLog("UKE usb: alive #%u (%s)\n", beat, where);
         trace(where);
-        uke_delay_ms(5000);
+        // The first beats are dense because they answer "did this thread run, and with what state". After that the
+        // console's tail is more valuable belonging to the boot itself: on 2026-11-22 the beats were scrolling the
+        // one line that matters -- "Failed to mount root device ... IOKitBSDInit.cpp:1001" -- off the screen every
+        // five seconds. `usb-beat=<seconds>` overrides the slow cadence.
+        unsigned slow = 60;
+        PE_parse_boot_argn("usb-beat", &slow, sizeof slow);
+        uke_delay_ms(beat < 6 ? 5000 : (slow ? slow : 60) * 1000);
     }
 }
 // A thread that does nothing but re-state which stage the bring-up is in. It exists because the bring-up
@@ -158,6 +186,8 @@ static void worker(void *, wait_result_t) {
     report_forever("published");
 }
 extern "C" void uke_usb_probe(void) {
+    unsigned storage = 1;
+    if (PE_parse_boot_argn("usb-storage", &storage, sizeof storage)) verboseStorage = storage != 0;
     unsigned enabled = 0;
     if (!PE_parse_boot_argn("usb", &enabled, sizeof enabled) || !enabled) {
         // Never silent: "the call site did not run" and "the argument did not arrive" look identical from

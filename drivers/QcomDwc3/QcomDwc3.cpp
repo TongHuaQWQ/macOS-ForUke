@@ -1079,9 +1079,18 @@ extern "C" void qcom_dwc3_diag(bool cycle) {
 // DCFG (0x704), GCTL (0x110) and GUSB2PHYCFG (0x200) in the window Apple's class is given, plus the link state
 // from DSTS bits 5:0. Nothing here writes hardware, and nothing touches a window that publish() has not mapped,
 // so the reporter can call it before the stack exists.
+// `usb-conn=1`: assert GCTL.SOFTCONN from the sampler, i.e. pull the device up by hand. The family sets it in
+// XDCI_POWER_ON, which configd's USBDeviceConfiguration asks for; with no userland on this board nothing asks,
+// so this is the experiment that separates "the family never powers the core" from "the link cannot come up".
+// It is a boot argument and off by default: on a system whose userland does work, this would fight it.
+static bool gForceConnect;
 extern "C" void qcom_dwc3_sample(void)
 {
     if (!gGlobals.va) return;
+    if (gForceConnect) {
+        const uint32_t gctl = gGlobals.va[0x110 / 4];
+        if (!(gctl & 1u << 6)) {gGlobals.va[0x110 / 4] = gctl | 1u << 6; barrier();}
+    }
     const uint32_t dsts = gGlobals.va[0x70c / 4], dcfg = gGlobals.va[0x704 / 4];
     native_usb_stats[15] = dsts;
     native_usb_stats[16] = dcfg;
@@ -1171,6 +1180,9 @@ extern "C" void qcom_dwc3_publish(void) {
         // plugged in and to run the change of role.
         unsigned forced = 0;
         PE_parse_boot_argn("usb-host", &forced, sizeof forced);
+        unsigned pullup = 0;
+        gForceConnect = PE_parse_boot_argn("usb-conn", &pullup, sizeof pullup) && pullup;
+        if (gForceConnect) IOLog("qcom-dwc3: usb-conn=1, GCTL.SOFTCONN will be asserted by the sampler\n");
         gRoleLock = IOLockAlloc();
         if (!gRoleLock || !mapRegion(gGlobals, kAppleWindow, 0x1000) || !mapRegion(gXhciRegs, kCore, 0x1000) ||
             kernel_thread_start(roleThread, nullptr, &thread) != KERN_SUCCESS) {stage(-17); break;}
