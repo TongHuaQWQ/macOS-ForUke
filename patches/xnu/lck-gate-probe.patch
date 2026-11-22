@@ -105,20 +105,3 @@ index 94a34dc..ff20b3e 100644
  	LCK_MTX_ASSERT(lock, LCK_MTX_ASSERT_OWNED);
  
  	if (lck_sleep_action & LCK_SLEEP_UNLOCK) {
-diff --git a/osfmk/kern/lock_mtx.c b/osfmk/kern/lock_mtx.c
-index c8e0d1a..de4e557 100644
---- a/osfmk/kern/lock_mtx.c
-+++ b/osfmk/kern/lock_mtx.c
-@@ -838,6 +838,12 @@ lck_mtx_lock_slow(
- 	lck_mtx_state_t         state,
- 	lck_mtx_mode_t          mode)
- {
-+#if DEVELOPMENT || DEBUG
-+	{
-+		extern int printf(const char *format, ...) __printflike(1, 2);
-+		printf("lck-mtx: contended lock=%p self=%p\n", (void *)lock, (void *)thread);
-+	}
-+#endif
- #pragma unused(state)
- #if CONFIG_DTRACE
- 	lck_mtx_state_t ostate = {
