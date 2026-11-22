@@ -605,20 +605,31 @@ def main():
     # Names reached as data (a metaclass pointer, the vtable itself): absolute, no stub.
     data_only = {'__ZN12AppleUSBXDCI10gMetaClassE', '__ZTV12AppleUSBXDCI',
                  '__ZN12AppleUSBXHCI10gMetaClassE', '__ZTV12AppleUSBXHCI'}
-    text, addresses = '.text\n.p2align 2\n', ''
+    # A trampoline per bound method, and the address it jumps to *baked as data* instead of branched to
+    # directly. That is not a style choice: `b <name>.original` where the symbol is an absolute .set makes the
+    # linker encode a PC-relative branch to an address it then also moves with the section, and the branch
+    # lands one __TEXT_EXEC relocation (0x4610000 on this board) past Apple's function. The 2026-11-22 usb13
+    # boot measured exactly that: the first Apple call of this driver, `AppleUSBXDCI::AppleUSBXDCI(OSMetaClass
+    # const*)`, jumped to 0xfffffff00f7da6a0 while the fixture binds it to 0xfffffff00b1ca6a0, and the
+    # difference is the section's own shift. Data pointers do not go through that path -- `&gMetaClass` read
+    # back the right Apple metaclass in the same boot -- so the trampoline loads its target from a literal and
+    # branches through a register, which is the representation that is already proven correct.
+    text, addresses, literals = '.text\n.p2align 2\n', '', '.section __DATA_CONST,__const\n.p2align 3\n'
     for name, va in sorted(bindings.items()):
         if name in data_only:
             # Absolute, reached through GOT entries: a plain pointer the emitter neither signs nor moves.
             addresses += f'.globl {name}\n.set {name}, {va:#x}\n'
         else:
-            # The original lives in another object, so the branch stays a relocation the linker resolves.
             addresses += f'.globl {name}.original\n.set {name}.original, {va:#x}\n'
-            text += f'.globl {name}\n{name}:\n bti c\n b {name}.original\n'
+            literals += f'{name}.slot:\n .quad {name}.original\n'
+            text += (f'.globl {name}\n{name}:\n bti c\n'
+                     f' adrp x16, {name}.slot@PAGE\n ldr x16, [x16, {name}.slot@PAGEOFF]\n br x16\n')
     (OUT / 'usb-bindings.S').write_text(text)
     (OUT / 'usb-addresses.S').write_text(addresses)
-    for stem in ('usb-bindings', 'usb-addresses'):
+    (OUT / 'usb-literals.S').write_text(literals)
+    for stem in ('usb-bindings', 'usb-addresses', 'usb-literals'):
         compile_unit(OUT / f'{stem}.S', c_record, OUT / f'{stem}.o', [], 'assembler-with-cpp')
-    objects += [OUT / 'usb-bindings.o', OUT / 'usb-addresses.o']
+    objects += [OUT / 'usb-bindings.o', OUT / 'usb-addresses.o', OUT / 'usb-literals.o']
 
     # The static initialisers must not run before uke_usb_probe asks for them (the driver registers its
     # classes only after the hardware answered), so they leave __mod_init_func and the one constructor
