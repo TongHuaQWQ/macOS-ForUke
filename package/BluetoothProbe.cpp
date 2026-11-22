@@ -28,7 +28,7 @@
 extern "C" int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *);
 extern "C" int armcpu_spi_share(uint32_t, void (*)(void *), void *);
 extern "C" int armcpu_spi_mask(uint32_t, bool);
-extern "C" volatile int native_gpu_addon_stage;
+extern "C" __attribute__((weak)) volatile int native_gpu_addon_stage = 0;
 extern "C" __attribute__((weak)) volatile uint32_t native_wifi_stats[29] = {};
 extern "C" {
 volatile uint64_t native_bluetooth_stats[32];
