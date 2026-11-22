@@ -4,27 +4,26 @@
 
 ## 0. 现在在哪（每次会话先看这 30 行）
 
-> 更新时间 **2026-11-19 01:1x**。这一节的旧内容（b105/ep0 那批）已经翻过去了，那一整段历史在 §89–§92；
-> b256 之后的轮次见 §93–§95。
+> 更新时间 **2026-11-22 16:5x**。USB 线的最新一轮是 usb16（§105）；USB 的完整交接另见
+> `work/analysis/2026-11-22-usb-handoff.md`（含 12 个坑与判读速查）。
 
 | 项 | 值 |
 |---|---|
 | 目标 | Xiaomi Pad 7（uke / SM7675 "Cliffs"）跑 macOS 27.3（26C5035r，profile `macos-27.3-uke`），4 KiB 页 + arm64e/PAC 自建 XNU |
-| **当前卡点** | 主线是**根卷挂载**：`native-ufs-root=1` + 26C5035r 的三份签名 policy（OS/SystemOS/App）。签名表放不进启动镜像，所以内核包里只带 544 字节签名头，表以 `<window>.vroot` 数据对象落在 userdata 镜像里（§95）。**并行**：本轮把 USB 线并进来，`usb=1` 只做 bring-up（§108）|
-| 已经过的 | b262/b263 风暴 + cluster-type（§94）；b264 不对齐 `memcpy`；b266/b268 userdata 日志 DMA；b269 panic 文本进 pram；b272 `native-ufs-root=1` 链接通过 |
-| 刚修掉的 | **b276 的 `manifest.bin`**：不是缺文件，是核心 `version_env()` 少一行 `XNU_SOURCE_STORAGE_TABLES` 路由（§95）|
-| 本轮合并 | 分支 `usb-on-macos`：`ci-b276-storage4` 上并入 `mine/ci-b250-ufsclk`（USB 线，2026-11-16~18），9 个冲突逐个人工解（§108）。USB 只有**一个**所有者进内核：`libQcomDwc3.a` 被 force-load，`CONFIG_XNU_QCOM_USB_DEBUG=n` 让 CDC-ACM 那条留树不链接 |
-| 当前分支 | `usb-on-macos`（b276 + b250 的合并），核心 `TongHuaQWQ/UniXNU@macos` = `e10bb7d` |
-| 镜像索引 | `work/flash/INDEX.md`；刷 `bash work/flash/apply.sh <round>`，回原厂 `bash work/flash/restore-os4.sh`（**OS4** 在 `device/uke-backup/os4/`，`uke-backup/` 那份是 OS3 不要刷）|
-| 出镜像 | `python3 work/round.py <RUN_ID> --name <round> --core work/push/UniXNU --device work/push/uke-main-merge --profile macos-27.3-uke`（约 6 分钟）|
-| **参考实现**（别手搓，直接拿）| `work/ref-sheng/`=UniXNU-sheng（**跑 macOS**）、`work/ref-allenwdk/`=Allenwdk/UniXNU-uke（**这台机器跑 iPadOS**）、`work/ref-armcpu/`、`work/ref-senemos/`=Linux 补丁集、`work/ref-vendor-dt/`=厂商 DT |
-| 本轮文档 | `docs/ROADMAP-20261118.md`（问题清单+路线）、`docs/UPSTREAM-REVIEW-20261118.md`（哪些本地覆盖该丢）、`work/re/linux-ref/`（Linux 树交叉核对）|
-| 下一轮验收 | 主线：`root-policies.bin` 约 1.7 KB（不是 108 MiB）；`kernel.macho` 链接通过；payload 里 `native-ufs-root=1`；真机上 Root device 被 NativeUfs 认出来。USB：面板/串口里的 `UKE usb: … stage=N`（9 = 硬件就绪，负值 = 失败的那一步）与 `gsnpsid`，主机 `ioreg -p IOUSB` 是否出现设备 |
-| 组件自检 | `bash package/qcom-usb-debug/scripts/check-component.sh`（几十秒，改归档代码前必跑）；USB 官方路线另有一条纯 Python 自检 `python3 scripts/build-qcom-dwc3.py --check-headers`（267 个 slot 名字重新推导 PAC diversity，不需要 macOS）|
-| 核心契约 | `python3 scripts/check-core-contract.py --core ../UniXNU`（秒级；CI 在检出 UniXNU 后自动跑，把 b274/b275/b276 那类"核心落后一提交"变成秒级报错）|
-| 情报库 | `work/analysis/porting-kb/`（移植知识，含 `linux-dwc3` 源码副本）、`work/analysis/hw-intel/`（9 个分项 + `README.md` 排序后的行动清单，7300 行）|
+| **当前卡点** | 主线仍是**根卷挂载**（`Failed to mount root device … IOKitBSDInit.cpp:1001`）：`native-ufs-root=1` + 26C5035r 的三份签名 policy，表以 `<window>.vroot` 数据对象落在 userdata 镜像里（§95）。**USB 侧已推到苹果栈发布完成**（§104/§105），但要连上设备需要 userland 的 configd，因此同样卡在根挂载 |
+| USB 已证 | 九阶段 bring-up 全绿（§101）；`AppleUSBXDCI` 一次装载成功、nub 发布、`QcomDwc3Xdci::start()` 成功、苹果 `IOUSBDeviceController` 在跑并读到机型（§102/§105）；`GCTL.SOFTCONN=0`、`DSTS.USBLNKST=4`（未连接） |
+| 刚修掉的 | §104 **绑定方法的 trampoline 二次重定位**（`b <绝对地址>` 被段再搬 `0x4610000`）→ 改为经字面量 `adrp/ldr/br`；§103a **archive 不得新增 section**、不得实例化抽象苹果类；§105 删掉 reporter 第 3 拍的自杀 panic |
+| 当前分支 | `usb-on-macos`（`3d5a790` 之后），核心 `TongHuaQWQ/UniXNU@macos` = `8a933afb` |
+| 命令行 | **983 / 1000 字节**：`usb=4 usb-rails=0 usb-conn=1 native-ufs-root=1 sheng-log=1 pmgr=2 …` |
+| 镜像索引 | `work/flash/INDEX.md`；最新 `boot-round-usb16.img` + `vendor_boot_round-usb16.img`（`d4fb211babdb7aac…`）|
+| 出镜像 | `python3 work/round.py <RUN_ID> --name <round> --core work/push/UniXNU --device work/push/uke-main-merge --profile macos-27.3-uke`（★ 三个参数缺一不可，漏了会拷陈旧镜像）|
+| 触发构建 | 把 `usb-on-macos` 推到 `refs/heads/ci-<轮次>-<主题>`；**一次只推一个** |
+| **参考实现**（别手搓）| `work/analysis/refs/unixnu-qcomdwc3/`（sheng 的 SM8550，上游）、`refs/allenwdk-uke/`（同设备 iPadOS 移植）、`refs/macos-uke/`、`refs/uke-extracts/senemos/`（同设备 Linux 补丁集）、`work/analysis/ref/dt/live.dts`（本机运行时 DT）|
+| 下一轮验收 | ① 面板 `UKE usb: root blockstorage=N media=N ufs=N` 的 N（0 = 存储没发布块设备；≥1 = 挂载/策略那一段）；② beat 行 `pwron=`（family 有没有给核心上过电）+ `dsts` 是否离开 `USBLNKST=4`；③ 宿主 `dmesg` 是否从 `-32` 变成真正的枚举 |
+| 组件自检 | `python3 scripts/build-qcom-dwc3.py --check-headers`（纯 Python，267+ 槽重推 PAC diversity）；`bash package/qcom-usb-debug/scripts/check-component.sh` |
+| 核心契约 | `python3 scripts/check-core-contract.py --core ../UniXNU` |
 | 设备操作铁律 | **不要长按断电**（DRAM 里的诊断全丢）；要在 TWRP 里读日志 |
-| CI 铁律 | `ci-*` 分支一推就构建（~35 分钟），**同一时间只推一个**：推新分支会把在跑的那次顶掉（b262 就是这么被 cancel 的）|
+| CI 铁律 | `ci-*` 分支一推就构建（~35 分钟）；**同一时间只推一个**，推新分支会顶掉在跑的那次 |
 
 **两条已经付过代价的教训**
 
