@@ -170,7 +170,10 @@ extern "C" void native_source_storage_start(void)
     OSDictionary *matching = IOService::serviceMatching("IOPlatformExpertDevice");
     IOService *provider = matching ? IOService::waitForMatchingService(matching, 5000000000ULL) : nullptr;
     if (!provider) panic("SourceStorage: platform root unavailable");
-    start_image4_dependencies(provider);
+    unsigned aesStub = 0;
+    PE_parse_boot_argn("uke-aes-stub", &aesStub, sizeof(aesStub));
+    if (!aesStub)
+        start_image4_dependencies(provider);
     storageDriver = native_ufs_source_create();
     if (!storageDriver) panic("SourceStorage: cannot allocate UFS service");
     const char *step = !storageDriver->init() ? "init" : !storageDriver->attach(provider) ? "attach" :
