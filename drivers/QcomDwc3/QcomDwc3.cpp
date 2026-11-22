@@ -1126,9 +1126,10 @@ extern "C" void qcom_dwc3_publish(void) {
         mark("xdci ctl alloc");
         QcomDwc3Nub *control = OSTypeAlloc(QcomDwc3Nub);
         IOLog("qcom-dwc3: mark xdci ctl alloc -> %p\n", (void *)control);
-        mark("xdci base alloc");
-        AppleUSBXDCI *probe = OSTypeAlloc(AppleUSBXDCI);
-        IOLog("qcom-dwc3: mark xdci base alloc -> %p\n", (void *)probe);
+        // The base-class probe that used to sit here is gone: instantiating an abstract class from
+        // libkern's side pulls Apple's vtable and destructor into this archive for no diagnostic value
+        // (the metaclass reads above already test the binding), and it is the only construct in this
+        // round that was new to the link. See the bisect note in docs/STATE.md.
         mark("xdci alloc");
         QcomDwc3Xdci *controller = OSTypeAlloc(QcomDwc3Xdci);
         if (controller) IOLog("qcom-dwc3: mark xdci isa=%p\n", *(void **)controller);
