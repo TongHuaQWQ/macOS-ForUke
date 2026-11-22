@@ -970,18 +970,23 @@ PY
 EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS"
 EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_WATCHDOG_POLICY=$WATCHDOG_POLICY"
 EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_LAST_LOG_ARCHIVE=$LAST_LOG_LINKED"
-# Which guest OS the kernel is built FOR. Apple's macOS kernel is compiled with XNU_TARGET_OS_OSX, and
-# the XNU_TARGET_OS_* macros decide which code is compiled in at all -- not just which deployment flag
-# is attached. Hosting macOS kexts on an iOS-target kernel leaves whole families out, so a fileset
-# prelink has nothing to pair those kext calls with. The core version of this script has had the
-# switch for a while; this device copy shadowed it and pinned iOS (docs/11 §34).
+# Which guest OS the kernel is built FOR (matches TongHuaQWQ/UniXNU@macos).
+# UNIXNU_XNU_TARGET comes from profiles/os/macos-27.3-uke/profile.toml ("target = macosx"):
+# it sets -DXNU_TARGET_OS_OSX while keeping -miphoneos-version-min so macOS kernel paths
+# (macos-owner-data-firmlinks /System/Volumes/Data, macos-addon-sbin, macos-apfs-boot-shim,
+# macos-app-cryptex) actually compile in under SDKROOT=iphoneos.
+case "${UNIXNU_XNU_TARGET:-ios}" in
+  ios) XNU_TARGET_DEFINE=-DXNU_TARGET_OS_IOS ;;
+  macosx) XNU_TARGET_DEFINE=-DXNU_TARGET_OS_OSX ;;
+  *) echo 'UNIXNU_XNU_TARGET must be ios or macosx' >&2; exit 1 ;;
+esac
 DEPLOY_OS=${XNU_DEPLOYMENT_OS:-ios}
 DEPLOY_VERSION=${XNU_DEPLOYMENT_VERSION:-${IOS_VERSION}}
 if [ "$DEPLOY_OS" = macos ]; then
-  DEPLOY_TARGET_FLAGS="-mmacosx-version-min=$DEPLOY_VERSION -DXNU_TARGET_OS_OSX"
+  DEPLOY_TARGET_FLAGS="-mmacosx-version-min=$DEPLOY_VERSION $XNU_TARGET_DEFINE"
   DEPLOY_LINKER_FLAGS="-Wl,-macosx_version_min,$DEPLOY_VERSION"
 else
-  DEPLOY_TARGET_FLAGS="-miphoneos-version-min=$DEPLOY_VERSION -DXNU_TARGET_OS_IOS"
+  DEPLOY_TARGET_FLAGS="-miphoneos-version-min=$DEPLOY_VERSION $XNU_TARGET_DEFINE"
   DEPLOY_LINKER_FLAGS="-Wl,-ios_version_min,$DEPLOY_VERSION"
 fi
 # Apple ships kernelcache.release.* as an LTO build; a non-LTO reconstruction differs wherever Apple
