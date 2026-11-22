@@ -7004,3 +7004,49 @@ a death inside Apple's own reset sequence still names a callback.
 The host side agrees that the controller is alive in device mode: the Linux dmesg shows a new full-speed device
 pulling up and stalling its descriptor reads (`error -32`), which is what a DWC3 with the pullup on and no
 software answering leaves behind. (The `18d1:d00d` "Product: Android" line before it is ABL's fastboot.)
+
+## 103. 2026-11-22: the CI link stopped resolving the storage symbols -- a build-wiring problem, not USB
+
+Runs 44929858813 and 44990888311 (same commit, `a1ffbf4`) both died at "Link the kernel (prelink
+included)", and the two runs of the *previous* commit (`e1cca85`, rounds usb12/usb12b) were green. The
+error is the same set of symbols in both:
+
+    Undefined symbols for architecture arm64e.kernel:
+      "_corecrypto_kext_start"                 referenced from _source_corecrypto14_bootstrap
+      "_mockfs_mountroot"                      referenced from _vfstbllist
+      "_mockfs_vfsops"                         referenced from _vfstbllist
+      "_mockfs_vnodeop_opv_desc"               referenced from _vfs_opv_descs
+      "_native_verified_block_root_authorized" referenced from _load_init_program
+      "_native_verified_block_volume_device"   referenced from _load_init_program
+
+What is already ruled out:
+
+| checked | result |
+| --- | --- |
+| the *bootstrap* pass fails the same way | yes, and that one is tolerated on purpose ("expected without archives"); the green runs show the identical block |
+| the core moved | no -- both runs record `UniXNU` at `8a933afb` |
+| the device tree moved | no -- only `drivers/QcomDwc3/QcomDwc3.cpp` differs between the green and the failing commit |
+| the ABI fixture is stale | no -- fixture `kernelcache_sha256` = board pin = `d1003b51…` |
+
+One real drift shows up in the same area: `board.toml` says of the source storage entry
+
+    The archive it writes is {tree}/build/sheng-source-storage/libShengSourceStorage.a, which
+    CONFIG_XNU_EXTRA_LD_ARCHIVES force-loads
+
+but the key in `configs/uke-macos_defconfig:241` force-loads only three archives -- `uke-ufs-log`,
+`software-aes` and `qcom-dwc3`. The archives that define the six symbols above are
+`build/mockfs-fixture/libmockfs_fixture.a`, `build/corecrypto-2023/libcorecrypto_kernel_noasm*.a` and
+`build/sheng-source-storage/libShengSourceStorage.a` (see `build-mockfs-fixture.py:12`,
+`build-corecrypto-14.py:23,128`, `build-sheng-source-storage.py:110,249`).
+
+Two control builds are running before anything is changed:
+
+| branch | what it builds | question |
+| --- | --- | --- |
+| `ci-b306-recheck` | exactly `e1cca85`, the commit whose two runs were green | is the tree now broken for a cold build, i.e. were those two green runs only green because the CI cache never relinked? |
+| `ci-b305-metaread` | this round's diagnostics *without* the one new link-level construct (`OSTypeAlloc(AppleUSBXDCI)`, which instantiates an abstract class from libkern's side) | does the metaclass-read image build at all? |
+
+If `ci-b306` fails too, the answer is "the storage archives were never wired into the force-load list and
+the green runs were a cache artifact", and the fix belongs to `CONFIG_XNU_EXTRA_LD_ARCHIVES` (three
+entries), not to the USB code. If `ci-b305` builds and `ci-b306` fails, the probe was the culprit and it is
+already removed.
