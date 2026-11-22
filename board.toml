@@ -1046,7 +1046,10 @@ root_match_volume_uuid = "84581E99-85BE-4957-AC53-2947E887B3E4"
 # mount(8) phase 1 requires a boot manifest hash to name /private/preboot/<hash>.
 # uke has no Apple personalization manifest, so this is an explicit bring-up
 # owner boot-set identity (SHA-384 of "UkeBringup.BootSet.v1\0"), not Apple data.
-boot_manifest_hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5139ec7b580d63ca9319e218962a2236f23faca"
+# Removed: with CONFIG_XNU_OWNER_BOOT_MANIFEST=y, native_owner_publish_boot_manifest() computes and
+# publishes /chosen/boot-manifest-hash + owner-boot-manifest-domain from the verified OS + SystemOS
+# digests and refuses with EAUTH (80) if /chosen/boot-manifest-hash already exists in the ADT.
+# boot_manifest_hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5139ec7b580d63ca9319e218962a2236f23faca"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 packed_data_ramdisk = true
 persistent_data = true               # sheng-data-persist keeps Data writes, so Data is not ephemeral storage
@@ -1138,7 +1141,10 @@ crypto-hash-method = "sha2-384"
 # The boot nonce itself. On Apple silicon iBoot writes it into /chosen and Image4 reads it back through
 # the magazine path; nothing on this board produces one, so the slot read fails for every magazine.
 boot-nonce = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-boot-manifest-hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5139ec7b580d63ca9319e218962a2236f23faca"
+# Must NOT be pre-populated in /chosen when CONFIG_XNU_OWNER_BOOT_MANIFEST=y:
+# native_owner_publish_boot_manifest() publishes it dynamically from the verified OS + SystemOS
+# policies and returns EAUTH (80) if /chosen/boot-manifest-hash is already present.
+# boot-manifest-hash = "5fd2fc139b688ddf071aa815c1ea75d26bcd994a528cf02e365661eab5139ec7b580d63ca9319e218962a2236f23faca"
 
 # /chosen/machine-timeouts: XNU's own watchdog for "preemption was disabled too long". Round b142 tripped
 # it and died at
