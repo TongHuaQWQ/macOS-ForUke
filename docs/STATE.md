@@ -7050,3 +7050,17 @@ If `ci-b306` fails too, the answer is "the storage archives were never wired int
 the green runs were a cache artifact", and the fix belongs to `CONFIG_XNU_EXTRA_LD_ARCHIVES` (three
 entries), not to the USB code. If `ci-b305` builds and `ci-b306` fails, the probe was the culprit and it is
 already removed.
+
+### 103a. The answer from the two controls
+
+Both control builds came back green: `ci-b306-recheck` (exactly the previously green commit) **and**
+`ci-b305-metaread` (this round's diagnostics *without* the base-class probe). Three green builds without
+`OSTypeAlloc(AppleUSBXDCI)` and two red ones with it, same core (`8a933afb`), same tree otherwise. So the
+link failure was caused by that one line: instantiating an abstract class from libkern's side
+(`return new AppleUSBXDCI` inside libkern's `MetaClass::alloc`) pulls Apple's abstract vtable and
+destructor into this archive, and that is what breaks the force-loaded link -- it shows up as the storage
+symbols going undefined, which is why the first reading of the log pointed the wrong way.
+
+That is also worth remembering as a rule: **an archive that only *calls* Apple's classes links fine; one
+that *instantiates* an abstract Apple class does not.** The metaclass reads (`&AppleUSBXDCI::gMetaClass`,
+its size, superclass and name) test the same binding without instantiating anything, and they build.
