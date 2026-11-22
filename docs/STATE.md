@@ -7064,3 +7064,44 @@ symbols going undefined, which is why the first reading of the log pointed the w
 That is also worth remembering as a rule: **an archive that only *calls* Apple's classes links fine; one
 that *instantiates* an abstract Apple class does not.** The metaclass reads (`&AppleUSBXDCI::gMetaClass`,
 its size, superclass and name) test the same binding without instantiating anything, and they build.
+
+## 104. 2026-11-22: the first call into Apple's code landed one section-shift away
+
+The usb13 panel answered the alloc bisect in four lines:
+
+    mark xdci meta self=0xfffffff00c98c9c0 name=QcomDwc3Xdci size=0x2650 super=<Apple>
+    mark xdci base meta at 0xfffffff00cc792e0
+    mark xdci base meta size=0x2650 super=0xfffffff00cc79050 name=AppleUSBXDCI
+    mark xdci ctl alloc -> 0xfffffff54478c540      (control: this port's own IOService subclass)
+    mark xdci alloc                                 -> instruction abort
+
+Three things are settled by that:
+
+* the prelink's **data** binding for AppleUSBXDCI is right -- the metaclass reads back with Apple's own
+  name, with the fixture's `instance_size` 0x2650 and with Apple's superclass;
+* the allocation machinery works at that point (the control object came back non-null);
+* what dies is the first *call* into Apple's code: our generated `QcomDwc3Xdci::QcomDwc3Xdci()` calling
+  `AppleUSBXDCI::AppleUSBXDCI(OSMetaClass const*)`.
+
+The fault pc is 0xfffffff00f7da6a0. The fixture binds that constructor to 0xfffffe000b1ca6a0 and the
+collection slide measured from the metaclass is 0x1f000000000, so the constructor lives at
+0xfffffff00b1ca6a0. The difference:
+
+    crash - correct = 0x4610000 = new __TEXT_EXEC - old __TEXT_EXEC   (kernel.json's segment_layout)
+
+one extra relocation, by exactly the section this kernel's own text is moved by. The trampoline was
+
+    <name>:  bti c ; b <name>.original        with .set <name>.original, <absolute collection address>
+
+and a PC-relative branch to an absolute `.set` is what the linker re-bases with the section. Data
+pointers do not take that path, which is why the metaclass was correct in the very same boot.
+
+Fixed in `scripts/build-qcom-dwc3.py`: the trampoline now loads its target from a baked literal and
+branches through a register (`adrp`/`ldr`/`br x16`, with `<name>.slot: .quad <name>.original` in
+`__DATA_CONST,__const`), i.e. the same UNSIGNED-relocation-against-an-ABS-symbol representation the
+working data binding uses, and position independent so nothing can move it twice. Both bound Apple classes
+(`AppleUSBXDCI` and `AppleUSBXHCI`) share the file, so the host path is fixed by the same change.
+
+**Rule worth keeping**: in this port, an absolute address that is *data* survives the prelink; the same
+address reached by a *direct branch* gets the section's shift added a second time. Anything calling into a
+collection symbol has to go through a pointer.
