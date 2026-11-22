@@ -10,7 +10,7 @@
  #if DEVELOPMENT || DEBUG
  	native_apfs_load_probe();
  	native_mobile_graphics_load_probe();
-@@ -1146,6 +1149,12 @@
+@@ -1146,6 +1149,17 @@
  	kprintf("UKE bluetooth: no driver archive in this kernel (weak stub)\n");
  }
  
@@ -19,6 +19,11 @@
 +{
 +	kprintf("UKE storage: no source storage archive in this kernel (weak stub)\n");
 +}
++
++#if !defined(XNU_OWNER_ROOT_TRUST) || !XNU_OWNER_ROOT_TRUST
++volatile int native_owner_root_accepted = 0;
++volatile dev_t native_owner_root_mount_device = NODEV;
++#endif
 +
  kern_return_t
  bsd_autoconf(void)
