@@ -1,0 +1,25 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -785,6 +785,9 @@
+ 	/* Initialize the file systems. */
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
++	/* Source storage runtime (libShengUfs.a / SourceStorage.cpp) registers NativeUfs and IOMedia. */
++	extern void native_source_storage_start(void);
++	native_source_storage_start();
+ #if DEVELOPMENT || DEBUG
+ 	native_apfs_load_probe();
+ 	native_mobile_graphics_load_probe();
+@@ -1146,6 +1149,12 @@
+ 	kprintf("UKE bluetooth: no driver archive in this kernel (weak stub)\n");
+ }
+ 
++__attribute__((weak)) void
++native_source_storage_start(void)
++{
++	kprintf("UKE storage: no source storage archive in this kernel (weak stub)\n");
++}
++
+ kern_return_t
+ bsd_autoconf(void)
+ {

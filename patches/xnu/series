@@ -205,6 +205,12 @@ zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch
 # uke_usb_probe(), with a weak stub so bootstrap builds without libQcaBluetooth.a still link.
 zzzzzzzzzzzzzzzzzzzz-uke-bluetooth-start.patch
 
+# uke-source-storage-start: call native_source_storage_start() right after vfsinit() in bsd_init(),
+# matching UniXNU-sheng and Allenwdk/UniXNU-uke (source-storage-runtime.patch), with a weak stub so
+# bootstrap builds without libShengUfs.a still link. Without this call site + native-source-storage=1
+# in kernel_args, SourceStorage.cpp/NativeUfs.cpp never start and IOKitBSDInit fails to mount root.
+zzzzzzzzzzzzzzzzzzzzz-uke-source-storage-start.patch
+
 # uke-boot-marks.patch is NOT applied: its uke_mark() calls ml_io_map() at _arm_init+0x34,
 # which is before arm_vm_init() at +0x768, so the bootstrap pmap is not up yet. The official entry
 # probe (patch-xnu-entry-probe.py) asked the same questions without touching the kernel source:

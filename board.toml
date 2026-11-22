@@ -669,11 +669,13 @@ kernel_args = [
   "kt_fixed_zones=120",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",
-  "offline-legacy-unit-scale=2",
+  # Parked while CONFIG_XNU_NATIVE_LEGACY_DISPLAY is off to keep kernel_args well under 1000 bytes
+  # after adding native-source-storage=1, log=1, apfs-boot-shim=1 and bluetooth=1:
+  # "offline-legacy-unit-scale=2",
   "offline-legacy-pm=1",
-  "offline-legacy-validate=1",
-  "offline-legacy-transfer=1",
-  "offline-legacy-cpu-present=1",
+  # "offline-legacy-validate=1",
+  # "offline-legacy-transfer=1",
+  # "offline-legacy-cpu-present=1",
   # own-present (the gpu-framepresent v2/v3 verified set): presentBase resolves
   # the swap record's overlay surface after each SwapEnd and copies it to the
   # GOP. Without this the path is silent and the screen stays on the boot frame
@@ -714,7 +716,9 @@ kernel_args = [
   # stage the owner-built NativeAdrenoMetal bundle (addon blob) into Data so the
   # render server opens a native Metal device; iconservicesagent then keeps
   # CoreImage on that device instead of the null-GL crash loop.
-  "sheng-gpu-addon=1",
+  # Stage the runtime addon into /private/var/ngpu (zzy-native-gpu-addon-mount.patch reads `gpu-addon`,
+  # not `sheng-gpu-addon`; required for Metal, macOS boot shims and Bluetooth firmware/userspace).
+  "gpu-addon=1",
   # Round B14 measures AppleImage4's waits, not the graphics stack: iconservices and the staged-app
   # copy sit past root mount, and the kernel command line is capped at 1000 bytes (it was 987 before
   # the two fileset-wait args below). Restore both once the kext stage is passed.
@@ -734,6 +738,7 @@ kernel_args = [
   "offline-mobile-graphics-client=1",
   "offline-mobile-graphics-load=0",
   "offline-apfs-load=1",
+  "apfs-boot-shim=1",
   "boot-progress=2",
   "-apfs_shared_datavolume",
   "offline-key-events=1",
@@ -796,6 +801,8 @@ kernel_args = [
   # [userdata]), so the window they opened was not the userdata tail at all. This round ships the correct
   # pair plus sheng-log=1, which is the actual test of that channel.
   "sheng-log=1",
+  # NativeUfs.cpp:1801 reads `log=1` (while UkeLastLog.c:924 reads `sheng-log=1`), so pass both.
+  "log=1",
   # The disk log window, back after b261 removed it to pay for uke-platform-error-panic=1.
   # uke-platform-error-panic is gone instead: the GIC-read storm it guarded against was fixed in
   # b262/b263, and a full kernel log in userdata is worth more than a panic on the first ignored
@@ -826,12 +833,17 @@ kernel_args = [
   # stops - or silently passes native-ufs-root=0 behind your back through
   # tools/build-payload-linux.sh:186-189, which is the trap the device side hit on 2026-11-15. The storage
   # round puts this back to 1 together with the policy directory and CONFIG_XNU_NATIVE_UFS.
+  # SourceStorage.cpp:139 requires `native-source-storage=1` (alongside native-ufs-root=1 and the
+  # vfsinit() call site in zzzzzzzzzzzzzzzzzzzzz-uke-source-storage-start.patch) to load IOStorageFamily,
+  # start NativeUfs and publish IOMedia for root mount.
+  "native-source-storage=1",
   "native-ufs-root=1",
   # The payload gate (scripts/unixnu/payload.py:71) demands exactly one `pmgr=2` beside
   # native-ufs-root=1, because the unchanged target AMFI panics with "No PMGR" otherwise. sheng-pmgr
   # stays too: that is the argument package/ShengPlatformPower.cpp reads for our own integration.
   "pmgr=2",
-  "sheng-data-persist=2",
+  # NativeUfs.cpp:1566 reads `data-persist` (not `sheng-data-persist`).
+  "data-persist=2",
   # "sheng-staged-apps=1",   (see the note above: dropped for the 1000-byte command-line cap)
   # sheng-log=1 is OFF for this round, and it is the one variable changed. It is the switch for
   # package/UkeLastLog.c, whose writer is started from the first csr_check and whose transport
