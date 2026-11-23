@@ -521,55 +521,11 @@ void native_legacy_display_probe(void) {
     native_legacy_display_checkpoint();
 }
 void native_legacy_display_late_probe(void);
-extern void native_hid_input_probe(void) __attribute__((weak_import));
 extern void native_keystore_probe(void);
-extern void native_touch_probe(void) __attribute__((weak_import));
-extern void sheng_cpufreq_probe(void) __attribute__((weak_import));
-extern void sheng_thermal_probe(void) __attribute__((weak_import));       // ThermalProbe.cpp, thermal=1
-extern void sheng_thermal_level_probe(void) __attribute__((weak_import)); // ThermalLevel.cpp, thermal-level=1
-extern void sheng_board_clock_probe(void) __attribute__((weak_import));   // BoardClock.cpp, board-clock=<bits>
-extern void sheng_gpu_pool_probe(void) __attribute__((weak_import));      // GpuMemoryPool.cpp, before the GPU driver allocates
-extern void sheng_gpu_power_probe(void) __attribute__((weak_import));
-extern "C" void sheng_video_probe(void) __attribute__((weak_import));
-extern void sheng_wifi_probe(void) __attribute__((weak_import));
-extern void sheng_bluetooth_probe(void) __attribute__((weak_import));
-extern void sheng_usb_probe(void) __attribute__((weak_import));
-extern "C" void sheng_ethernet_probe(void) __attribute__((weak_import));   // macOS builds only (ShengEthernet.cpp)
-extern "C" void sheng_software_aes_probe(void) __attribute__((weak_import));   // macOS builds only (SoftwareAesProbe.cpp)
-extern void sheng_adsp_probe(void) __attribute__((weak_import));
-extern void sheng_battery_probe(void) __attribute__((weak_import));
-extern void sheng_audio_probe(void) __attribute__((weak_import));
-extern void sheng_buttons_probe(void) __attribute__((weak_import));
-extern void sheng_backlight_probe(void) __attribute__((weak_import));
-extern "C" void sheng_keyboard_probe(void) __attribute__((weak_import));
-extern "C" void sheng_sleep_probe(void) __attribute__((weak_import));
-extern "C" void sheng_dpu_probe(void) __attribute__((weak_import));
-// IOKit's busy services while the registry is not quiet: the network configuration names interfaces only once IOKit is quiet (or after its
-// 240 s limit), and the TimeSync clock manager waits for quiet too, so a service whose matching never ends holds up the network, TimeSync
-// and everything waiting on them (macOS run28: en0 named after 240 s, WindowServer waiting on clocksyncd). Every 10 s for 10 minutes, while
-// the root's busy count is not 0, the busy leaves (a busy service none of whose children is busy) are logged when the set changes: class,
-// name, busy count, and whether the service's own matching has finished.
-extern "C" int boot_kthread_report_nth(const char *prefix, unsigned nth, char *name, unsigned name_size, char *out, unsigned size) __attribute__((weak_import));
 // [0] the latest busy set, [1..3] matching threads that are not idle, for the diagnostic page (BootLog.c).
 extern "C" {char native_iokit_busy_text[4][192];}
 namespace {
-// IOKit's matching threads, once, when the same busy set has stayed for two rounds: which thread holds a service's matching and where.
-void reportConfigThreads() {
-    if (!boot_kthread_report_nth) return;
-    unsigned kept = 1;
-    for (unsigned n = 0, tries = 0; n < 16 && tries < 64; ++tries) {
-        char name[64], where[400];
-        // The kernel task's lock is only tried: a busy lock is taken again a little later.
-        if (boot_kthread_report_nth("IOConfigThread", n, name, sizeof name, where, sizeof where)) {
-            if (n >= 1 && tries > 8) break;
-            IOSleep(5);
-            continue;
-        }
-        IOLog("IOKit matching thread %u %s: %s\n", n, name, where);
-        if (kept < 4) snprintf(native_iokit_busy_text[kept++], sizeof native_iokit_busy_text[0], "T%u %.40s %.140s", n, name, where);
-        ++n;
-    }
-}
+void reportConfigThreads() {}
 void busyReport(void *, wait_result_t) {
     char last[400] = "";
     unsigned same = 0;
@@ -620,30 +576,7 @@ void busyReport(void *, wait_result_t) {
 
 void native_legacy_display_late_probe(void) {
     {thread_t thread = nullptr; if (kernel_thread_start(busyReport, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);}
-    // First: AppleImage4's start already waits for an IOAESAccelerator, holding its expert lock (SoftwareAesProbe.cpp).
-    if (sheng_software_aes_probe) sheng_software_aes_probe();
     native_keystore_probe();
-    if (sheng_cpufreq_probe) sheng_cpufreq_probe();
-    if (sheng_thermal_probe) sheng_thermal_probe();
-    if (sheng_thermal_level_probe) sheng_thermal_level_probe();
-    if (sheng_board_clock_probe) sheng_board_clock_probe();
-    if (sheng_gpu_pool_probe) sheng_gpu_pool_probe();
-    if (sheng_gpu_power_probe) sheng_gpu_power_probe();
-    if (sheng_video_probe) sheng_video_probe();
-    if (native_touch_probe) native_touch_probe();
-    if (sheng_wifi_probe) sheng_wifi_probe();
-    if (sheng_bluetooth_probe) sheng_bluetooth_probe();
-    if (sheng_usb_probe) sheng_usb_probe();
-    if (sheng_ethernet_probe) sheng_ethernet_probe();
-    if (sheng_adsp_probe) sheng_adsp_probe();
-    if (sheng_battery_probe) sheng_battery_probe();
-    if (sheng_audio_probe) sheng_audio_probe();
-    if (sheng_buttons_probe) sheng_buttons_probe();
-    if (sheng_backlight_probe) sheng_backlight_probe();
-    if (sheng_keyboard_probe) sheng_keyboard_probe();
-    if (sheng_sleep_probe) sheng_sleep_probe();
-    if (sheng_dpu_probe) sheng_dpu_probe();
-    if (native_hid_input_probe) native_hid_input_probe();
     IOService *display=pendingLegacyDisplay;if(!display){native_legacy_display_checkpoint();return;}pendingLegacyDisplay=nullptr;
     native_legacy_surface_status=OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
     // The IOSurface root service: iOS and iPadOS name it IOCoreSurfaceRoot; macOS leaves it unnamed, so its name is its class,
