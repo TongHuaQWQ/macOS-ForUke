@@ -41,12 +41,31 @@ jobs:
           path: UniXNU
           submodules: recursive
 
+      - name: Check out the SM7675 SoC layer (feeds.toml sibling source)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > /tmp/sm7675.txt
+          import tomllib
+          d = tomllib.load(open('UniXNU-uke/feeds.toml', 'rb'))
+          s = next(x for x in d['source'] if x['name'] == 'sm7675')
+          print(s['git'])
+          print(s['commit'])
+          PY
+          url=$(sed -n 1p /tmp/sm7675.txt)
+          sha=$(sed -n 2p /tmp/sm7675.txt)
+          git init -q UniXNU-sm7675-common
+          git -C UniXNU-sm7675-common remote add origin "$url"
+          git -C UniXNU-sm7675-common fetch -q --depth 1 origin "$sha" || git -C UniXNU-sm7675-common fetch -q origin
+          git -C UniXNU-sm7675-common checkout -q "$sha"
+
       - name: Host tools
         run: brew install openssl@3 ipsw
 
       - name: Fetch the macOS 27.3 OS member
         working-directory: UniXNU
-        run: ./unixnu ipsw fetch OS -D ../UniXNU-uke | tee /tmp/os-member.txt
+        run: |
+          set -euo pipefail
+          ./unixnu ipsw fetch OS -D ../UniXNU-uke | tee /tmp/os-member.txt
 
       - name: Build the 192 GiB macOS Data seed
         working-directory: UniXNU
