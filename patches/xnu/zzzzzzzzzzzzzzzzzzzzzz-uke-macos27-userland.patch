@@ -1,17 +1,35 @@
 diff --git a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
 --- a/bsd/kern/kern_cs.c
 +++ b/bsd/kern/kern_cs.c
-@@ -805,6 +805,12 @@ csblob_entitlements_dictionary_copy(struct cs_blob *csblob)
+@@ -62,6 +62,7 @@
+ #include <kern/kern_types.h>
+ #include <kern/startup.h>
+ #include <kern/task.h>
++#include <kern/locks.h>
+ 
+ #include <vm/vm_map_xnu.h>
+ #include <vm/pmap.h>
+@@ -796,15 +797,21 @@ csblob_get_code_directory(struct cs_blob *csblob)
+ 	return csblob->csb_cd;
+ }
+ 
++static LCK_GRP_DECLARE(csblob_entitlements_lck_grp, "csblob_entitlements");
++static LCK_MTX_DECLARE(csblob_entitlements_asdict_mtx, &csblob_entitlements_lck_grp);
++
+ void *
+ csblob_entitlements_dictionary_copy(struct cs_blob *csblob)
+ {
+ 	if (!csblob->csb_entitlements) {
+ 		return NULL;
+ 	}
  	if (!amfi) {
  		panic("CoreEntitlements: missing AMFI bridge\n");
  	}
-+	proc_t cur = current_proc();
-+	if (cur && proc_pid(cur) >= 60) {
-+		printf("uke-ent: asdict pid=%d (%s) ent=%p der=%p xml=%p\n",
-+		    proc_pid(cur), proc_best_name(cur), csblob->csb_entitlements,
-+		    csblob->csb_der_entitlements_blob, csblob->csb_entitlements_blob);
-+	}
- 	return amfi->OSEntitlements_asdict(csblob->csb_entitlements);
+-	return amfi->OSEntitlements_asdict(csblob->csb_entitlements);
++	lck_mtx_lock(&csblob_entitlements_asdict_mtx);
++	void *dict = amfi->OSEntitlements_asdict(csblob->csb_entitlements);
++	lck_mtx_unlock(&csblob_entitlements_asdict_mtx);
++	return dict;
  }
  
 diff --git a/bsd/kern/kern_newsysctl.c b/bsd/kern/kern_newsysctl.c
@@ -1231,4 +1249,28 @@ index 5a5574e..75101bc 100644
 +
  #define BCM2837
  #define ARM_ARCH_TIMER
+
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -4397,6 +4397,9 @@ native_sandbox_grant(IOService * service)
+ 		while (at[length] && at[length] != ',') {
+ 			++length;
+ 		}
++		if (length == 1 && at[0] == '*') {
++			return true;
++		}
+ 		/* A process name holds 16 characters, so a longer entry is compared by its first 16. */
+ 		if (length && 0 == strncmp(name, at, length < sizeof(name) - 1 ? length : sizeof(name) - 1)
+ 		    && (length >= sizeof(name) - 1 || name[length] == 0)) {
+@@ -6946,7 +6949,8 @@ native_mobile_graphics_client_probe(void)
+ 		native_mobile_graphics_client_meta = (uintptr_t)client->getMetaClass();
+ 		native_mobile_graphics_client_size = client->getMetaClass()->getClassSize();
+ 		native_mobile_graphics_client_init = client->init();
+-		if (native_mobile_graphics_client_init) {
++		/* macOS 27.3 IOMobileFramebufferUserClient inherits IOUserClient2022; calling legacy 5-arg externalMethod panics. */
++		if (native_mobile_graphics_client_init && !OSDynamicCast(IOUserClient2022, client)) {
+ 			IOExternalMethodArguments arguments = {};
+ 			const uint32_t selectors[] = {90, 0x80000000U, ~0U};
+ 			for (unsigned i = 0; i < 3; i++) {
  

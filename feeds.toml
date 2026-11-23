@@ -36,8 +36,8 @@ commit = "03ec4bc645a023da0db86816ddb87e90d449d8e3"
 [[source]]
 name = "GopFramebuffer"
 kind = "driver"
-git = "https://github.com/Allenwdk/NativeMobileDisplay.git"
-commit = "eadd64adce942f0521a5f6f1985959d902092e4a"
+git = "https://github.com/UniXNU/GopFramebuffer.git"
+commit = "b0d812d578efa2acb005b66f73168891719af09a"
 
 [[source]]
 name = "AdrenoMetal"

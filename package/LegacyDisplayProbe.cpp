@@ -1,38 +1,31 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Bounded offline original lifecycle instrument; no desktop claim.
-// LegacyDisplayProbe.cpp of UniXNU-sheng; the late probe starts sheng's key store and HID probes and this board's
-// VirtIO input, but no longer sheng's CPU frequency, GPU power and touch panel probes, which drive sheng hardware and
-// are not part of this board's archive.
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODeviceTreeSupport.h>
-#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOUserClient.h>
 #include <libkern/c++/OSMetaClass.h>
 #include <libkern/c++/OSSerialize.h>
 #include <libkern/c++/OSData.h>
 #include <kern/task.h>
+#include <kern/thread.h>
 #include <sys/proc.h>
 #include <pexpert/pexpert.h>
 #include <mach/kmod.h>
 #include <machine/machine_routines.h>
 extern "C" kmod_info_t g_kernel_kmod_info;
-/* The panic screen copies its message here (scripts/xnu-panic-screen.c, address resolved by the patcher): the screen parks the
- * panic's CPU but the probe's heartbeat thread keeps running on another one, so the message reaches the log there even when the
- * panel cannot be read and the pram hand-off does not land. */
+/* The panic screen copies its message here (scripts/xnu-panic-screen.c, address resolved by the patcher). */
 extern "C" {volatile char uke_panic_shadow[1024];volatile uint32_t uke_panic_shadow_len;}
 extern "C" void native_legacy_display_static_init(void) __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
 extern "C" IOService *native_legacy_display_allocate(void);
 extern "C" void native_gop_presenter_static_init(void) __asm__("__GLOBAL__sub_I_NativeGOPPresenter.cpp");
 extern "C" IOService *native_gop_presenter_create(void);
-// Present the default framebuffer surface after an overlay-only SwapEnd (offline-legacy-base-present).
-extern "C" void native_legacy_present_base(void *display,unsigned frameSurfaceId);
 static IOService *pendingLegacyDisplay;
 static IOService *activeGOPPresenter,*activeGOPNub;
-// GPU hand-off presenter (sheng-fb-gpu=1, phase 4): lives beside the display driver, which offers it frames instead of copying them.
+// GPU hand-off presenter (fb-gpu=1, phase 4): lives beside the display driver, which offers it frames instead of copying them.
 static IOService *gpuHandoffPresenter;
-extern "C" bool native_gop_gpu_offer(IOService *,void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height);
+extern "C" bool native_gop_gpu_offer(IOService *,void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height,uint32_t format);
 extern "C" void native_gop_presenter_set_source(IOService *presenter,IOService *nub);
 volatile uint32_t native_legacy_gpu_fallbacks,native_legacy_gpu_last_status;
 static IOService *activeLegacyDisplay;
@@ -122,7 +115,16 @@ bool native_legacy_prepare_scanout(void) {
     if(boot_progress_cancel_scanout)boot_progress_cancel_scanout();
     return false;
 }
-__attribute__((noinline)) void native_legacy_display_checkpoint(void) {__asm__ volatile("" ::: "memory");}
+// Every exit of the display probes passes here. A probe that did not publish the display (stage 10) says where it stopped, once
+// per exit: without the display the OS finds no framebuffer, and the stage is otherwise visible only in memory.
+__attribute__((noinline)) void native_legacy_display_checkpoint(void) {
+    __asm__ volatile("" ::: "memory");
+    if(native_legacy_stage==10)return;
+    IOLog("NativeLegacyDisplay: not published: stage %u meta %d init %u surface %d/%u probe %u start %u dt %u scale %d\n",
+          native_legacy_stage,native_legacy_meta_status,native_legacy_init_result,native_legacy_surface_status,
+          native_legacy_surface_found,native_legacy_probe_match,native_legacy_start_result,native_legacy_dt_attached,
+          native_legacy_unit_scale_status);
+}
 __attribute__((noinline)) void native_legacy_gop_mapping_checkpoint(void) {__asm__ volatile("" ::: "memory");}
 __attribute__((noinline)) void native_legacy_client_checkpoint(void) {__asm__ volatile("" ::: "memory");}
 void native_legacy_pm_observed(unsigned stage,IOReturn status,unsigned long ordinal) {
@@ -142,17 +144,20 @@ void native_legacy_surface_rejected(uint64_t width,uint64_t height,uint32_t form
     native_legacy_rej_surface[0]=width;native_legacy_rej_surface[1]=height;native_legacy_rej_surface[2]=format;native_legacy_rej_surface[3]=planes;
     native_legacy_rej_surface[4]=stride;native_legacy_rej_surface[5]=allocation;native_legacy_rej_surface[6]=bytes;
 }
+// The display's request layout (rectangles, masks, options, dimensions, surfaces); the iPadOS 17 one when the display has none.
+extern "C" const unsigned native_legacy_request_layout[6] __attribute__((weak_import));
 static void recordRejectedSwap(unsigned reason,const void *request,const void *surface) {
     const unsigned char *bytes=reinterpret_cast<const unsigned char *>(request);
     if(!bytes)return;
+    static const unsigned ios17[6]={17,81,792,804,816,2624};
+    const unsigned *layout=&native_legacy_request_layout?native_legacy_request_layout:ios17;
     native_legacy_rej_reason=reason;
-    uint64_t surfaces[4]={};memcpy(surfaces,bytes+2624,sizeof(surfaces));
+    uint64_t surfaces[4]={};memcpy(surfaces,bytes+layout[5],sizeof(surfaces));
     for(unsigned i=0;i<4;++i)native_legacy_rej_surfaces[i]=surfaces[i];
-    const unsigned stateOffsets[3]={792,796,800},optionOffsets[3]={804,808,812};
-    for(unsigned i=0;i<3;++i){uint32_t a=0,b=0;memcpy(&a,bytes+stateOffsets[i],4);memcpy(&b,bytes+optionOffsets[i],4);
+    for(unsigned i=0;i<3;++i){uint32_t a=0,b=0;memcpy(&a,bytes+layout[2]+4*i,4);memcpy(&b,bytes+layout[3]+4*i,4);
         native_legacy_rej_state[i]=a;native_legacy_rej_options[i]=b;}
-    uint32_t w=0,h=0;memcpy(&w,bytes+816,4);memcpy(&h,bytes+820,4);native_legacy_rej_size[0]=w;native_legacy_rej_size[1]=h;
-    const unsigned rectOffsets[2]={17,81};
+    uint32_t w=0,h=0;memcpy(&w,bytes+layout[4],4);memcpy(&h,bytes+layout[4]+4,4);native_legacy_rej_size[0]=w;native_legacy_rej_size[1]=h;
+    const unsigned rectOffsets[2]={layout[0],layout[1]};
     for(unsigned r=0;r<2;++r){uint32_t rect[4]={};memcpy(rect,bytes+rectOffsets[r],sizeof(rect));
         for(unsigned i=0;i<4;++i)native_legacy_rej_rects[r][i]=rect[i];}
     char name[32]={};
@@ -181,6 +186,8 @@ void native_legacy_frame_observed(unsigned kind,uint64_t count,uint64_t minx,uin
         native_legacy_frame_stats[n][3]=maxx;native_legacy_frame_stats[n][4]=maxy;
     }
     native_legacy_frame_count=n+1;
+    if(n<NATIVE_LEGACY_FRAMES)
+        printf("sheng-fb: frame %u kind %u: %llu lit pixels in (%llu,%llu)-(%llu,%llu)\n",n,kind,count,minx,miny,maxx,maxy);
 }
 volatile uint32_t native_legacy_frame_colors[8][4];
 volatile uint64_t native_legacy_frame_color_counts[8][4],native_legacy_frame_color_other[8];
@@ -197,11 +204,6 @@ void native_legacy_frame_colors_observed(const uint32_t *colors,const uint64_t *
 struct SwapEvent {uint64_t submitted,offered,done;uint32_t number;};
 static SwapEvent swapEvents[64];static uint32_t swapEventCount;
 extern "C" void native_legacy_swap_stage(unsigned stage) {
-    if(stage==3) {
-        static unsigned kicks;
-        if(++kicks<=4)printf("UKE: kick %u\n",kicks);
-        return;
-    }
     const uint64_t now=probeNowUs();
     uint32_t total=swapEventCount;
     if(stage==0) {
@@ -226,14 +228,39 @@ extern "C" unsigned native_legacy_swap_timeline(char *out,unsigned cap) {
     }
     return at;
 }
+// The display refresh tick (NativeLegacyDisplay, vsync): vsync messages sent, arms, idle stops, late ticks, starts, refresh
+// properties reported at that rate, and the rate.
+static volatile uint64_t vsyncEvents[6];
+static volatile unsigned vsyncHz;
+// Each tick event while the diagnostic export holds a ring (BootDiagExport.c kernel.vsync.bin): (mach time << 3) | event, events as above
+// (0 armed, 1 sent, 2 idle stop, 3 late, 4 started, 5 refresh reported). native_legacy_vsync_count counts every one.
+extern "C" {uint64_t *native_legacy_vsync_ring;volatile uint32_t native_legacy_vsync_count;}
+void native_legacy_vsync_observed(unsigned event,unsigned hz) {
+    if(event<6)vsyncEvents[event]=vsyncEvents[event]+1;
+    vsyncHz=hz;
+    if(uint64_t *ring=native_legacy_vsync_ring) {
+        const uint32_t n=__atomic_fetch_add(&native_legacy_vsync_count,1u,__ATOMIC_RELAXED);
+        ring[n&65535]=(mach_absolute_time()<<3)|(event&7);
+    }
+}
+// What the compositor presents and where each frame goes (NativeLegacyDisplay.cpp native_legacy_formats).
+extern "C" volatile uint32_t native_legacy_formats[10] __attribute__((weak_import));
+// The scanout report: the prepare counters, the refresh tick (sent stays 0 while no client asks for vsync messages: the macOS render server
+// paces itself with its own display timer at the published refresh interval), then the formats: swaps accepted as BGRA/compressed BGRA/half
+// float, refused for their format with the last such format, and the frames' paths: fetched by the display pipes, copied by the GPU client
+// (8-bit/half float), converted by the CPU (8-bit/half float).
 extern "C" unsigned native_legacy_prepare_report(char *out,unsigned cap) {
-    return snprintf(out,cap,"prepare calls=%u failures=%u retried=%u max_attempts=%u waited_ms=%llu",native_legacy_prepare_calls,native_legacy_prepare_failures,
-        native_legacy_prepare_retried,native_legacy_prepare_max_attempts,(unsigned long long)(native_legacy_prepare_wait_us/1000));
+    unsigned at=(unsigned)snprintf(out,cap,"prepare calls=%u failures=%u retried=%u max_attempts=%u waited_ms=%llu vsync hz=%u sent=%llu arms=%llu idle=%llu late=%llu start=%llu refresh=%llu",
+        native_legacy_prepare_calls,native_legacy_prepare_failures,native_legacy_prepare_retried,native_legacy_prepare_max_attempts,
+        (unsigned long long)(native_legacy_prepare_wait_us/1000),vsyncHz,(unsigned long long)vsyncEvents[1],(unsigned long long)vsyncEvents[0],
+        (unsigned long long)vsyncEvents[2],(unsigned long long)vsyncEvents[3],(unsigned long long)vsyncEvents[4],(unsigned long long)vsyncEvents[5]);
+    if(&native_legacy_formats && at<cap) {
+        const volatile uint32_t *f=native_legacy_formats;
+        at+=(unsigned)snprintf(out+at,cap-at," fmt %u/%u/%u no %u:%08x direct %u gpu %u/%u cpu %u/%u",f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7],f[8],f[9]);
+    }
+    return at;
 }
 void native_legacy_swap_validation_observed(bool accepted,unsigned reason,const void *request,const void *surface) {
-    if(native_legacy_swap_validation_calls<8)
-        printf("UKE: swap %u accepted=%u reason=%u surface=%p\n",
-            native_legacy_swap_validation_calls+1,(unsigned)accepted,reason,surface);
     if(accepted)native_legacy_swap_stage(0);
     if(accepted)native_legacy_swap_accepted_count=native_legacy_swap_accepted_count+1;
     else {native_legacy_swap_rejected_count=native_legacy_swap_rejected_count+1;recordRejectedSwap(reason,request,surface);}
@@ -248,41 +275,14 @@ void native_legacy_copy_timing_observed(uint64_t ticks,uint64_t bytes) {
     native_legacy_copy_bytes_last=bytes;native_legacy_copy_bytes_sum=native_legacy_copy_bytes_sum+bytes;
     native_legacy_copy_n=native_legacy_copy_n+1;native_legacy_copy_last=ticks;native_legacy_copy_sum=native_legacy_copy_sum+ticks;
     if(ticks>native_legacy_copy_max)native_legacy_copy_max=ticks;
-}
-// The display refresh tick (NativeLegacyDisplay, sheng-vsync): vsync messages sent, arms, idle stops, late ticks, starts and refresh
-// properties reported at that rate, and the rate. The banner shows the totals with the other display counters.
-static volatile uint64_t vsyncEvents[6];
-static volatile unsigned vsyncHz;
-void native_legacy_vsync_observed(unsigned event,unsigned hz) {
-    if(event<6)vsyncEvents[event]=vsyncEvents[event]+1;
-    vsyncHz=hz;
-}
-extern "C" unsigned native_legacy_vsync_report(char *out,unsigned cap) {
-    return snprintf(out,cap,"vsync hz=%u sent=%llu arms=%llu idle=%llu late=%llu start=%llu refresh=%llu",vsyncHz,
-        (unsigned long long)vsyncEvents[1],(unsigned long long)vsyncEvents[0],(unsigned long long)vsyncEvents[2],
-        (unsigned long long)vsyncEvents[3],(unsigned long long)vsyncEvents[4],(unsigned long long)vsyncEvents[5]);
-}
-// XNU's console switch keeps drawing text into the firmware frame buffer that
-// the display stack now presents over. Once launchd starts a daemon storm the
-// 3200x2136 scroll work can wedge the console and stop every later log line;
-// muting the screen console after the first frame keeps the msgbuf (and the
-// pram ring) alive. Panic text still reaches the pram dump.
-extern "C" int disableConsoleOutput;
-static int native_legacy_console_muted;
-static void native_legacy_mute_console(void) {
-    unsigned enabled=0;
-    PE_parse_boot_argn("offline-legacy-noconsole",&enabled,sizeof(enabled));
-    if(enabled!=1 || native_legacy_console_muted)return;
-    native_legacy_console_muted=1;
-    printf("UKE: screen console muted after the first frame\n");
-    disableConsoleOutput=1;
+    if(native_legacy_copy_n<=32) {
+        uint64_t frequency;__asm__ volatile("mrs %0, cntfrq_el0":"=r"(frequency));
+        printf("sheng-fb: copy %u: %llu bytes in %llu us\n",(unsigned)native_legacy_copy_n,bytes,frequency?ticks*1000000/frequency:0);
+    }
 }
 __attribute__((noinline)) void native_legacy_transfer_observed(IOReturn status,const void *request,uint64_t bytes) {
     native_legacy_transfer_calls=native_legacy_transfer_calls+1;
-    if(native_legacy_transfer_calls<=4)
-        printf("UKE: transfer %u status=%x bytes=%llu\n",
-            native_legacy_transfer_calls,(unsigned)status,(unsigned long long)bytes);
-    if(status==kIOReturnSuccess){native_legacy_swap_stage(2);native_legacy_mute_console();}
+    if(status==kIOReturnSuccess)native_legacy_swap_stage(2);
     native_legacy_transfer_status=status;native_legacy_transfer_request=(uintptr_t)request;native_legacy_transfer_bytes=bytes;
     if(status!=kIOReturnSuccess && boot_progress_stage) {
         char message[120];snprintf(message,sizeof(message),"DISPLAY COPY FAILED status=%08x prepare=%u tries=%u",
@@ -290,8 +290,8 @@ __attribute__((noinline)) void native_legacy_transfer_observed(IOReturn status,c
         boot_progress_stage(message);
     }
 }
-bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *memory,uint64_t stride,uint32_t width,uint32_t height) {
-    return gpuHandoffPresenter && native_gop_gpu_offer(gpuHandoffPresenter,display,memory,stride,width,height);
+bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *memory,uint64_t stride,uint32_t width,uint32_t height,uint32_t format) {
+    return gpuHandoffPresenter && native_gop_gpu_offer(gpuHandoffPresenter,display,memory,stride,width,height,format);
 }
 void native_legacy_gpu_fallback_observed(int status) {
     native_legacy_gpu_last_status=(uint32_t)status;native_legacy_gpu_fallbacks=native_legacy_gpu_fallbacks+1;
@@ -304,9 +304,6 @@ __attribute__((noinline)) void native_legacy_retirement_observed(IOService *disp
     native_legacy_retired_current=current;native_legacy_retired_pending=pending;
     native_legacy_retired_generation=completed;native_legacy_presented_generation=presented;native_legacy_retired_frames=frames;
     native_legacy_retirement_calls=native_legacy_retirement_calls+1;
-    if(native_legacy_retirement_calls<=4)
-        printf("UKE: retire %u generation=%u presented=%u\n",
-            native_legacy_retirement_calls,(unsigned)completed,(unsigned)presented);
 }
 // The display object's properties as they are now (the registration copy above predates setDisplayRefreshProperties and the rest): for the
 // UFS log. Returns the bytes written (NUL-terminated).
@@ -340,7 +337,7 @@ void native_legacy_client_enter(task_t task,uint32_t type) {
 // Every framebuffer user client seen (object, pid), with what it does: the original client's vtable is copied and two entries (externalMethod, slot 168,
 // and registerNotificationPort(port,type,refCon), slot 175) are pointed at wrappers that count and forward to the original function. The original code
 // is not touched; only this object's vptr names the copy. XNU's ARM64 vptr points at slot 0 (the original code dispatches with ldr x8,[vptr,#slot*8]).
-enum {kSeenClients=128,kSelectors=96,kRegEvents=8,kVtableSlots=256};
+enum {kSeenClients=8,kSelectors=96,kRegEvents=8,kVtableSlots=256};
 struct ClientStat {
     uintptr_t object;int pid;uint32_t calls,fails;uint32_t selector_calls[kSelectors],selector_fails[kSelectors],selector_status[kSelectors];
     unsigned regs;struct {uint32_t type;uint64_t port;uint32_t ref,status;} reg[kRegEvents];
@@ -355,119 +352,9 @@ static ClientStat *statFor(IOUserClient *client) {
     for(unsigned i=0;i<seenClientCount;++i)if(seenClients[i].object==(uintptr_t)client)return &seenClients[i];
     return nullptr;
 }
-static void dumpSwapInput(const IOExternalMethodArguments *args) {
-    // What userland actually passes to SwapEnd: size, delivery form and the
-    // first 0x120 bytes. The record layout names the surfaces and the mask the
-    // own-present path would need.
-    if(!args)return;
-    printf("UKE: swap-in size=%u in=%u desc=%u scalar=%u/%u structOut=%u\n",
-        (unsigned)args->structureInputSize,args->structureInput?1u:0u,
-        args->structureInputDescriptor?1u:0u,
-        (unsigned)args->scalarInputCount,(unsigned)args->scalarOutputCount,
-        (unsigned)args->structureOutputSize);
-    const unsigned char *p=reinterpret_cast<const unsigned char *>(args->structureInput);
-    unsigned n=args->structureInputSize;
-    if(!p||!n)return;
-    // 0x360 covers every field the original swap_submit reads (the last is the
-    // per-layer flag block ending at +0x351); 0x120 only reached the header.
-    if(n>0x360)n=0x360;
-    for(unsigned off=0;off<n;off+=32) {
-        char line[160];unsigned at=snprintf(line,sizeof(line),"UKE: swap+%03x",off);
-        for(unsigned k=0;k<32&&off+k+4<=n;k+=4) {
-            if(at+12>=sizeof(line))break;
-            uint32_t v;memcpy(&v,p+off+k,4);
-            at+=snprintf(line+at,sizeof(line)-at," %08x",v);
-        }
-        printf("%s\n",line);
-    }
-}
-static void dumpSwapQueue(const char *tag,unsigned nth,IOReturn status) {
-    // The original current/pending pointers, the active-list head the SwapEnd
-    // gate action walks (+5496) and the family state words, including the
-    // +5840 powered word.
-    const unsigned char *object=reinterpret_cast<const unsigned char *>(native_legacy_object);
-    uint64_t current=0,head=0,active=0;uint32_t state[10]={};
-    if(object) {
-        memcpy(&current,object+5472,8);memcpy(&head,object+5480,8);memcpy(&active,object+5496,8);
-        for(unsigned k=0;k<10;++k)memcpy(&state[k],object+5808+4*k,4);
-    }
-    printf("UKE: %s %u status=%x current=%llx head=%llx active=%llx state=%x/%x/%x/%x/%x/%x/%x/%x/%x/%x\n",
-        tag,nth,(unsigned)status,(unsigned long long)current,(unsigned long long)head,
-        (unsigned long long)active,
-        state[0],state[1],state[2],state[3],state[4],state[5],state[6],state[7],state[8],state[9]);
-}
 static IOReturn wrappedExternal(IOUserClient *client,uint32_t selector,IOExternalMethodArguments *args,IOExternalMethodDispatch *dispatch,OSObject *target,void *ref) {
     ClientStat *stat=statFor(client);
-    unsigned calls=(stat && selector<kSelectors)?stat->selector_calls[selector]:0;
-    bool traced=stat && selector<kSelectors && calls<2;
-    if(traced)printf("UKEMEM: sel %u enter calls=%u\n",(unsigned)selector,calls+1);
-    // Selector 12 enters the original request_power_change transition, which
-    // has no platform driver behind it on this GOP-lit panel; acknowledge it.
-    // Selector 6 (SwapWait) is forwarded: with the powered word set it may be
-    // the call that submits the staged swap to the framebuffer queue.
-    if(stat && selector==12) {
-        if(selector<kSelectors){++stat->selector_calls[selector];stat->selector_status[selector]=(uint32_t)kIOReturnSuccess;}
-        ++stat->calls;
-        if(traced)printf("UKEMEM: sel %u exit 0 (suppressed)\n",(unsigned)selector);
-        return kIOReturnSuccess;
-    }
-    if(stat && selector==5 && stat->selector_calls[5]<2) {
-        // The original SwapEnd gate action consumes the request from the
-        // +5496 list before returning, so dump and drive the queue first.
-        dumpSwapQueue("swap-before",stat->selector_calls[5]+1,kIOReturnSuccess);
-        void *display=reinterpret_cast<void *>((uintptr_t)native_legacy_object);
-        if(display) {
-            void **vptr=*reinterpret_cast<void ***>(display);
-            typedef void (*Kick)(void *);
-            if(vptr && vptr[290]) {
-                printf("UKE: self-kick\n");
-                reinterpret_cast<Kick>(vptr[290])(display);
-            }
-        }
-        dumpSwapInput(args);
-    }
-    // The original swap_end rejects any structureInputSize but 1288 (0x508)
-    // before swap_submit can run, and this userland builds a 1200-byte record:
-    // every swap then died as `accepted=0 reason=2 surface=0` because the
-    // request's surface slots (+2624) were never translated from the record's
-    // per-layer IDs (+0x9c). Every record field swap_submit reads lives below
-    // 1200, so pad a kernel copy up to the expected size and let the original
-    // path translate and present it; offline-legacy-swap-pad=0 disables.
-    void *swapPad=nullptr;const void *swapSavedInput=nullptr;uint32_t swapSavedSize=0;
-    unsigned swapPadEnabled=1;PE_parse_boot_argn("offline-legacy-swap-pad",&swapPadEnabled,sizeof(swapPadEnabled));
-    if(stat && selector==5 && swapPadEnabled!=0 && args && args->structureInput &&
-       args->structureInputSize>=0x9c && args->structureInputSize<0x508) {
-        swapPad=IOMalloc(0x508);
-        if(swapPad) {
-            memset(swapPad,0,0x508);
-            memcpy(swapPad,args->structureInput,args->structureInputSize);
-            swapSavedInput=args->structureInput;swapSavedSize=args->structureInputSize;
-            args->structureInput=swapPad;args->structureInputSize=0x508;
-            static unsigned swapPadLogged;
-            if(swapPadLogged<4){++swapPadLogged;
-                printf("UKE: swap-in size=%u padded to 1288\n",(unsigned)swapSavedSize);}
-        }
-    }
-    unsigned frameSurfaceId=0;
-    if(stat && selector==5 && args && args->structureInput && args->structureInputSize>=0x150) {
-        // The transaction's real pixels: the first enabled record layer carrying a surface ID.
-        // The family's translation loop only covers layers 0..3, so an overlay layer above it
-        // never resolves inside the original SwapEnd; presentBase resolves it separately.
-        const unsigned char *record=reinterpret_cast<const unsigned char *>(args->structureInput);
-        uint32_t mask=0;memcpy(&mask,record+0x14c,4);
-        for(unsigned layer=0;layer<8 && 0x9c+layer*4+4<=args->structureInputSize;++layer)
-            if(mask&(1u<<layer)) {uint32_t id=0;memcpy(&id,record+0x9c+layer*4,4);if(id){frameSurfaceId=id;break;}}
-    }
     IOReturn status=stat?reinterpret_cast<ExternalFn>(stat->original_external)(client,selector,args,dispatch,target,ref):kIOReturnNotAttached;
-    if(swapPad) {args->structureInput=swapSavedInput;args->structureInputSize=swapSavedSize;IOFree(swapPad,0x508);}
-    // The transaction updates overlays only (its record layers carry no surfaces and the original
-    // SwapEnd has already retired the request); the frame lives in the overlay surface the record
-    // names (or the default framebuffer surface), so copy it now that the original path is done.
-    if(stat && selector==5 && status==kIOReturnSuccess)
-        native_legacy_present_base(reinterpret_cast<void *>((uintptr_t)native_legacy_object),frameSurfaceId);
-    if(traced)printf("UKEMEM: sel %u exit %x\n",(unsigned)selector,(unsigned)status);
-    if(stat && selector==5 && stat->selector_calls[5]<3) dumpSwapQueue("swap-end",stat->selector_calls[5]+1,status);
-    if(stat && selector==6 && stat->selector_calls[6]<3) dumpSwapQueue("swap-wait",stat->selector_calls[6]+1,status);
     if(stat) {
         if(selector==6 && args && args->scalarInput && args->scalarInputCount>=3) {
             const uint64_t *in=args->scalarInput;
@@ -495,11 +382,11 @@ static IOReturn wrappedRegister(IOUserClient *client,mach_port_t port,UInt32 typ
     return status;
 }
 static void interpose(IOUserClient *client,int pid) {
-    if(seenClientCount>=kSeenClients) {
-        static int logged;
-        if(!logged){logged=1;printf("UKEMEM: client table full (%u); power selectors are no longer suppressed\n",(unsigned)seenClientCount);}
-        return;
-    }
+#if __has_feature(ptrauth_calls)
+    // The vtable pointer and its entries are signed: a copied vtable would not authenticate. Clients are not interposed.
+    (void)client;(void)pid;return;
+#endif
+    if(seenClientCount>=kSeenClients)return;
     ClientStat &stat=seenClients[seenClientCount];
     memset(&stat,0,sizeof stat);
     uintptr_t *vtable=*reinterpret_cast<uintptr_t **>(client);
@@ -547,19 +434,6 @@ void native_legacy_client_observed(IOReturn status,IOUserClient *client) {
     if(client && !status)interpose(client,native_legacy_client_pid);
     native_legacy_client_status=status;native_legacy_client_object=(uintptr_t)client;
     if(client)strlcpy(native_legacy_client_class,client->getMetaClass()->getClassName(),sizeof(native_legacy_client_class));
-    {
-        // Adoption state at the moment a client opens: the +0x1618 default
-        // surface and the +0x1620 temporary one the original slot299 created.
-        void *surface=nullptr,*temp=nullptr;uint32_t sid=0;
-        const unsigned char *object=reinterpret_cast<const unsigned char *>(native_legacy_object);
-        if(object) {
-            memcpy(&surface,object+0x1618,sizeof(surface));
-            memcpy(&temp,object+0x1620,sizeof(temp));
-        }
-        if(temp)memcpy(&sid,reinterpret_cast<const unsigned char *>(temp)+0x10,sizeof(sid));
-        printf("UKE: display client status=%x pid=%d surface=%p temp=%p sid=%u\n",
-            (unsigned)status,native_legacy_client_pid,surface,temp,(unsigned)sid);
-    }
     native_legacy_client_checkpoint();
 }
 __attribute__((noinline)) bool native_legacy_gop_mapping_observed(IOService *object,IOMemoryMap *mapping,uint32_t width,uint32_t height) {
@@ -647,122 +521,141 @@ void native_legacy_display_probe(void) {
     native_legacy_display_checkpoint();
 }
 void native_legacy_display_late_probe(void);
+extern void native_hid_input_probe(void) __attribute__((weak_import));
 extern void native_keystore_probe(void);
-extern void native_hid_input_probe(void);
-extern void native_virtio_input_probe(void);
-extern void native_shared_window_probe(void);
-extern void native_qemu_metal_publish(void);
-// The GPU branch's board probes: sheng_gpu_power_probe is strong only with
-// CONFIG_XNU_NATIVE_ADRENO; the stub archive supplies a weak no-op otherwise.
-extern void sheng_cpufreq_probe(void);
-extern void sheng_gpu_power_probe(void);
-extern void native_touch_probe(void);
-// The official USB route used to be started from here. It is not any more: this function is called by
-// patches/xnu/offline-legacy-start.patch, whose call site is compiled only with XNU_NATIVE_LEGACY_DISPLAY,
-// and configs/uke-macos_defconfig leaves that off -- so on b251-usbdwc3 this whole function did not exist in
-// the kernel and the driver was never started. uke_usb_probe() now runs from bsd_autoconf()
-// (patches/xnu/zzzzzzzzzzzzzzzzzzz-uke-usb-start.patch), before this file's display work and independent of it.
-// The DPU track's read-only snapshot and controlled-pipe test (package/DpuProbe.cpp):
-// a thread that waits for the firmware's scanout and then reads or (only with
-// uke-dpu-test=<n>) briefly writes the live pipes. Default off.
-extern "C" void native_dpu_probe(void);
-// Default framebuffer surface bring-up (offline-legacy-default-surface=1).
-// The original Legacy class reads the platform enable byte at +0x1780 and,
-// when set, creates a temporary surface at +0x1620 in slot 299. Only the absent
-// platform driver ever installs the default surface at +0x1618, so adopt the
-// created surface there and let the original slot 174/242 produce the
-// IOSurfaceID and Mach port name.
-static void native_legacy_default_surface_state(IOService *display,unsigned mode) {
-    const bool adopt=mode!=0;
-    unsigned char *fb=reinterpret_cast<unsigned char *>(display);
-    if(!fb)return;
-    void *root=nullptr,*gate=nullptr,*workloop=nullptr,*surface=nullptr,*temp=nullptr,*region=nullptr;
-    memcpy(&root,fb+0x1600,sizeof(root));
-    memcpy(&gate,fb+0x1608,sizeof(gate));
-    memcpy(&workloop,fb+0x1610,sizeof(workloop));
-    memcpy(&surface,fb+0x1618,sizeof(surface));
-    memcpy(&temp,fb+0x1620,sizeof(temp));
-    memcpy(&region,fb+0x17c0,sizeof(region));
-    uint32_t flag=fb[0x1780],width=0,height=0,format=0,planes=0,bpp=0,sid=0;
-    memcpy(&width,fb+0x16b0,sizeof(width));
-    memcpy(&height,fb+0x16b4,sizeof(height));
-    memcpy(&format,fb+0x1700,sizeof(format));
-    memcpy(&planes,fb+0x1704,sizeof(planes));
-    memcpy(&bpp,fb+0x1708,sizeof(bpp));
-    void *tempRegion=nullptr,*tempDescriptor=nullptr;
-    if(temp) {
-        memcpy(&sid,reinterpret_cast<unsigned char *>(temp)+0x10,sizeof(sid));
-        memcpy(&tempRegion,reinterpret_cast<unsigned char *>(temp)+0x28,sizeof(tempRegion));
-        memcpy(&tempDescriptor,reinterpret_cast<unsigned char *>(temp)+0x30,sizeof(tempDescriptor));
-    }
-    // The compositor's 0x1A22000-byte region is the surface allocation (0x1A13000) plus 0xF000; the mapping it
-    // receives is the +0x30 descriptor, not +0x90. Log both descriptor lengths next to the allocation so the next
-    // report can tell a short mapping from the compositor's own buffer.
-    uint64_t tempDescriptorBytes=0,tempRegionBytes=0;
-    if(tempDescriptor) tempDescriptorBytes=reinterpret_cast<IOMemoryDescriptor *>(tempDescriptor)->getLength();
-    if(tempRegion) tempRegionBytes=reinterpret_cast<IOMemoryDescriptor *>(tempRegion)->getLength();
-    // The adopted surface outlives the legacy display's stop: hold its memory descriptors so the compositor's
-    // user mapping never points at freed pages (pmap_assert_free at the boot-log -> UI hand-off).
-    if(tempRegion) reinterpret_cast<OSObject *>(tempRegion)->retain();
-    if(tempDescriptor) reinterpret_cast<OSObject *>(tempDescriptor)->retain();
-    IOLog("UKE: display surface root=%p gate=%p wl=%p surface=%p temp=%p region=%p flag=%u dims=%ux%u mode=%08x/%u/%u sid=%u mem=%p desc=%p descbytes=%llu regionbytes=%llu debugger=%u\n",
-        root,gate,workloop,surface,temp,region,(unsigned)flag,(unsigned)width,(unsigned)height,
-        (unsigned)format,(unsigned)planes,(unsigned)bpp,(unsigned)sid,tempRegion,tempDescriptor,
-        (unsigned long long)tempDescriptorBytes,(unsigned long long)tempRegionBytes,
-        (unsigned)PE_i_can_has_debugger(NULL));
-    // Surface geometry the compositor maps: stride at +0x68, format at +0x80,
-    // allocation at +0x90. Shown as the raw words so a wrong width cannot hide
-    // the values, next to the GOP framebuffer geometry it is copied into.
-    uint32_t fields[16]={};
-    if(temp) for(unsigned k=0;k<16;++k) memcpy(&fields[k],reinterpret_cast<unsigned char *>(temp)+0x60+4*k,4);
-    PE_Video gop={};PE_current_console(&gop);
-    IOLog("UKE: surface fields +60 %08x %08x %08x %08x %08x %08x %08x %08x +80 %08x %08x %08x %08x %08x %08x %08x %08x gop=%ux%u rb=%u d=%u\n",
-        fields[0],fields[1],fields[2],fields[3],fields[4],fields[5],fields[6],fields[7],
-        fields[8],fields[9],fields[10],fields[11],fields[12],fields[13],fields[14],fields[15],
-        (unsigned)gop.v_width,(unsigned)gop.v_height,(unsigned)gop.v_rowBytes,(unsigned)gop.v_depth);
-    if(adopt && !surface && temp) {
-        ((OSObject *)temp)->retain();
-        memcpy(fb+0x1618,&temp,sizeof(temp));
-        IOLog("UKE: display surface adopted surface=%p sid=%u\n",temp,(unsigned)sid);
-    }
-    // The compositor writes a 64-byte trailer past the last pixel and the
-    // exported mapping measures 0xF000 past the allocation, so give the
-    // surface one guard page.
-    if(temp) {
-        uint64_t allocation=0;
-        memcpy(&allocation,reinterpret_cast<unsigned char *>(temp)+0x90,8);
-        if(allocation && allocation<=0x1A14000ull) {
-            uint64_t padded=allocation+0x1000;
-            memcpy(reinterpret_cast<unsigned char *>(temp)+0x90,&padded,8);
-            IOLog("UKE: surface allocation %llu -> %llu (guard)\n",(unsigned long long)allocation,(unsigned long long)padded);
+extern void native_touch_probe(void) __attribute__((weak_import));
+extern void sheng_cpufreq_probe(void) __attribute__((weak_import));
+extern void sheng_thermal_probe(void) __attribute__((weak_import));       // ThermalProbe.cpp, thermal=1
+extern void sheng_thermal_level_probe(void) __attribute__((weak_import)); // ThermalLevel.cpp, thermal-level=1
+extern void sheng_board_clock_probe(void) __attribute__((weak_import));   // BoardClock.cpp, board-clock=<bits>
+extern void sheng_gpu_pool_probe(void) __attribute__((weak_import));      // GpuMemoryPool.cpp, before the GPU driver allocates
+extern void sheng_gpu_power_probe(void) __attribute__((weak_import));
+extern "C" void sheng_video_probe(void) __attribute__((weak_import));
+extern void sheng_wifi_probe(void) __attribute__((weak_import));
+extern void sheng_bluetooth_probe(void) __attribute__((weak_import));
+extern void sheng_usb_probe(void) __attribute__((weak_import));
+extern "C" void sheng_ethernet_probe(void) __attribute__((weak_import));   // macOS builds only (ShengEthernet.cpp)
+extern "C" void sheng_software_aes_probe(void) __attribute__((weak_import));   // macOS builds only (SoftwareAesProbe.cpp)
+extern void sheng_adsp_probe(void) __attribute__((weak_import));
+extern void sheng_battery_probe(void) __attribute__((weak_import));
+extern void sheng_audio_probe(void) __attribute__((weak_import));
+extern void sheng_buttons_probe(void) __attribute__((weak_import));
+extern void sheng_backlight_probe(void) __attribute__((weak_import));
+extern "C" void sheng_keyboard_probe(void) __attribute__((weak_import));
+extern "C" void sheng_sleep_probe(void) __attribute__((weak_import));
+extern "C" void sheng_dpu_probe(void) __attribute__((weak_import));
+// IOKit's busy services while the registry is not quiet: the network configuration names interfaces only once IOKit is quiet (or after its
+// 240 s limit), and the TimeSync clock manager waits for quiet too, so a service whose matching never ends holds up the network, TimeSync
+// and everything waiting on them (macOS run28: en0 named after 240 s, WindowServer waiting on clocksyncd). Every 10 s for 10 minutes, while
+// the root's busy count is not 0, the busy leaves (a busy service none of whose children is busy) are logged when the set changes: class,
+// name, busy count, and whether the service's own matching has finished.
+extern "C" int boot_kthread_report_nth(const char *prefix, unsigned nth, char *name, unsigned name_size, char *out, unsigned size) __attribute__((weak_import));
+// [0] the latest busy set, [1..3] matching threads that are not idle, for the diagnostic page (BootLog.c).
+extern "C" {char native_iokit_busy_text[4][192];}
+namespace {
+// IOKit's matching threads, once, when the same busy set has stayed for two rounds: which thread holds a service's matching and where.
+void reportConfigThreads() {
+    if (!boot_kthread_report_nth) return;
+    unsigned kept = 1;
+    for (unsigned n = 0, tries = 0; n < 16 && tries < 64; ++tries) {
+        char name[64], where[400];
+        // The kernel task's lock is only tried: a busy lock is taken again a little later.
+        if (boot_kthread_report_nth("IOConfigThread", n, name, sizeof name, where, sizeof where)) {
+            if (n >= 1 && tries > 8) break;
+            IOSleep(5);
+            continue;
         }
-    }
-    // Opt-in CA mapping experiment (offline-legacy-default-surface=2): the surface's +0x30 descriptor is what the
-    // display exports; the compositor's 0x1A22000-byte region is the allocation (0x1A13000) plus 0xF000. Map the
-    // 32 MiB seed region instead so the compositor's trailer page is covered. Mode 1 keeps the adopted descriptor.
-    if(temp && region && mode==2 && tempDescriptor!=region) {
-        OSObject *mapping=reinterpret_cast<OSObject *>(region);
-        mapping->retain();
-        memcpy(reinterpret_cast<unsigned char *>(temp)+0x30,&region,sizeof(region));
-        IOLog("UKE: surface mapping -> region %p bytes=%llu (mode 2)\n",region,
-            (unsigned long long)reinterpret_cast<IOMemoryDescriptor *>(region)->getLength());
+        IOLog("IOKit matching thread %u %s: %s\n", n, name, where);
+        if (kept < 4) snprintf(native_iokit_busy_text[kept++], sizeof native_iokit_busy_text[0], "T%u %.40s %.140s", n, name, where);
+        ++n;
     }
 }
+void busyReport(void *, wait_result_t) {
+    char last[400] = "";
+    unsigned same = 0;
+    bool threadsShown = false;
+    for (unsigned round = 1; round <= 60; ++round) {
+        IOSleep(10000);
+        IOService *root = IOService::getServiceRoot();
+        const UInt32 busy = root ? root->getBusyState() : 0;
+        char line[400];
+        int at = snprintf(line, sizeof line, "IOKit busy %u:", (unsigned)busy);
+        unsigned shown = 0;
+        if (busy) {
+            if (IORegistryIterator *it = IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively)) {
+                while (OSObject *object = it->getNextObject()) {
+                    IOService *service = OSDynamicCast(IOService, object);
+                    if (!service || !service->getBusyState()) continue;
+                    bool busyChild = false;
+                    if (OSIterator *children = service->getChildIterator(gIOServicePlane)) {
+                        while (OSObject *child = children->getNextObject()) {
+                            IOService *c = OSDynamicCast(IOService, child);
+                            if (c && c->getBusyState()) {busyChild = true; break;}
+                        }
+                        children->release();
+                    }
+                    if (busyChild) continue;
+                    if (at < (int)sizeof line - 2)
+                        at += snprintf(line + at, sizeof line - at, " %s(%s,%u,%c)", service->getName(), service->getMetaClass()->getClassName(),
+                                       (unsigned)service->getBusyState(), (service->getState() & kIOServiceMatchedState) ? 'm' : '-');
+                    if (++shown >= 8) break;
+                }
+                it->release();
+            }
+        }
+        if (strcmp(line, last)) {
+            IOLog("%s\n", line);
+            strlcpy(last, line, sizeof last);
+            snprintf(native_iokit_busy_text[0], sizeof native_iokit_busy_text[0], "%u s %.170s", round * 10, line);
+            same = 0;
+        } else if (busy && ++same == 2 && !threadsShown) {
+            threadsShown = true;
+            reportConfigThreads();
+        }
+        if (!busy && round > 3) break;
+    }
+    thread_terminate(current_thread());
+}
+}  // namespace
+
 void native_legacy_display_late_probe(void) {
-    unsigned defaultSurface=0;
-    PE_parse_boot_argn("offline-legacy-default-surface",&defaultSurface,sizeof(defaultSurface));
+    {thread_t thread = nullptr; if (kernel_thread_start(busyReport, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);}
+    // First: AppleImage4's start already waits for an IOAESAccelerator, holding its expert lock (SoftwareAesProbe.cpp).
+    if (sheng_software_aes_probe) sheng_software_aes_probe();
     native_keystore_probe();
-    sheng_cpufreq_probe();
-    sheng_gpu_power_probe();
-    native_dpu_probe();
-    native_touch_probe();
-    native_hid_input_probe();
-    native_virtio_input_probe();
-    native_shared_window_probe();
-    native_qemu_metal_publish();
-    IOService *display=pendingLegacyDisplay;if(!display)return;pendingLegacyDisplay=nullptr;
+    if (sheng_cpufreq_probe) sheng_cpufreq_probe();
+    if (sheng_thermal_probe) sheng_thermal_probe();
+    if (sheng_thermal_level_probe) sheng_thermal_level_probe();
+    if (sheng_board_clock_probe) sheng_board_clock_probe();
+    if (sheng_gpu_pool_probe) sheng_gpu_pool_probe();
+    if (sheng_gpu_power_probe) sheng_gpu_power_probe();
+    if (sheng_video_probe) sheng_video_probe();
+    if (native_touch_probe) native_touch_probe();
+    if (sheng_wifi_probe) sheng_wifi_probe();
+    if (sheng_bluetooth_probe) sheng_bluetooth_probe();
+    if (sheng_usb_probe) sheng_usb_probe();
+    if (sheng_ethernet_probe) sheng_ethernet_probe();
+    if (sheng_adsp_probe) sheng_adsp_probe();
+    if (sheng_battery_probe) sheng_battery_probe();
+    if (sheng_audio_probe) sheng_audio_probe();
+    if (sheng_buttons_probe) sheng_buttons_probe();
+    if (sheng_backlight_probe) sheng_backlight_probe();
+    if (sheng_keyboard_probe) sheng_keyboard_probe();
+    if (sheng_sleep_probe) sheng_sleep_probe();
+    if (sheng_dpu_probe) sheng_dpu_probe();
+    if (native_hid_input_probe) native_hid_input_probe();
+    IOService *display=pendingLegacyDisplay;if(!display){native_legacy_display_checkpoint();return;}pendingLegacyDisplay=nullptr;
     native_legacy_surface_status=OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
-    OSDictionary *matching=IOService::nameMatching("IOCoreSurfaceRoot");
+    // The IOSurface root service: iOS and iPadOS name it IOCoreSurfaceRoot; macOS leaves it unnamed, so its name is its class,
+    // IOSurfaceRoot. IONameMatch takes either.
+    OSDictionary *matching=OSDictionary::withCapacity(1);
+    {
+        const OSObject *names[]={OSString::withCString("IOCoreSurfaceRoot"),OSString::withCString("IOSurfaceRoot")};
+        OSArray *list=names[0] && names[1]?OSArray::withObjects(names,2):nullptr;
+        if(!matching || !list || !matching->setObject(gIONameMatchKey,list))OSSafeReleaseNULL(matching);
+        OSSafeReleaseNULL(list);
+        for(const OSObject *name:names)if(name)name->release();
+    }
     IOService *surface=matching?IOService::waitForMatchingService(matching,5000000000ULL):nullptr;
     native_legacy_surface_found=surface!=nullptr;OSSafeReleaseNULL(surface);OSSafeReleaseNULL(matching);
     PE_Video video={};
@@ -774,7 +667,8 @@ void native_legacy_display_late_probe(void) {
         // A real firmware framebuffer resource, with addresses and extent
         // obtained from the actual GOP handoff. It has no invented compatible,
         // display list, panel timing, GPU/fence completion or vendor registers.
-        native_legacy_stage=4;IOPlatformDevice *nub=new IOPlatformDevice;
+        // A plain service: an IOPlatformDevice expects the platform expert as its provider (compareName calls it), not the resources.
+        native_legacy_stage=4;IOService *nub=new IOService;
         native_legacy_nub=(uintptr_t)nub;bool nubAttached=false,nubStarted=false,attached=false,started=false;
         IORegistryEntry *displayTreeParent=nullptr;bool dtAttached=false;
         IOService *parent=IOService::getResourceService();
@@ -782,12 +676,19 @@ void native_legacy_display_late_probe(void) {
         OSArray *ranges=OSArray::withCapacity(1);
         if(nub && memory && ranges && parent && nub->init()) {
             ranges->setObject(memory);nub->setDeviceMemory(ranges);nub->setName("NativeGOPFramebuffer");
+            // Xiaomi Pad 7 (uke) panel density: 11.2 inch, 3200 x 2136 -> 345 DPI.
+            // Without dot-pitch WindowServer sees a 0 x 0 inch panel and picks unscaled 3200 x 2136;
+            // with 345 DPI it picks the crisp 2x Retina mode (1600 x 1068 points).
+            {
+                const uint32_t dotsPerInch=345;
+                if(OSData *pitch=OSData::withBytes(&dotsPerInch,sizeof(dotsPerInch))){nub->setProperty("dot-pitch",pitch);pitch->release();}
+            }
             nubAttached=nub->attach(parent);if(nubAttached)nubStarted=nub->start(parent);
             if(nubStarted) {
                 unsigned phase=0;PE_parse_boot_argn("offline-legacy-phase",&phase,sizeof(phase));
                 if(phase==4) {
                     // This is the actually implemented GOP display subsystem,
-                    // attached to its real IOPlatformDevice memory resource.
+                    // attached to its real firmware framebuffer memory resource.
                     // No Apple/vendor compatible or panel timing is supplied.
                     displayTreeParent=IORegistryEntry::fromPath("/arm-io",gIODTPlane);
                     const char type[]="display-subsystem";OSData *data=OSData::withBytes(type,sizeof(type));
@@ -806,44 +707,11 @@ void native_legacy_display_late_probe(void) {
                 } else {
                     SInt32 score=0;native_legacy_probe_match=(phase!=4 || dtAttached) && display->probe(nub,&score)==display;
                     if(native_legacy_probe_match)attached=display->attach(nub);
-                    if(attached){
-                        if(defaultSurface) {
-                            unsigned char *fb=reinterpret_cast<unsigned char *>(display);
-                            // The original create_default_fb_surface asks the
-                            // IOSurfaceRoot for PurpleGfxMem, which only the absent
-                            // platform/GPU driver provides. Without it the surface's
-                            // +0x28 stays null and layout_buffers faults at
-                            // 0xfffffff00578d110. Seed the original region cache at
-                            // +0x17c0 with a plain system-memory descriptor; the
-                            // 0x80-aligned rows need about 27.6 MB.
-                            IOBufferMemoryDescriptor *region=
-                                IOBufferMemoryDescriptor::withCapacity(0x2000000,kIODirectionOutIn);
-                            uint32_t format=0x42475241,planes=1,bpp=4;
-                            memset(fb+0x1700,0,0x70);
-                            memcpy(fb+0x1700,&format,sizeof(format));
-                            memcpy(fb+0x1704,&planes,sizeof(planes));
-                            memcpy(fb+0x1708,&bpp,sizeof(bpp));
-                            fb[0x1748]=0;
-                            if(region) {
-                                // The original display's stop clears +0x1618 and drops its region reference when the
-                                // UI takes over, while the compositor still maps the surface built over this region:
-                                // keep our own reference so those pages are never freed under the mapping.
-                                region->retain();
-                                memcpy(fb+0x17c0,&region,sizeof(region));
-                                fb[0x1780]|=1;
-                                IOLog("UKE: default surface region=%p bytes=%llu\n",
-                                    region,(unsigned long long)region->getLength());
-                            } else {
-                                IOLog("UKE: default surface region allocation failed; slot299 disabled\n");
-                            }
-                        }
-                        native_legacy_stage=5;started=display->start(nub);native_legacy_start_result=started;
-                    }
-                    if(started && defaultSurface)native_legacy_default_surface_state(display,defaultSurface);
+                    if(attached){native_legacy_stage=5;started=display->start(nub);native_legacy_start_result=started;}
                     if(started && phase==4) {
                         activeLegacyDisplay=display;activeGOPNub=nub;native_legacy_stage=10;
                         {
-                            unsigned gpu=0;PE_parse_boot_argn("sheng-fb-gpu",&gpu,sizeof gpu);
+                            unsigned gpu=0;PE_parse_boot_argn("fb-gpu",&gpu,sizeof gpu);
                             if(gpu==1) {
                                 IOService *handoff=native_gop_presenter_create();
                                 // Not a child of the display subsystem's node: the original display code enumerates that node's children (int-075/077:

@@ -296,6 +296,9 @@ archives = [
   "build-libpthread-kernel.py",
   # "component:ShengHidInput",
   "component:AppleKeyStoreState",
+  # macOS 27.3 (26C5035r) owned GOP display backend (NativeLegacyDisplay + NativeGOPPresenter +
+  # LegacyDisplayProbe + KeyStoreProbe + NativeKeyStoreEvents), bound to legacy-display-26C5035r.json.
+  "build-macos27-legacy-display.py",
   # --- not runnable on a public runner; re-enable when the inputs exist -------------------------
   # Kept visible instead of deleted so the full build's shape stays readable.
   #
@@ -745,7 +748,7 @@ kernel_args = [
   # The client probe is nested inside the load branch, so "offline-mobile-graphics-client=1" below is
   # inert while this is 0 and costs nothing.
   "offline-mobile-graphics-client=1",
-  "offline-mobile-graphics-load=0",
+  "offline-mobile-graphics-load=1",
   "offline-apfs-load=1",
   "apfs-boot-shim=1",
   "boot-progress=2",
