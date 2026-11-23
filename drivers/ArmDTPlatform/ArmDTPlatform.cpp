@@ -81,7 +81,9 @@ bool ArmDTPlatformIO::handlePlatformError (vm_offset_t far)
   snprintf (text, sizeof (text), "ArmDTPlatformIO: platform error #%lu far=0x%llx pc=0x%llx",
       total, (unsigned long long) far, pc);
   if (announce) {
-    IOLog ("%s%s\n", text, (strict != 0) ? " (panicking as asked)" : " (ignored)");
+    /* Runs inside sleh_synchronous / sleh_async_serror with interrupts disabled:
+     * never call IOLog() here (triggers IOLib.cpp:1544 assertion and hides far=). */
+    printf ("%s%s\n", text, (strict != 0) ? " (panicking as asked)" : " (ignored)");
   }
   // Stage it for the next boot as well, again only when it is announced: uke_mark is a DRAM store per
   // call, and a storm would rewrite the same slot thousands of times a second for no information.

@@ -162,6 +162,109 @@ index d5cf2b7..c9bcaf3 100644
  		kr = KERN_INVALID_ARGUMENT;
  		goto done;
  	}
+diff --git a/libkern/c++/OSArray.cpp b/libkern/c++/OSArray.cpp
+index 08db030..a7c759b 100644
+--- a/libkern/c++/OSArray.cpp
++++ b/libkern/c++/OSArray.cpp
+@@ -127,8 +127,12 @@ OSArray::withCapacity(unsigned int capacity)
+ 	OSSharedPtr<OSArray> me = OSMakeShared<OSArray>();
+ 
+ 	if (me && !me->initWithCapacity(capacity)) {
++		printf("sheng-os: OSArray::withCapacity(%u) failed from %p\n", capacity, __builtin_ptrauth_strip(__builtin_return_address(0), 0));
+ 		return nullptr;
+ 	}
++	if (!me) {
++		printf("sheng-os: OSArray alloc failed from %p\n", __builtin_ptrauth_strip(__builtin_return_address(0), 0));
++	}
+ 
+ 	return me;
+ }
+@@ -262,6 +266,7 @@ OSArray::setObject(unsigned int index, const OSMetaClassBase *anObject)
+ 	unsigned int newCount = count + 1;
+ 
+ 	if ((index > count) || !anObject) {
++		printf("sheng-os: OSArray::setObject(%u/%u, %p) rejected from %p\n", index, count, anObject, __builtin_ptrauth_strip(__builtin_return_address(0), 0));
+ 		return false;
+ 	}
+ 
+diff --git a/libkern/c++/OSData.cpp b/libkern/c++/OSData.cpp
+index 0cad743..7c9f112 100644
+--- a/libkern/c++/OSData.cpp
++++ b/libkern/c++/OSData.cpp
+@@ -178,6 +178,7 @@ OSData::withBytes(const void *bytes, unsigned int inLength)
+ 	OSSharedPtr<OSData> me = OSMakeShared<OSData>();
+ 
+ 	if (me && !me->initWithBytes(bytes, inLength)) {
++		printf("sheng-os: OSData::withBytes(%p, %u) failed from %p\n", bytes, inLength, __builtin_ptrauth_strip(__builtin_return_address(0), 0));
+ 		return nullptr;
+ 	}
+ 	return me;
+diff --git a/libkern/c++/OSDictionary.cpp b/libkern/c++/OSDictionary.cpp
+index 67e94c1..ca3d1a8 100644
+--- a/libkern/c++/OSDictionary.cpp
++++ b/libkern/c++/OSDictionary.cpp
+@@ -225,6 +225,7 @@ OSDictionary::withCapacity(unsigned int capacity)
+ 	OSSharedPtr<OSDictionary> me = OSMakeShared<OSDictionary>();
+ 
+ 	if (me && !me->initWithCapacity(capacity)) {
++		printf("sheng-os: OSDictionary::withCapacity(%u) failed from %p\n", capacity, __builtin_ptrauth_strip(__builtin_return_address(0), 0));
+ 		return nullptr;
+ 	}
+ 
+diff --git a/libkern/c++/OSNumber.cpp b/libkern/c++/OSNumber.cpp
+index dc2ed78..2c19d17 100644
+--- a/libkern/c++/OSNumber.cpp
++++ b/libkern/c++/OSNumber.cpp
+@@ -88,6 +88,7 @@ OSNumber::withNumber(unsigned long long value,
+ 	OSSharedPtr<OSNumber> me = OSMakeShared<OSNumber>();
+ 
+ 	if (me && !me->init(value, newNumberOfBits)) {
++		printf("sheng-os: OSNumber::withNumber(0x%llx, %u) failed from %p\n", value, newNumberOfBits, __builtin_ptrauth_strip(__builtin_return_address(0), 0));
+ 		return nullptr;
+ 	}
+ 
+diff --git a/libkern/c++/OSString.cpp b/libkern/c++/OSString.cpp
+index 6418d83..b696593 100644
+--- a/libkern/c++/OSString.cpp
++++ b/libkern/c++/OSString.cpp
+@@ -209,8 +209,12 @@ OSString::withCString(const char *cString, size_t length)
+ 	OSSharedPtr<OSString> me = OSMakeShared<OSString>();
+ 
+ 	if (me && !me->initWithStringOfLength(cString, length)) {
++		printf("sheng-os: OSString::withCString(%p, %zu) failed from %p\n", cString, length, __builtin_ptrauth_strip(__builtin_return_address(0), 0));
+ 		return nullptr;
+ 	}
++	if (!me) {
++		printf("sheng-os: OSString alloc failed from %p\n", __builtin_ptrauth_strip(__builtin_return_address(0), 0));
++	}
+ 
+ 	return me;
+ }
+diff --git a/libkern/c++/OSSymbol.cpp b/libkern/c++/OSSymbol.cpp
+index 9d4e084..e63b148 100644
+--- a/libkern/c++/OSSymbol.cpp
++++ b/libkern/c++/OSSymbol.cpp
+@@ -430,7 +430,11 @@ OSSymbol::withString(const OSString *aString)
+ 	} else if (((const OSSymbol *) aString)->flags & kOSStringNoCopy) {
+ 		return OSSymbol::withCStringNoCopy(aString->getCStringNoCopy());
+ 	} else {
+-		return OSSymbol::withCString(aString->getCStringNoCopy());
++		OSSharedPtr<const OSSymbol> sym = OSSymbol::withCString(aString->getCStringNoCopy());
++		if (!sym) {
++			printf("sheng-os: OSSymbol::withString(%s) failed from %p\n", aString->getCStringNoCopy(), __builtin_ptrauth_strip(__builtin_return_address(0), 0));
++		}
++		return sym;
+ 	}
+ }
+ 
+@@ -445,6 +449,7 @@ OSSymbol::withCString(const char *cString)
+ 	bool permanent = false;
+ 
+ 	if (key.smrk_len >= kMaxStringLength) {
++		printf("sheng-os: OSSymbol::withCString length %zu\n", key.smrk_len);
+ 		return nullptr;
+ 	}
+ 
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
 index 6f446e2..770db11 100644
 --- a/osfmk/arm/arm_init.c
@@ -672,6 +775,22 @@ index 46ba737..eb345e3 100644
  	mov		x19, lr
  	// Convert CPU data PA to VA and set as first argument
  	mov		x0, x21
+diff --git a/osfmk/kern/locks.c b/osfmk/kern/locks.c
+index b215614..92d9e70 100644
+--- a/osfmk/kern/locks.c
++++ b/osfmk/kern/locks.c
+@@ -3441,6 +3441,11 @@ lck_rw_gate_assert(__assert_only lck_rw_t *lock, gate_t *gate, gate_assert_flags
+ static void
+ lck_gate_probe(const char *what, lck_mtx_t *lock, gate_t *gate)
+ {
++	static unsigned lck_gate_logged = 0;
++	if (lck_gate_logged >= 16) {
++		return;
++	}
++	lck_gate_logged++;
+ 	extern int printf(const char *format, ...) __printflike(1, 2);
+ 
+ 	{
 diff --git a/osfmk/kern/stack.c b/osfmk/kern/stack.c
 index 1111ccf..069db94 100644
 --- a/osfmk/kern/stack.c
