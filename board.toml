@@ -965,17 +965,19 @@ kernel_args = [
   # SHENG_PMGR on. The gate's second condition is the _sheng_pmgr_run symbol, which the macOS train does
   # not link, so this round also declares vmm-present in [adt.defaults.u32] — see the note there.
   "sheng-pmgr=2",
-  "sheng-lite=1",
-  "sheng-aks=1",
+  "aks=1",
   # The KeyStore implementation answers 0 by default while Apple's pairing check wants the
   # no-passcode state, which is 3 (Allenwdk/UniXNU-uke carries the same argument, added when the
   # lockdown session was being chased; docs/USB2-20261115.md records why).
-  "sheng-aks-sls=3",
+  "aks-sls=3",
+  "no-lc=1",
+  "cs-lazy=1",
+  "timebase-hz=24000000",
   # Documented diagnostic switch (unixnu.com/zh/xnu/boot-arguments): the security stage was the next
   # suspect after the nonce slot reads all failed, and this is the supported way to boot past it and see
   # what the next stage does. sheng-disable-watchdogd is dropped to stay inside the 1000-byte command line.
   "amfi_get_out_of_my_way=1",
-  "sheng-smp=1",
+  "smp=1",
   # uke-serror-resume=4 continues past an asynchronous platform error instead of stopping the boot,
   # after printing it and staging it into the pram panic header (uke-serror-detail.patch). Only the
   # asynchronous case is resumed: a synchronous external abort would re-execute the faulting load and
