@@ -1,3 +1,19 @@
+diff --git a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -805,6 +805,12 @@ csblob_entitlements_dictionary_copy(struct cs_blob *csblob)
+ 	if (!amfi) {
+ 		panic("CoreEntitlements: missing AMFI bridge\n");
+ 	}
++	proc_t cur = current_proc();
++	if (cur && proc_pid(cur) >= 60) {
++		printf("uke-ent: asdict pid=%d (%s) ent=%p der=%p xml=%p\n",
++		    proc_pid(cur), proc_best_name(cur), csblob->csb_entitlements,
++		    csblob->csb_der_entitlements_blob, csblob->csb_entitlements_blob);
++	}
+ 	return amfi->OSEntitlements_asdict(csblob->csb_entitlements);
+ }
+ 
 diff --git a/bsd/kern/kern_newsysctl.c b/bsd/kern/kern_newsysctl.c
 index 6bdf244..9a6262e 100644
 --- a/bsd/kern/kern_newsysctl.c
@@ -203,13 +219,16 @@ diff --git a/libkern/c++/OSDictionary.cpp b/libkern/c++/OSDictionary.cpp
 index 67e94c1..ca3d1a8 100644
 --- a/libkern/c++/OSDictionary.cpp
 +++ b/libkern/c++/OSDictionary.cpp
-@@ -225,6 +225,7 @@ OSDictionary::withCapacity(unsigned int capacity)
+@@ -225,6 +225,10 @@ OSDictionary::withCapacity(unsigned int capacity)
  	OSSharedPtr<OSDictionary> me = OSMakeShared<OSDictionary>();
  
  	if (me && !me->initWithCapacity(capacity)) {
 +		printf("sheng-os: OSDictionary::withCapacity(%u) failed from %p\n", capacity, __builtin_ptrauth_strip(__builtin_return_address(0), 0));
  		return nullptr;
  	}
++	if (!me) {
++		printf("sheng-os: OSDictionary alloc failed from %p\n", __builtin_ptrauth_strip(__builtin_return_address(0), 0));
++	}
  
 diff --git a/libkern/c++/OSNumber.cpp b/libkern/c++/OSNumber.cpp
 index dc2ed78..2c19d17 100644
