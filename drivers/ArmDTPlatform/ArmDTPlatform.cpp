@@ -78,12 +78,22 @@ bool ArmDTPlatformIO::handlePlatformError (vm_offset_t far)
   const unsigned long kEvery = 256;
   bool announce = (total <= kPrintAll) || ((total % kEvery) == 0);
 
+  static volatile unsigned long same_far_run = 0;
+  static volatile vm_offset_t last_far = 0;
+  if (far == last_far) {
+    same_far_run += 1;
+  } else {
+    last_far = far;
+    same_far_run = 1;
+  }
+  bool storm = (same_far_run >= 64);
+
   snprintf (text, sizeof (text), "ArmDTPlatformIO: platform error #%lu far=0x%llx pc=0x%llx",
       total, (unsigned long long) far, pc);
-  if (announce) {
+  if (announce || storm) {
     /* Runs inside sleh_synchronous / sleh_async_serror with interrupts disabled:
      * never call IOLog() here (triggers IOLib.cpp:1544 assertion and hides far=). */
-    printf ("%s%s\n", text, (strict != 0) ? " (panicking as asked)" : " (ignored)");
+    printf ("%s%s\n", text, (strict != 0 || storm) ? " (panicking)" : " (ignored)");
   }
   // Stage it for the next boot as well, again only when it is announced: uke_mark is a DRAM store per
   // call, and a storm would rewrite the same slot thousands of times a second for no information.
@@ -92,11 +102,11 @@ bool ArmDTPlatformIO::handlePlatformError (vm_offset_t far)
    * symbol resolves to 0 and a direct branch to it is "out of range" at link time
    * (run 42235545609). Loading the address first turns that into a null check. */
   void (*volatile stage) (const char *) = uke_stage_last_panic;
-  if (stage != nullptr && announce) {
+  if (stage != nullptr && (announce || storm)) {
     stage (text);
   }
 
-  return strict == 0;
+  return (strict == 0) && !storm;
 }
 
 class ArmDTPlatform : public IODTPlatformExpert {

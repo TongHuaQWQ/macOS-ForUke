@@ -977,7 +977,8 @@ kernel_args = [
   # suspect after the nonce slot reads all failed, and this is the supported way to boot past it and see
   # what the next stage does. sheng-disable-watchdogd is dropped to stay inside the 1000-byte command line.
   "amfi_get_out_of_my_way=1",
-  "smp=1",
+  # "smp=1",  # parked: secondary CPUs hit lock_ticket.c:398 spinlock timeout on uke; keep single-core for userland/USB/BT bring-up
+  "uke-stall-off=1",
   # uke-serror-resume=4 continues past an asynchronous platform error instead of stopping the boot,
   # after printing it and staging it into the pram panic header (uke-serror-detail.patch). Only the
   # asynchronous case is resumed: a synchronous external abort would re-execute the faulting load and

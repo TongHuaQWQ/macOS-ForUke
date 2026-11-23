@@ -2,7 +2,7 @@
 /* Xiaomi Pad 7 (uke / SM7675 "cliffs" / WCN6750) board integration for QcaBluetooth.
  * Adapted directly from UniXNU-sheng/package/BluetoothProbe.cpp with uke's verified
  * SM7675 UART10 (QUPv3_1 SE2 @ 0x888000, INTID 616, SID 0x423, GPIOs 40..43, BT_EN 156,
- * SW_CTRL 80, TLMM 0xf000000) and WCN6750 (3 Mbaud, msbtfw12/msnv12) parameters. */
+ * SW_CTRL 80, TLMM 0xf100000) and WCN6750 (3 Mbaud, msbtfw12/msnv12) parameters. */
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -465,9 +465,12 @@ int powerOn() {
     pin(kSwCtrl, 1u);
     pin(kBtEnable, kBtEnableCfg, 0);
     btDelayMs(100);
+    /* GPLL0 on SM7675 (cliffs) is a fixed Lucid OLE PLL (always on, see TouchProbe.cpp):
+     * vote bit 0 in 0x52020 and do not read GCC+0x0 (GPLL0_MODE), which aborts on cliffs. */
     if (!sm7675_bt_gcc_update32(bt.gcc.va + SM7675_GCC_GPLL0_VOTE_REG / 4, 0, 1u)) return -EIO;
-    for (unsigned i = 0; i < 1000 && !(grd(nullptr, 0) & (1u << 31)); i++) IODelay(1);
-    if (!(grd(nullptr, 0) & (1u << 31)) || !serialClock(true)) return -EIO;
+    if (!serialClock(true)) return -EIO;
+    printf("[bluetooth] clocks up wr=%08x se=%08x vote=%08x\n",
+           bt.wrapper.va[1], urd(nullptr, 0x68), grd(nullptr, SM7675_GCC_QUP1_VOTE_REG));
     bt.gated = false;
     native_bluetooth_stats[11] = urd(nullptr, 0x68);
     native_bluetooth_stats[12] = bt.wrapper.va[1];
