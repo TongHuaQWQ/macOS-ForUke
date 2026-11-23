@@ -597,8 +597,8 @@ root_policies = "{tree}/build/sheng-source-storage/root-policies.bin"
 # loader after the trust caches and staged into Data by kern_exec.c.
 gpu_addon = "build/uke-gpu-addon/gpu-addon.z"
 kernel_args = [
-  "-v",
-  "serial=3",
+  # Dropped -v and serial=3 (synced with UniXNU-sheng macos-27.3-26C5035r: no UART, serial=3 only
+  # polls every 16 ms; console text uses -uketextconsole).
   # 0x14a = 0x14e minus DB_NMI (0x4). The rest is unchanged and inert on a board with no UART (DB_PRT
   # 0x2 / DB_KPRT 0x8 are serial output, DB_ARP 0x40 is arp debugging); the console text this board
   # actually reads comes from -v, -enable_kprintf_spam and -uketextconsole. DB_NMI is deliberately OFF
@@ -658,7 +658,7 @@ kernel_args = [
   # DEVELOPMENT kernels keep kprintf off unless this is set; uke has no UART,
   # so kprintf then falls back to the framebuffer video console. Graphics boot
   # suppresses text until -uketextconsole switches the console to text mode.
-  "-enable_kprintf_spam",
+  # "-enable_kprintf_spam",  # dropped to stay <= 1000 B (synced with UniXNU-sheng macOS 27.3)
   # PARKED for the b226-card round, and it is the one variable changed. -uketextconsole puts the
   # console into text mode, and with kprintf spam on, that text repaints faster than the diagnostic
   # card's once-a-second fb_paint -> the b225 photos came back as a full screen of console text with
@@ -694,6 +694,10 @@ kernel_args = [
   "sheng-touch-hid=1",
   # "sheng-touch-poll=1",   (parked: 2 bytes over the 1000-byte command line; touch polling is far
   # past the interrupt-controller question this round asks)
+  "offline-legacy-unit-scale=2",
+  "offline-legacy-validate=1",
+  "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1",
   "offline-legacy-phase=4",
   # GPU track (same values as gpu-framepresent v2/v3): the staged A732 bring-up
   # publishes the Metal device and the compositor submits the 1200-byte overlay
@@ -704,6 +708,10 @@ kernel_args = [
   # scanout client blits the offered frame into the scanout on the GPU; a
   # refused offer or failed copy falls back to the CPU copy (fail-safe).
   "sheng-fb-gpu=1",
+  "fb-bgra=1",
+  "fb-half=2",
+  "ca-triple-buffer=1",
+  "ca-free-wakeup=1",
   # DPU direct scanout: map the compositor's plain BGRA surface into the display bank's stage-1
   # window and flip VIG0/VIG1, instead of the 27 MB CPU copy per frame.
   "uke-dpu-scanout=3",
@@ -737,11 +745,10 @@ kernel_args = [
   # The client probe is nested inside the load branch, so "offline-mobile-graphics-client=1" below is
   # inert while this is 0 and costs nothing.
   "offline-mobile-graphics-client=1",
-  "offline-mobile-graphics-load=0",
+  "offline-mobile-graphics-load=1",
   "offline-apfs-load=1",
   "apfs-boot-shim=1",
   "boot-progress=2",
-  "-apfs_shared_datavolume",
   "offline-key-events=1",
   # usb= is the single interface of the USB side (they own drivers/QcomDwc3, package/UsbProbe.cpp and
   # package/qcom-usb-debug; this file owns the arguments). package/UsbProbe.cpp, the entry point the
@@ -797,30 +804,9 @@ kernel_args = [
   "bt-rails=0",
   "disable-watchdogd=1",
   "exec-log=1",
-  # Arms the userdata half of UkeLastLog (UkeLastLog.c:789; the pram half needs panic_region and stays
-  # off). The transport is freestanding - UfsLog.cpp/UfsLogKernel.c map the UFS host and the apps SMMU
-  # themselves - so it does NOT need CONFIG_XNU_NATIVE_UFS, contrary to the 2026-11-17 report from the
-  # device side: their two zero-record reads used uke-log-first=256566 / uke-log-last=281141, which are
-  # an order of magnitude away from the GPT values this board carries (2,961,408 / 61,949,946 in
-  # [userdata]), so the window they opened was not the userdata tail at all. This round ships the correct
-  # pair plus sheng-log=1, which is the actual test of that channel.
-  "sheng-log=1",
-  # NativeUfs.cpp:1801 reads `log=1` (while UkeLastLog.c:924 reads `sheng-log=1`), so pass both.
   "log=1",
-  # The disk log window, back after b261 removed it to pay for uke-platform-error-panic=1.
-  # uke-platform-error-panic is gone instead: the GIC-read storm it guarded against was fixed in
-  # b262/b263, and a full kernel log in userdata is worth more than a panic on the first ignored
-  # error. NativeUfs reads these two as ABSOLUTE LBAs of userdata (4096-byte blocks) on LUN 0 and
-  # opens the last 8192 of them: start = last + 1 - 8192 = 61941755. They come from this unit's own
-  # GPT (blockdev --getsz userdata = 471908312 sectors = 58988539 blocks = last - first + 1), which
-  # is also the geometry work/analysis/read-uke-log.py reads back through TWRP.
-  "uke-log-first=2961408",
-  "uke-log-last=61949946",
-  # XNU panics with "Console I/O from interrupt-disabled context" (osfmk/console/serial_console.c:181,
-  # console_io_allowed) as soon as anything prints with interrupts masked. On this port that fires late
-  # in kext loading, after AppleImage4 has already logged its nonce-slot failures; the tunable's own name
-  # is the boot-arg (TUNABLE(bool, allow_printf_from_interrupts_disabled_context, "nointr_consio")).
-  # Passing it keeps the boot going so the next panic is the interesting one instead of this noise.
+  # Parked sheng-log=1 / uke-log-first / uke-log-last to keep kernel_args <= 1000 B while
+  # syncing UniXNU-sheng macOS 27.3 display/compositor arguments.
   "nointr_consio=1",
   # b261: make the FIRST platform error panic instead of being swallowed. The 2026-11-18 00:37 boot
   # printed "ArmDTPlatformIO: platform error ... (ignored)" without end, and the kernel never reset, so
@@ -957,7 +943,7 @@ kernel_args = [
   # The panel now paints the request and a QR of it without panicking (STATE 82/84), so the diagnostic
   # panic stays off: with it on, the first control request stops the machine and enumeration can never
   # be tested. qcom-usb-panic=0 overrides the compiled-in default of 2.
-  "qcom-usb-panic=0",
+  # "qcom-usb-panic=0",  # inert while CONFIG_XNU_QCOM_USB_DEBUG=n
   # Both spellings, on purpose. package/ShengPlatformPower.cpp:70 reads "sheng-pmgr" (this port's name),
   # while scripts/unixnu/payload.py:check_native_root() demands "pmgr=2" (upstream's name) before it lets a
   # payload carry native-ufs-root=1, and it does not know the sheng- prefix. Passing both costs 8 bytes of
@@ -989,7 +975,7 @@ kernel_args = [
   # "uke-serror-resume=4",   (parked with uke-gic=0: this was the resume path for the synchronous
   # external aborts of the hand-rolled GIC setup, and those no longer happen. Costs 18 bytes.)
   "-no_slto_panic",
-  "ml-timeout-lock-panic-scale=40",
+  # "ml-timeout-lock-panic-scale=40",  # dropped to stay <= 1000 B (-no_slto_panic already set)
   # Contiguous hints off. Round b143 reached the early VM setup past kext loading and died in
   # arm_vm_page_granular_helper (pc 0xfffffff00bbe377c = +0x3fc, lr = +0x2cc, osfmk/arm64/arm_vm_init.c)
   # on
@@ -1037,8 +1023,8 @@ text_fixups = [
 # difference is in this tree's pram-path patches, not in the value; until that is settled the marks
 # and the GIC diag need a kernel that starts, so the node stays out for this round.
 tool = "scripts/make-uke-adt.py"
-chip_id = "207"
-owned_memory_size = "0x100000000"     # 4 GiB of this unit's 5 GiB high run (0x8C0000000..0xA0000000).
+chip_id = "6050"                      # T6050 (Mac17,11), synced with UniXNU-sheng macos-27.3-26C5035r
+owned_memory_size = "0x130000000"     # 4.75 GiB (4864 MiB) of 5 GiB high run, matching kern.maxvnodes=78848.
                                       # Ladder if DarwinBoot reports Out of Resources or the VM misbehaves:
                                       # 0xC0000000 (3 GiB) -> 0x80000000 (2 GiB). 12 GB reference used 4.75 GiB.
 # The OS volume of the image this board installs, i.e. the same value as [root] os_volume_uuid and
@@ -1212,6 +1198,7 @@ effective-security-mode-sep = 1
 
 [adt.product.string]
 model = "xiaomi,uke"
+artwork-display-gamut = "sRGB"
 
 [adt.product.u32]
 thin-bezel = 1
