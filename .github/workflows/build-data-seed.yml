@@ -81,6 +81,30 @@ jobs:
           esac
           test -f "$OS"
           echo "OS image: $OS"
+          # macOS 26 runners can take a few seconds after `hdiutil attach -nomount` for diskarbitrationd
+          # to synthesize the APFS container; retry up to 15s and also match slice identifiers (diskXs1).
+          python3 - <<'PY'
+          p = 'scripts/seed-data-grow.py'
+          s = open(p).read()
+          old = """            listing = plistlib.loads(subprocess.check_output(['diskutil', 'apfs', 'list', '-plist']))
+            container = None
+            for entry in listing['Containers']:
+                if any(s['DeviceIdentifier'] == store for s in entry.get('PhysicalStores', [])):
+                    container = entry['ContainerReference']"""
+          new = """            import time
+            container = None
+            for _ in range(30):
+                listing = plistlib.loads(subprocess.check_output(['diskutil', 'apfs', 'list', '-plist']))
+                for entry in listing.get('Containers', []):
+                    if any(s['DeviceIdentifier'] == store or s['DeviceIdentifier'].startswith(store + 's') for s in entry.get('PhysicalStores', [])):
+                        container = entry['ContainerReference']
+                        break
+                if container:
+                    break
+                time.sleep(0.5)"""
+          assert old in s, 'seed-data-grow.py mismatch'
+          open(p, 'w').write(s.replace(old, new, 1))
+          PY
           mkdir -p build/macos-data-seed
           sudo python3 scripts/make-macos-data-seed.py "$OS" build/macos-data-seed/data.dbr \
             --gib "${{ inputs.data_gib || '192' }}" \
