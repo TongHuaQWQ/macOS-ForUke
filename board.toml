@@ -206,7 +206,7 @@ tables_in_userdata = true
 tool = "scripts/build-boot-runtime.py"
 target = "macos27"
 build = "26C5035r"
-data_gib = 210
+data_gib = 192
 skip_setup = false
 gpu_addon = false
 trust_components = ["StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
@@ -745,7 +745,7 @@ kernel_args = [
   # The client probe is nested inside the load branch, so "offline-mobile-graphics-client=1" below is
   # inert while this is 0 and costs nothing.
   "offline-mobile-graphics-client=1",
-  "offline-mobile-graphics-load=1",
+  "offline-mobile-graphics-load=0",
   "offline-apfs-load=1",
   "apfs-boot-shim=1",
   "boot-progress=2",
@@ -800,7 +800,7 @@ kernel_args = [
   # before powering WCN6750 rails, so early boot is unaffected. Add `log-bluetooth=2` (controller RX/
   # process trace) or `log-bluetooth=3` (HCI ring buffer) or `bt-rails=0` (skip RPMh vote) when
   # debugging (keep total kernel_args <= 1000 bytes; currently 995/1000 with bluetooth=1).
-  "bluetooth=1",
+  "bluetooth=0",
   "bt-rails=0",
   "disable-watchdogd=1",
   "exec-log=1",
