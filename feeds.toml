@@ -27,11 +27,9 @@ local = "../UniXNU-sm7675-common"
 [[source]]
 name = "Adreno740"
 kind = "driver"
-git = "https://github.com/Allenwdk/NativeAdreno.git"
-# The branch gpucomp37 was built from: the local A732 commits rebased onto
-# upstream perf/gpu-smoothness (stall handling, retired-BO reaper, WPTR fence
-# checks). f1a2aee is the older m9f-era tip and renders on the CPU here.
-commit = "03ec4bc645a023da0db86816ddb87e90d449d8e3"
+# Local SM7675/A732-patched copy exported from UniXNU/Adreno740@031f35cc
+# (0x68000 GMU delta, TimerGmuLow 0x16220, 2196 KiB preempt record, GMU Pool adopt).
+local = "drivers/Adreno740"
 
 [[source]]
 name = "GopFramebuffer"
@@ -42,8 +40,8 @@ commit = "b0d812d578efa2acb005b66f73168891719af09a"
 [[source]]
 name = "AdrenoMetal"
 kind = "driver"
-git = "https://github.com/Allenwdk/AdrenoMetal.git"
-commit = "75e182072332863bd65df9806b446668057ac75d"
+git = "https://github.com/UniXNU/AdrenoMetal.git"
+commit = "51b7003f9c05ec46f0aa4ed7e9bb47f8db893c04"
 
 # USB device mode, the way the same-device upstream runs it: the Qualcomm subclass of the original
 # AppleUSBXDCI in this fileset. Allenwdk/UniXNU-uke pins the same commit and drives it with the board

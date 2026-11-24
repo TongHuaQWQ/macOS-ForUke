@@ -197,6 +197,13 @@ jobs:
       # recipes were written against. '-Wno-unknown-warning-option' makes the compiler ignore any
       # warning name it does not recognise, which is exactly the drift to absorb. Idempotent, and the
       # log prints the patched line so a reviewer can see it.
+      - name: Restore optional A732 firmware cache (non-fatal if absent; sentinel slots used otherwise)
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: UniXNU/.cache/firmware/uke-gpu
+          key: uke-gpu-firmware-v1
+
       # Upstream fix: put the flag in the core's recipe lists so no workflow needs this step.
       - name: Tolerate newer clang warning names in the archive recipes
         run: |
@@ -204,24 +211,34 @@ jobs:
           python3 - <<'PY'
           import pathlib
           targets = ['UniXNU/scripts/build-arm-driver.py',
-                     'UniXNU-uke/scripts/build-native-legacy-display.py']
+                     'UniXNU-uke/scripts/build-native-legacy-display.py',
+                     'UniXNU-uke/scripts/build-macos27-legacy-display.py',
+                     'UniXNU-uke/scripts/build-native-adreno-kits.py',
+                     'UniXNU-uke/scripts/build-adreno740-accelerator.py']
           for name in targets:
               p = pathlib.Path(name)
               if not p.is_file():
                   print('skipped (absent):', name)
                   continue
               s = p.read_text()
-              if '-Wno-unknown-warning-option' in s:
-                  print('already patched:', name)
-                  continue
-              anchor = "'-Wno-unused-parameter'"
-              if anchor not in s:
-                  print('anchor not found, left alone:', name)
-                  continue
-              p.write_text(s.replace(anchor, anchor + ", '-Wno-unknown-warning-option'", 1))
-              print('patched:', name)
+              changed = False
+              if name == 'UniXNU/scripts/build-arm-driver.py' and "kits/uke" not in s:
+                  kit_anchor = "'-I', str(ROOT / 'kits/sheng')"
+                  if kit_anchor in s:
+                      s = s.replace(kit_anchor, "'-I', str(ROOT / 'kits/uke'), '-I', str(ROOT / 'kits/sheng')", 1)
+                      changed = True
+              if '-Wno-unknown-warning-option' not in s:
+                  anchor = "'-Wno-unused-parameter'"
+                  if anchor in s:
+                      s = s.replace(anchor, anchor + ", '-Wno-unknown-warning-option'", 1)
+                      changed = True
+              if changed:
+                  p.write_text(s)
+                  print('patched:', name)
+              else:
+                  print('already patched / anchor not found:', name)
           PY
-          grep -n "unknown-warning-option" UniXNU/scripts/build-arm-driver.py UniXNU-uke/scripts/build-native-legacy-display.py || true
+          grep -n "unknown-warning-option\|kits/uke" UniXNU/scripts/build-arm-driver.py UniXNU-uke/scripts/build-native-legacy-display.py UniXNU-uke/scripts/build-macos27-legacy-display.py UniXNU-uke/scripts/build-native-adreno-kits.py UniXNU-uke/scripts/build-adreno740-accelerator.py || true
 
       - name: Fetch the Apple references
         working-directory: UniXNU

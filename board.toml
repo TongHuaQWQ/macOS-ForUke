@@ -56,7 +56,7 @@ include = [
   # (.cache/firmware/uke-gpu) and the owner-built Metal plug-in, which a public runner cannot produce,
   # and kernel.py:archive_plan requires every selected component with a kernel build recipe to appear
   # in [kernel] archives. Restore these three lines together with the GPU archive entries.
-  # "Adreno740", "AdrenoMetal",
+  "Adreno740", "AdrenoMetal",
   # QcaBluetooth and QcomDwc3 are materialized through feeds.toml local overrides (drivers/QcaBluetooth,
   # drivers/QcomDwc3) and compiled by scripts/build-qca-bluetooth.py and scripts/build-qcom-dwc3.py,
   # keeping compatibility with older local UniXNU catalogs whose components.toml predates them.
@@ -296,25 +296,24 @@ archives = [
   "build-libpthread-kernel.py",
   # "component:ShengHidInput",
   "component:AppleKeyStoreState",
-  # macOS 27.3 (26C5035r) owned GOP display backend (NativeLegacyDisplay + NativeGOPPresenter +
-  # LegacyDisplayProbe + KeyStoreProbe + NativeKeyStoreEvents), bound to legacy-display-26C5035r.json.
+  # macOS 27.3 (26C5035r) Adreno 732 + owned GOP display backend (NativeLegacyDisplay +
+  # NativeGOPPresenter + LegacyDisplayProbe + KeyStoreProbe + NativeKeyStoreEvents +
+  # ShengEthernet + GpuPowerProbe), bound to legacy-display-26C5035r.json & net-ether-26C5035r.json.
+  # prepare-uke-gmu / component:Adreno740 / build-native-adreno-kits / build-adreno740-accelerator
+  # build the NativeAdreno driver & firmware slots before build-macos27-legacy-display.py.
+  "prepare-uke-gmu.py",
+  "component:Adreno740",
+  "build-native-adreno-kits.py",
+  "build-adreno740-accelerator.py",
   "build-macos27-legacy-display.py",
   # --- not runnable on a public runner; re-enable when the inputs exist -------------------------
   # Kept visible instead of deleted so the full build's shape stays readable.
   #
-  #   prepare-uke-gmu.py / component:Adreno740 / build-native-adreno-kits.py /
-  #   build-adreno740-accelerator.py
-  #       need the A732 GPU firmware pins in .cache/firmware/uke-gpu (extracted from the device's
-  #       /vendor/firmware_mnt/image and /odm/firmware — see proprietary-files.txt).
   #   build-native-legacy-display.py
   #       gated by audit-mobile-graphics-legacy.py against a previously qualified candidate.
   #   build-gpu-addon-blob.py
   #       packs the owner-built Metal plug-in bundle, which no clean tree has.
   #
-  # "prepare-uke-gmu.py",
-  # "component:Adreno740",
-  # "build-native-adreno-kits.py",
-  # "build-adreno740-accelerator.py",
   # "build-native-legacy-display.py",
   # "build-gpu-addon-blob.py",
   # build-boot-log.py compiles package/{UkeLastLog,BootWatchdogPolicy,CrashLogProbe}.c with this
@@ -455,19 +454,20 @@ kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.u
 # Inherited pins are silent with the wrong IPSW and only fail here, at fetch time.
 kernelcache_sha256 = "d1003b5143ffd88439b4d45b6017f587171cfe6855660bed05370a2ea5db9fe9"
 slide = "-0x1000000"
+# _amfi_register_mac_policy (26C5035r AppleMobileFileIntegrity, from profiles/os/macos-27.3-26C5035r).
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffe0009840dd4"
 # Unchanged from the 25F84 round, and unverified for this collection: upstream's 27.3 profile declares no
 # slide at all (it describes mac17j as a fileset that stays at its linked addresses, "there is no slide"),
 # while this board has slid the mac17g collection by -0x1000000 since the port began. Whether that offset
 # is still right for mac17j cannot be settled without the 26C5035r kernelcache; a wrong slide shows up as
 # a kernel that faults at its first fetch, not as a build error.
-# No early_security_init: the inherited address (0xfffffff005ab4ae0) is the AMFI entry of the iPadOS
-# 17.7.11 kernelcache — docs/devices/nx769j.md records exactly that value as belonging to that profile
-# and 0xfffffff004e2b640 to its own, so a prelink ABI address never carries over. It also has to be
-# re-derived from mac17g's __PRELINK_INFO, and the caihong/nx769j records say running AMFI early
-# security init on a SoC with no Apple PMGR panics with "AMFI: No PMGR?" — uke is a Snapdragon. Boot
-# without the hook first and only then, if AMFI trust blocks userland, read the address out of mac17g.
+# Upstream macos-27.3-26C5035r 67-root startup closure (adds FSKit lifs, EndpointSecurity,
+# driverkit.serial, UVCService, TimeSync/gPTP, IONetworkingFamily, AppleSystemPolicy, quarantine,
+# DiskImages, HFS, AppleMultitouchDriver, IOBluetoothFamily, IO80211Family, AppleHIDKeyboard,
+# IOGraphicsFamily, AppleFDEKeyStore) plus the two AppleOnboardSerial/AppleSMC exclusions.
 roots = [
   "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeDataless",
   "com.apple.driver.AppleARMPlatform",
   "com.apple.driver.AppleARMWatchdogTimer",
   "com.apple.driver.AppleAudioClockLibs",
@@ -478,6 +478,7 @@ roots = [
   "com.apple.driver.ApplePMGR",
   "com.apple.driver.IODARTFamily",
   "com.apple.filesystems.apfs",
+  "com.apple.filesystems.hfs.kext",
   "com.apple.iokit.CoreAnalyticsFamily",
   "com.apple.iokit.IOAVFamily",
   "com.apple.iokit.IOAudio2Family",
@@ -496,20 +497,20 @@ roots = [
   "com.apple.kext.CoreTrust",
   "com.apple.security.AppleImage4",
   "com.apple.security.sandbox",
+  "com.apple.security.quarantine",
+  "com.apple.AppleSystemPolicy",
   "com.apple.iokit.IOHIDFamily",
-  "com.apple.iokit.IOHIDEventDriver",
-  # The USB stack, for drivers/QcomDwc3 (the official route). Everything above is what the 25F84/26C5035r
-  # port needed before there was a controller; these eleven are the device stack, the host stack and the
-  # storage chain they pull in, copied from the sheng board, which runs this driver on the same generation
-  # of Apple USB code (UniXNU-sheng board.toml [kernel.prelink] roots).
-  #
-  # Why each one is named rather than left to be pulled in: the prelink walks *dependencies of the roots*,
-  # and these eleven are what makes the closure contain the USB kexts at all -- QcomDwc3Xdci derives from
-  # AppleUSBXDCI, whose kext has no personality, so nothing else would ever load it.
-  #
-  # The two `!` entries exclude rather than add. AppleUSBXHCI's metaclass comparison reaches
-  # AppleOnboardSerial and AppleSMC, neither of which can exist on a Snapdragon; excluding them keeps a
-  # match from silently binding a serial or SMC personality to our controller's name.
+  "com.apple.iokit.IOTimeSyncFamily",
+  "com.apple.plugin.IOgPTPPlugin",
+  "com.apple.driver.AppleDiskImages2",
+  "com.apple.driver.DiskImages",
+  "com.apple.driver.DiskImages.FileBackingStore",
+  "com.apple.driver.DiskImages.KernelBacked",
+  "com.apple.driver.DiskImages.RAMBackingStore",
+  "com.apple.driver.DiskImages.ReadWriteDiskImage",
+  "com.apple.driver.DiskImages.UDIFDiskImage",
+  "com.apple.driver.AppleMultitouchDriver",
+  "com.apple.iokit.IONetworkingFamily",
   "com.apple.iokit.IOUSBDeviceFamily",
   "com.apple.driver.AppleUSBXDCI",
   "com.apple.driver.AppleUSBDeviceMux",
@@ -521,6 +522,17 @@ roots = [
   "com.apple.iokit.IOUSBMassStorageDriver",
   "com.apple.iokit.IOSCSIArchitectureModelFamily",
   "com.apple.iokit.IOSCSIBlockCommandsDevice",
+  "com.apple.iokit.IOBluetoothFamily",
+  "com.apple.iokit.IO80211Family",
+  "com.apple.iokit.EndpointSecurity",
+  "com.apple.driver.AppleHIDKeyboard",
+  "com.apple.driver.AppleTopCaseHIDEventDriver",
+  "com.apple.driver.AppleInputDeviceSupport",
+  "com.apple.iokit.IOGraphicsFamily",
+  "com.apple.driver.driverkit.serial",
+  "com.apple.UVCService",
+  "com.apple.driver.AppleFDEKeyStore",
+  "com.apple.filesystems.lifs",
   "!com.apple.driver.AppleOnboardSerial",
   "!com.apple.driver.AppleSMC",
 ]
@@ -654,7 +666,7 @@ kernel_args = [
   # fileset-wait-cap-ms turns an unbounded wait into a 5 s one so the caller reports what it wanted
   # instead of hanging silently. Both are inert unless this kernel carries fileset-wait-probe.patch.
   # "fileset-wait-log=1",   (the wait names are now printed unconditionally by uke-aes-stub.patch)
-  "uke-aes-stub=1",
+  # "uke-aes-stub=1",  # dropped: SourceStorage.cpp registers real SoftwareAES
   # "fileset-wait-cap-ms=5000",  (dropped for the 1000-byte cap: the probe now runs synchronously
   # at EARLY_BOOT and panics with its breadcrumbs, which is uke_usb_sync=1's whole purpose. The
   # fileset wait names print unconditionally from uke-aes-stub.patch, so the cap is redundant.)
@@ -686,7 +698,7 @@ kernel_args = [
   # (the 2026-10-27/28 frozen-screen runs never set it).
   # the screen console must not draw over presented frames; it is muted only
   # after the first successful copy, so logs survive until the UI takes over.
-  "offline-legacy-noconsole=1",
+  # "offline-legacy-noconsole=1",  # dropped: unused in macOS 27.3 GopFramebuffer@b0d812d5
   "offline-hid-home=1",
   "offline-hid-input=1",
   # Touch bring-up (docs/TOUCH-PORT.md on-screen set): stage 4 = firmware
@@ -741,9 +753,16 @@ kernel_args = [
   # inert while this is 0 and costs nothing.
   "offline-mobile-graphics-client=1",
   "offline-mobile-graphics-load=1",
+  # Boot-time Ethernet en0 (ShengEthernet) + Adreno 732 GPU + AGXAccelerator + Metal handoff
+  "ethernet=1",
+  "gpu-power=9",
+  "gpu-metal=1",
+  "gpu-dcvs=1",
+  "fb-gpu=1",
+  "gpu-preempt=0",
   "offline-apfs-load=1",
   "apfs-boot-shim=1",
-  "boot-progress=2",
+  # "boot-progress=2",
   "offline-key-events=1",
   # usb= is the single interface of the USB side (they own drivers/QcomDwc3, package/UsbProbe.cpp and
   # package/qcom-usb-debug; this file owns the arguments). package/UsbProbe.cpp, the entry point the
@@ -778,13 +797,9 @@ kernel_args = [
   # subclass static init between preModLoad and postModLoad, then qcom_dwc3_publish(), which walks its own ladder --
   # stage 10 the nub ("usb-drd0") registered, 11 the controller started, 12 the role thread, and negative stages -12..-17
   # naming which of those failed. Same byte count as "usb=1", so the 1000-byte command line is untouched.
-  "usb=4",
-  # usb-rails=0 keeps the board's RPMh vote out of this round and uses the power the bootloader left behind. It is not a shortcut
-  # past a hardware finding: on 2026-11-21 the vote ran (votes 1-5 of 17 completed, the sixth stopped the bus) and, with the vote
-  # skipped entirely, both USB30 GDSCs collapsed and read back powered -- stage 3 passed on that same inherited power. So the two
-  # questions are separable, and this round spends its photograph on the second one: the clock and PHY groups of stages 4 to 9,
-  # each of which now prints its own `qcom-dwc3: mark <group>` line before touching a block. The vote keeps its own round.
-  "usb-rails=0",
+  # usb=0 during desktop bring-up to avoid 1 Hz beat console spam; restore usb=4 when testing USB.
+  "usb=0",
+  # "usb-rails=0",
   # usb-conn=1 asserts GCTL.SOFTCONN from the beat sampler, i.e. pulls the device up by hand. The family does it
   # in XDCI_POWER_ON, which configd's USBDeviceConfiguration asks for -- and this board has no userland yet, so
   # nothing asks. With the counter in the beat line (`pwron=`) one panel then says which of the two it is: a
@@ -794,9 +809,9 @@ kernel_args = [
   # The background worker waits for native_gpu_addon_stage >= 1 (staged /private/var/ngpu/firmware/qca)
   # before powering WCN6750 rails, so early boot is unaffected. Add `log-bluetooth=2` (controller RX/
   # process trace) or `log-bluetooth=3` (HCI ring buffer) or `bt-rails=0` (skip RPMh vote) when
-  # debugging (keep total kernel_args <= 1000 bytes; currently 995/1000 with bluetooth=1).
+  # debugging (keep total kernel_args <= 1000 bytes).
   "bluetooth=0",
-  "bt-rails=0",
+  # "bt-rails=0",
   "disable-watchdogd=1",
   "exec-log=1",
   "log=1",
@@ -945,7 +960,7 @@ kernel_args = [
   # the 1000-byte command line (967 -> 975) and keeps the gate satisfiable for the round that turns
   # SHENG_PMGR on. The gate's second condition is the _sheng_pmgr_run symbol, which the macOS train does
   # not link, so this round also declares vmm-present in [adt.defaults.u32] — see the note there.
-  "sheng-pmgr=2",
+  # "sheng-pmgr=2",  # dropped: CONFIG_XNU_SHENG_PMGR is off; pmgr=2 satisfies payload.py
   "aks=1",
   # The KeyStore implementation answers 0 by default while Apple's pairing check wants the
   # no-passcode state, which is 3 (Allenwdk/UniXNU-uke carries the same argument, added when the
@@ -954,10 +969,9 @@ kernel_args = [
   "no-lc=1",
   "cs-lazy=1",
   "timebase-hz=24000000",
-  # Documented diagnostic switch (unixnu.com/zh/xnu/boot-arguments): the security stage was the next
-  # suspect after the nonce slot reads all failed, and this is the supported way to boot past it and see
-  # what the next stage does. sheng-disable-watchdogd is dropped to stay inside the 1000-byte command line.
-  "amfi_get_out_of_my_way=1",
+  # amfi_get_out_of_my_way=1 REMOVED: early_security_init + vmm-present=1 + AMFI stack-shift fix +
+  # 3 owner trust caches handle AMFI directly without disabling code signing/entitlement enforcement.
+  # "amfi_get_out_of_my_way=1",
   # "smp=1",  # parked: secondary CPUs hit lock_ticket.c:398 spinlock timeout on uke; keep single-core for userland/USB/BT bring-up
   "uke-stall-off=1",
   # uke-serror-resume=4 continues past an asynchronous platform error instead of stopping the boot,
@@ -1075,8 +1089,16 @@ props = [
 source = "device:dts/uke.dts"
 include_dirs = ["soc:dts"]
 
-# Board ADT overrides on top of the OS profile identity (the make-uke-adt.py
-# baseline). The GMU pool rides as a top-level node; the panic log's top-level
+# Board ADT overrides on top of the OS profile identity (from profiles/os/macos-27.3-26C5035r).
+[adt.root.string]
+model = "Mac17,11"
+target-type = "K114c"
+target-sub-type = "K114cAP"
+compatible = "K114cAP"
+manufacturer = "Apple Inc."
+secure-root-prefix = "md"
+
+# The GMU pool rides as a top-level node; the panic log's top-level
 # `pram` node is generated from [payload.adt] panic_region, not from here.
 [adt.chosen.u32]
 # No Apple CTRR on this SoC, so XNU must be *told* that. osfmk/arm64/machine_routines.c keeps
@@ -1115,6 +1137,15 @@ security-downgradable = 1
 allow-ap-nonce-retrieval = 1
 image4-allow-magazine-updates = 1
 secure-boot = 0
+board-id = 4
+security-domain = 1
+amfi-only-platform-code = 1
+
+[adt.chosen.asmb.u64]
+lp-sip0 = 0
+
+[adt.chosen.asmb.u32]
+lp-sip1 = 1
 
 [adt.chosen.string]
 # Apple's own Mac17,2 device tree carries this in /chosen, next to the security-mode keys, and the value
@@ -1123,7 +1154,11 @@ secure-boot = 0
 # from Apple's nonce path (the collection's strings put it next to
 # IOReturn AppleMobileApNonce::_retrieveNonce), which is also why every magazine reports that it cannot
 # read a nonce slot: without the hash method the slot contents cannot be interpreted at all.
+osenvironment = "main"
 crypto-hash-method = "sha2-384"
+cryptex1-certificate-format = "x509"
+boot-uuid = "84581E99-85BE-4957-AC53-2947E887B3E4"
+apfs-preboot-uuid = "84581E99-85BE-4957-AC53-2947E887B3E4"
 
 [adt.chosen.bytes]
 # The boot nonce itself. On Apple silicon iBoot writes it into /chosen and Image4 reads it back through
@@ -1192,11 +1227,44 @@ effective-security-mode-sep = 1
 "kern.maxvnodes" = 0x13400
 
 [adt.product.string]
-model = "xiaomi,uke"
+product-name = "MacBook Pro (14-inch PROLED XDR Display)"
+product-description = "MacBook Pro (14-inch PROLED XDR Display)"
+fdr-product-type = "Mac17,11"
+sub-product-type = "Mac17,11"
+unique-model = "K114cAP"
+partition-style = "macOS"
+compatible-device-fallback = "Mac17,7"
+compatible-app-variant = "MacFamily20,1"
+app-macho-architecture = "arm64"
+artwork-device-idiom = "mac"
 artwork-display-gamut = "sRGB"
+ideal-screen-colorspace = "P3A"
+artwork-dynamic-displaymode = "0"
+framebuffer-identifier = "0"
+chrome-identifier = "0"
+graphics-featureset-class = "APPLE10"
+graphics-featureset-fallbacks = "APPLE9:APPLE8:APPLE7:APPLE6:APPLE5:APPLE4:APPLE3:APPLE3v1:APPLE2:APPLE1:GLES2,0"
+mobiledevice-min-ver = "1857"
 
 [adt.product.u32]
 thin-bezel = 1
+udid-version = 2
+artwork-scale-factor = 2
+artwork-device-subtype = 1986
+allow-32bit-apps = 1
+oled-display = 1
+has-round-cornered-mac-display = 1
+partially-occluded-display = 1
+supports-burnin-mitigation = 1
+display-mirroring = 1
+sandman-support = 1
+lockdown-certtype = 1
+has-virtualization = 1
+upgradeable-memory = 0
+single-stage-boot = 1
+dual-iboot-support = 1
+atomic-firmware-update-support = 1
+ptp-large-files = 1
 
 [adt.buttons.string]
 compatible = "buttons"
@@ -1225,5 +1293,5 @@ home-button-type = 2
 #
 # gmu-memory is inert until the GPU stage adopts the pool, so it goes with the ADT above to keep the
 # shipped ADT byte-for-byte the one that booted.
-# [adt.gmu-memory.bytes]
-# reg = "000000c8000000000000000200000000"
+[adt.gmu-memory.bytes]
+reg = "000000c8000000000000000200000000"

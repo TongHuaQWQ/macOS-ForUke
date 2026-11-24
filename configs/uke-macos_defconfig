@@ -152,7 +152,7 @@ CONFIG_XNU_OWNER_BOOT_MANIFEST=y
 CONFIG_XNU_OWNER_DATA_MOUNT=y
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 # CONFIG_XNU_BOOT_PROGRESS is not set
-# CONFIG_XNU_NATIVE_ADRENO is not set
+CONFIG_XNU_NATIVE_ADRENO=y
 
 # `source`, not `prelinked`. The source provider is what the collection case is written for:
 # patches/xnu-12377/source-corecrypto14-bootstrap.patch starts the original com.apple.kec.corecrypto

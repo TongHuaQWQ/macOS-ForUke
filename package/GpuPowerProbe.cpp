@@ -86,13 +86,12 @@ extern "C" ShengGmuStatus ShengGmuBindMmio(ShengGmuMmio *, ShengGmuIo *) __attri
 extern "C" IOReturn NativeAdrenoGmuContextPayloads(NativeAdrenoGmuPayload out[5]) __attribute__((weak));
 extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *, size_t, unsigned, unsigned, unsigned, unsigned, unsigned,
     unsigned, void (*)(uint32_t), NativeAdrenoGmuContextReport *) __attribute__((weak));
-extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5]) __attribute__((weak));
+extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[GpuBufferCount]) __attribute__((weak));
 extern "C" NativeAdrenoVm *NativeAdrenoGpuContextVm() __attribute__((weak));
+extern "C" unsigned NativeAdrenoGpuContextInputBits() __attribute__((weak));
 extern "C" IOReturn native_adreno_publish(NativeAdrenoVm *, NativeAdrenoSubmit *, NativeAdrenoRing *, const NativeAdrenoRingClock *,
     const NativeAdrenoTimer *, const NativeAdrenoAbiDeviceInfo *, uint32_t, uint32_t) __attribute__((weak));
 extern "C" uint32_t native_adreno_publish_stats(uint32_t *) __attribute__((weak));
-/* The BO pool the bring-up reserves: sheng sets it before NativeAdrenoGpuContextBringup; the service's boot-arg read runs too late. */
-extern "C" volatile uint32_t native_adreno_pool_mib;
 // The staged AGXAccelerator (drivers/NativeAdreno/NativeAdrenoAccelerator.cpp): its static initializer runs only after the
 // original IOGPUFamily kext has loaded, because the parent metaclass does not exist before that.
 extern "C" void native_adreno_accelerator_static_init(void) __asm__("__GLOBAL__sub_I_NativeAdrenoAccelerator.cpp") __attribute__((weak));
@@ -160,7 +159,11 @@ volatile uint32_t native_gpu_power_stage;
 namespace {
 unsigned mode() {
     static unsigned cached = ~0u;
-    if (cached == ~0u) {unsigned m = 0; PE_parse_boot_argn("sheng-gpu-power", &m, sizeof m); cached = m > 9 ? 9 : m;}
+    if (cached == ~0u) {
+        unsigned m = 0;
+        if (!PE_parse_boot_argn("gpu-power", &m, sizeof m)) PE_parse_boot_argn("sheng-gpu-power", &m, sizeof m);
+        cached = m > 9 ? 9 : m;
+    }
     return cached;
 }
 void delayUs(void *, unsigned us) {IODelay(us);}
@@ -371,9 +374,9 @@ int ringPublish(void *, const volatile uint32_t *, size_t) {__asm__ volatile("ds
 int ringAcquire(void *, volatile uint32_t *, size_t) {__asm__ volatile("dsb sy" ::: "memory"); return 0;}
 uint64_t ringNow(void *) {uint64_t us = 0; coldNow(nullptr, &us); return us;}
 int ringIdle(void *) {IODelay(20); return 0;}
-OSSharedPtr<IOMemoryMap> gGpuMaps[5];
-volatile uint8_t *gGpuCpu[5];
-NativeAdrenoGpuBuffer gGpuBuffers[5];
+OSSharedPtr<IOMemoryMap> gGpuMaps[GpuBufferCount];
+volatile uint8_t *gGpuCpu[GpuBufferCount];
+NativeAdrenoGpuBuffer gGpuBuffers[GpuBufferCount];
 NativeAdrenoRing gRing;
 NativeAdrenoCpInit gCpInit;
 extern "C" {
@@ -504,10 +507,10 @@ extern unsigned int vm_page_inactive_count __attribute__((weak));
 uint32_t rd32le(const uint8_t *p) {return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24;}
 uint16_t rd16le(const uint8_t *p) {return uint16_t(p[0] | p[1] << 8);}
 unsigned zapLimit() {
-    // sheng-gpu-zap: 0 off, 1 through init_image, 2 through mem_setup and the segment copy, 3 through auth_and_reset,
+    // gpu-zap / sheng-gpu-zap: 0 off, 1 through init_image, 2 through mem_setup and the segment copy, 3 through auth_and_reset,
     // 4 (default) also CP_SET_SECURE_MODE 0. int-019 (0) reached the desktop and int-017 (4) did not.
     unsigned zap = 4;
-    PE_parse_boot_argn("sheng-gpu-zap", &zap, sizeof zap);
+    if (!PE_parse_boot_argn("gpu-zap", &zap, sizeof zap)) PE_parse_boot_argn("sheng-gpu-zap", &zap, sizeof zap);
     return zap;
 }
 void zapRow() {
@@ -888,13 +891,13 @@ void userClientTest() {
     IOReturn err = 0;
     int errAt = -1, ok = 0, n = 0;
     const IOReturn attached = gSubmit.attach(vm, &gRing);
-    // input_bits 31: the 2 GiB TTBR0 aperture; output_bits 40 for the BO allocations
-    const IOReturn opened = attached ? attached : gClient.open(NativeAdrenoAbiVersion, vm, &gSubmit, &gRing, 31, 40);
+    const unsigned ias = NativeAdrenoGpuContextInputBits && NativeAdrenoGpuContextInputBits() ? NativeAdrenoGpuContextInputBits() : 31;
+    const IOReturn opened = attached ? attached : gClient.open(NativeAdrenoAbiVersion, vm, &gSubmit, &gRing, ias, 40);
     u[0] = uint32_t(attached);
     u[1] = uint32_t(opened);
     if (opened) {snprintf(row, sizeof row, "U open a%x o%x", u[0], u[1]); setRow(6, row); return;}
     NativeAdrenoAbiParams params{};
-    if (!ucCall(NativeAdrenoMethodQuery, nullptr, &params)) ok += params.input_bits == 31 && params.output_bits == 40;
+    if (!ucCall(NativeAdrenoMethodQuery, nullptr, &params)) ok += params.input_bits == ias && params.output_bits == 40;
     ++n;
     const uint32_t irq0 = gIrqCount;
     // Round 2 reuses the IB address with a new object (a stale TLB entry would run the old IB, which writes to the now
@@ -922,8 +925,8 @@ NativeAdrenoTimer gTimer;
 // (0x43030b00, 1.5 MiB), UBWC 4.0 / swizzle levels 2+3 / bank bit 16 / macrotile from the sm7675 UBWC data, the
 // GMEM window and trap base from the values hw_init programs above. The VA window keeps clear of the kernel buffers
 // (below 0x302000+) and the GMEM window (0x1000000..0x117ffff) and ends at the 2 GiB aperture.
-const NativeAdrenoAbiDeviceInfo gDeviceInfo = {0x43030b00u, 0x180000u, 0x1000000ull, 0x1fffffffff000ull, 0x20000000ull,
-                                               0x60000000ull, 16, 6, 1, 4, NativeAdrenoDeviceClientIova, 0};
+NativeAdrenoAbiDeviceInfo gDeviceInfo = {0x43030b00u, 0x180000u, 0x1000000ull, 0x1fffffffff000ull, GpuClientVaStart31,
+                                         0x70000000ull, 16, 6, 1, 4, NativeAdrenoDeviceClientIova, 0};
 int timerRead(void *, uint32_t reg, uint32_t *value) {*value = gpuRd(reg); return 0;}
 const NativeAdrenoTimeIo gTimerIo{nullptr, timerRead};
 IOReturn wcall(IOUserClient *uc, uint32_t method, const void *in, void *out) {
@@ -1036,7 +1039,15 @@ void publishAndWrapperTest(bool rounds) {
     if (vm) gSubmit.attach(vm, &gRing);
     native_adreno_dram_read32 = dramRead32;
     const IOReturn timer = gTimer.attach(&gTimerIo, NativeAdrenoTimeCp);
-    const IOReturn published = native_adreno_publish(vm, &gSubmit, &gRing, &clock, timer ? nullptr : &gTimer, &gDeviceInfo, 31, 40);
+    const unsigned ias = NativeAdrenoGpuContextInputBits && NativeAdrenoGpuContextInputBits() ? NativeAdrenoGpuContextInputBits() : 31;
+    if (ias > 32 && ias <= 48) {
+        gDeviceInfo.va_start = GpuClientVaStart;
+        gDeviceInfo.va_size = (1ull << ias) - GpuClientVaStart;
+    } else if (ias >= 31 && ias <= 32) {
+        gDeviceInfo.va_start = GpuClientVaStart31;
+        gDeviceInfo.va_size = (1ull << ias) - GpuClientVaStart31;
+    }
+    const IOReturn published = native_adreno_publish(vm, &gSubmit, &gRing, &clock, timer ? nullptr : &gTimer, &gDeviceInfo, ias, 40);
     IOService *svc = published ? nullptr : native_adreno_published_service();
     int ok = 0, n = 0, errAt = -1, v1 = -1, v2 = -1;
     IOReturn err = 0;
@@ -1069,9 +1080,15 @@ void publishMetal() {
         gMetalStatus = kIOReturnUnsupported;
         return;
     }
+#if defined(XNU_TARGET_OS_OSX) && XNU_TARGET_OS_OSX
+    gMetalKext = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGraphicsFamily");
+    if (gMetalKext) {gMetalStatus = gMetalKext; return;}
+    const OSSymbol *name = OSSymbol::withCString("IOAccelerator");
+#else
     gMetalKext = OSKextLoadKextWithIdentifier("com.apple.iokit.IOGPUFamily");
     if (gMetalKext) {gMetalStatus = gMetalKext; return;}
     const OSSymbol *name = OSSymbol::withCString("IOAcceleratorES");
+#endif
     const OSMetaClass *parent = name ? OSMetaClass::getMetaClassWithName(name) : nullptr;
     OSSafeReleaseNULL(name);
     if (!parent || parent->getClassSize() != 136) {gMetalStatus = kIOReturnNotFound; return;}
@@ -1091,9 +1108,8 @@ void publishMetal() {
     accelerator->setProperty("MetalPluginName", "NativeAdrenoMetal");
     accelerator->setProperty("MetalPluginClassName", "NativeAdrenoMetalDevice");
     // The accelerator is the only service that accepts the plugin (0x4147) and hand-off (0x4148) open types. Mark it so the kernel's open path
-    // grants those opens in place of the sandbox verdict (the original profiles name no class of this driver); keep the named-process property
-    // for the render server as the sheng-compatible path.
-    accelerator->setProperty("NativeSandboxGrantProcess", "backboardd");
+    // grants those opens in place of the sandbox verdict (the original profiles name no class of this driver); on macOS any client can open Metal.
+    accelerator->setProperty("NativeSandboxGrantProcess", "*");
     accelerator->setProperty("NativeSandboxGrantService", kOSBooleanTrue);
     gMetalStage = 4;
     if (!accelerator->attach(IOService::getPlatform())) {accelerator->release(); gMetalStatus = kIOReturnNotAttached; return;}
@@ -1283,9 +1299,6 @@ void gpuStart() {
     char row[64];
     uint32_t *c = native_gpu_cp;
     if (!NativeAdrenoGpuContextBringup || !NativeAdrenoGpuContextBuffers || !gSmmuMap) {setRow(6, "Q nolink"); return;}
-    // The BO pool (one contiguous block, sheng-gpu-pool MiB, sheng's default 1536) is taken inside the bring-up; the driver's
-    // NativeAdrenoService reads the same argument only later, after the context is already built, so set it here first.
-    native_adreno_pool_mib = bootArg("sheng-gpu-pool", 1536);
     // 1. The GPU's own context bank and buffers (arm-smmu-qcom: the GPU always gets bank 0; DT iommus SIDs 0 and 1).
     NativeAdrenoGmuContextReport &q = native_gpu_context;
     const IOReturn ctx = NativeAdrenoGpuContextBringup(reinterpret_cast<volatile uint8_t *>(gSmmuMap->getVirtualAddress()),
@@ -1336,7 +1349,7 @@ void gpuStart() {
     gpuWr64(A740_UCHE_TRAP_BASE, 0x1fffffffff000ull);
     gpuWr64(A740_UCHE_WRITE_THRU_BASE, 0x1fffffffff000ull);
     gpuWr64(A740_UCHE_GMEM_RANGE_MIN, 0x1000000);                    // a740 family: SZ_16M
-    gpuWr64(A740_UCHE_GMEM_RANGE_MAX, 0x1000000 + 3 * 0x100000 - 1);  // gmem 3 MiB
+    gpuWr64(A740_UCHE_GMEM_RANGE_MAX, 0x1000000 + 0x180000 - 1);     // gmem 1.5 MiB (A732)
     gpuWr(A740_UCHE_CACHE_WAYS, 1u << 23);
     gpuWr(A740_CP_AHB_CNTL, 0x1);
     gpuWr(A740_RBBM_PERFCTR_CNTL, 0x1);
@@ -1419,11 +1432,11 @@ void gpuStart() {
         startHeartbeatThread();
         setRow(6, "S irq");
         irqAndTimer();
-        const bool selftest = bootArg("sheng-gpu-selftest", 0) != 0;
+        const bool selftest = bootArg("gpu-selftest", bootArg("sheng-gpu-selftest", 0)) != 0;
         if (selftest) userClientTest();
         setRow(5, "P start");
         publishAndWrapperTest(selftest);
-        if (bootArg("sheng-gpu-metal", 0) == 1) publishMetal();
+        if (bootArg("gpu-metal", bootArg("sheng-gpu-metal", 0)) == 1) publishMetal();
     }
 }
 void heartbeat();
@@ -1783,7 +1796,7 @@ void gmuPrerequisites(const gpb_result &r) {
 void probeThread(void *, wait_result_t) {
     registerExecObserver();
     unsigned mode = 0;
-    PE_parse_boot_argn("sheng-gpu-power", &mode, sizeof mode);
+    if (!PE_parse_boot_argn("gpu-power", &mode, sizeof mode)) PE_parse_boot_argn("sheng-gpu-power", &mode, sizeof mode);
     if (mode > 9) mode = 9;
     IOSleep(10000);
     native_gpu_power_stage = 1;
@@ -1831,7 +1844,8 @@ extern "C" uint32_t native_gpu_revote_now(void) {
 
 extern "C" void sheng_gpu_power_probe(void) {
     unsigned mode = 0;
-    if (!PE_parse_boot_argn("sheng-gpu-power", &mode, sizeof mode) || !mode || native_gpu_power_stage) return;
+    if ((!PE_parse_boot_argn("gpu-power", &mode, sizeof mode) &&
+         !PE_parse_boot_argn("sheng-gpu-power", &mode, sizeof mode)) || !mode || native_gpu_power_stage) return;
     native_gpu_power_stage = 1;
     thread_t thread = nullptr;
     if (kernel_thread_start(probeThread, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);

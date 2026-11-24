@@ -522,6 +522,8 @@ void native_legacy_display_probe(void) {
 }
 void native_legacy_display_late_probe(void);
 extern void native_keystore_probe(void);
+extern "C" void sheng_ethernet_probe(void);
+extern "C" void sheng_gpu_power_probe(void);
 // [0] the latest busy set, [1..3] matching threads that are not idle, for the diagnostic page (BootLog.c).
 extern "C" {char native_iokit_busy_text[4][192];}
 namespace {
@@ -577,6 +579,8 @@ void busyReport(void *, wait_result_t) {
 void native_legacy_display_late_probe(void) {
     {thread_t thread = nullptr; if (kernel_thread_start(busyReport, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);}
     native_keystore_probe();
+    sheng_ethernet_probe();
+    sheng_gpu_power_probe();
     IOService *display=pendingLegacyDisplay;if(!display){native_legacy_display_checkpoint();return;}pendingLegacyDisplay=nullptr;
     native_legacy_surface_status=OSKextLoadKextWithIdentifier("com.apple.iokit.IOSurface");
     // The IOSurface root service: iOS and iPadOS name it IOCoreSurfaceRoot; macOS leaves it unnamed, so its name is its class,
