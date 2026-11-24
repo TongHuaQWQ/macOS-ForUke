@@ -1,0 +1,170 @@
+name: build-macos27-gpu-addon
+
+# Build the macOS 27.3 (26C5035r) NativeAdrenoMetal bundle (metal2vulkan + Mesa Turnip darwin-kmd)
+# and macOS apfs_boot_util shim from UniXNU/UniXNU@2bbb39d on macOS 26 (Xcode 26.x).
+# Dispatch-only so ci-* kernel pushes stay isolated.
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_commit:
+        description: 'UniXNU commit (feat/macos)'
+        required: true
+        default: '2bbb39dcee0cada3b04e41f0256d678e80667c5b'
+
+permissions:
+  contents: read
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+jobs:
+  addon:
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Diagnose runner environment
+        run: |
+          set -x
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcode-select -p
+          xcrun --sdk macosx --show-sdk-path
+
+      - name: Check out UniXNU at pinned feat/macos commit
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: ${{ inputs.core_commit }}
+          path: UniXNU
+
+      - name: Init Adreno740, AdrenoMetal, and AdrenoPM4 submodules
+        working-directory: UniXNU
+        run: |
+          set -x
+          git submodule update --init --depth 1 drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4
+          git -C drivers/Adreno740 rev-parse HEAD
+          git -C drivers/AdrenoMetal rev-parse HEAD
+          git -C kits/AdrenoPM4 rev-parse HEAD
+
+      - name: Install build dependencies (LLVM, glslang, shaderc/spirv-tools, bison, ninja)
+        run: |
+          set -x
+          for attempt in 1 2 3; do
+            if brew install llvm glslang shaderc spirv-tools bison flex ninja pkg-config; then break; fi
+            echo "::warning::brew install attempt $attempt failed; retrying"
+            brew update --quiet || true
+            sleep $((attempt * 10))
+          done
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+          mkdir -p UniXNU/.cache/mesa-tools/bin
+          ln -sf "$(brew --prefix bison)/bin/bison" UniXNU/.cache/mesa-tools/bin/bison
+          UniXNU/.cache/mesa-tools/bin/bison --version | head -n 2
+
+      - name: Install Rust 1.98.0 with rust-src
+        run: |
+          set -x
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 --profile minimal --component rust-src
+          else
+            rustup self update || true
+            rustup toolchain install 1.98.0 --profile minimal --component rust-src
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustc" +1.98.0 --version
+          which llvm-as glslc spirv-val glslangValidator ninja pkg-config
+
+      - name: Cache Mesa venv and Cargo crates
+        uses: actions/cache@v4
+        with:
+          path: |
+            UniXNU/.cache/mesa-venv
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: macos27-gpu-addon-v1-${{ runner.arch }}-${{ inputs.core_commit }}
+
+      - name: Patch Turnip KMD patch for Adreno 732 (0x43030b00)
+        working-directory: UniXNU
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('patches/mesa/turnip-darwin-kmd.patch')
+          s = p.read_text()
+          old = '+   if (info->chip_id == 0x43050a01)\n+      device->dev_id.gpu_id = 740;\n'
+          new = '+   if (info->chip_id == 0x43050a01) device->dev_id.gpu_id = 740;\n+   else if (info->chip_id == 0x43030b00) device->dev_id.gpu_id = 732;\n'
+          assert old in s, 'turnip-darwin-kmd.patch anchor not found'
+          p.write_text(s.replace(old, new, 1))
+          print('Patched', p)
+          PY
+
+      - name: Build Turnip (macos27), NativeAdrenoMetal, apfs_boot_util, and addon blob
+        working-directory: UniXNU
+        run: |
+          set -x
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import tempfile
+
+          spec = importlib.util.spec_from_file_location('build_boot_runtime', 'scripts/build-boot-runtime.py')
+          bbr = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(bbr)
+
+          out_dir = Path('build/addon-out').resolve()
+          if out_dir.exists():
+              shutil.rmtree(out_dir)
+          out_dir.mkdir(parents=True)
+
+          # Check Mesa checkout and ensure 0x43030b00 exists in freedreno_devices.py before full build.
+          pins = json.loads(Path('scripts/data/adreno-compiler-inputs.json').read_text())
+          mesa = Path('.cache/mesa-work')
+          if not mesa.exists():
+              bbr.checkout(mesa, pins['mesa'])
+              for patch in pins['patches']:
+                  subprocess.run(['git', '-C', str(mesa), 'apply', str(Path(patch).resolve())], check=True)
+          fd_dev = (mesa / 'src/freedreno/common/freedreno_devices.py').read_text()
+          if '0x43030b00' not in fd_dev:
+              raise SystemExit('0x43030b00 (Adreno 732) absent from pinned Mesa freedreno_devices.py!')
+          print('Verified 0x43030b00 present in freedreno_devices.py')
+
+          plugin = bbr.build_plugin('macos27')
+          base_addon = out_dir / 'gpuaddon-base.bin'
+          env = dict(os.environ, ADRENO_PLUGIN_DIR=str(plugin))
+          subprocess.run(['python3', 'scripts/make-gpu-addon.py', '--publish', '--no-daemon', '--prefix', 'GPUBundles', str(base_addon)],
+                         env=env, check=True)
+
+          with tempfile.TemporaryDirectory(prefix='addon-work-', dir='build') as td:
+              work = Path(td)
+              shimmed = bbr.build_boot_shims(work, base_addon)
+              tmpl = work / 'user-template'
+              tmpl.mkdir()
+              (tmpl / '.skipbuddy').write_bytes(b'\n')
+              final_addon = out_dir / 'gpuaddon-macos27.bin'
+              subprocess.run(['python3', 'scripts/addon-add-dir.py', str(shimmed), str(final_addon),
+                              'Library/User Template/Non_localized', str(tmpl)], check=True)
+              hashes = bbr.addon_hashes(final_addon, work / 'verify')
+
+          (out_dir / 'cdhashes.json').write_text(json.dumps(dict(cdhashes=hashes), indent=2) + '\n')
+          shutil.copy2(plugin / 'trust.json', out_dir / 'trust.json')
+          print('CDHashes:', hashes)
+          print('Output:', sorted(p.name for p in out_dir.iterdir()))
+          PY
+
+      - name: Upload macOS 27.3 GPU addon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos27-gpu-addon
+          path: |
+            UniXNU/build/addon-out/gpuaddon-macos27.bin
+            UniXNU/build/addon-out/cdhashes.json
+            UniXNU/build/addon-out/trust.json
+          retention-days: 14
