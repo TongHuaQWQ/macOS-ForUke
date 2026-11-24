@@ -32,5 +32,12 @@
    "native_address": "0xfffffff007365020",
    "evidence": "Three instructions: bti c; orr x0,x0,#1; b <kfree_type_impl_internal>. The native function at 0xfffffff007365020 is byte-identical in shape (bti c; orr x0,x0,#1; b) and is the same twelve bytes long, which is the whole function: the original's next function, _kfree_data, starts at 0xfffffe000bb2c750, exactly as _kfree_data starts at 0xfffffff00736502c after the native one. It sits between _kfree_type_impl and _kfree_data in both images, matching the order in osfmk/kern/kalloc.c. The other native symbol of that name (0xfffffff007adb020) is a stack-framed wrapper with three calls and is not this function. Referenced by __DATA_CONST slots in com.apple.driver.AppleARMWatchdogTimer (0xfffffff007fbc468) and com.apple.driver.AppleMobileFileIntegrity (0xfffffff0081d42c8)."
   }
+ ],
+ "sites": [
+  {
+   "site": "0xfffffe00081d4630",
+   "native_symbol": "_unixnu_kernel_stack_shift",
+   "evidence": "macOS 27.3 (26C5035r) AppleMobileFileIntegrity's only GOT slot for PAGE_SHIFT_CONST. Its only reader is _CEElementIterate (0xfffffe0009854668), the CoreEntitlements DER iterator's stack check (sp & ((1 << *slot) - 1) < 0x80 takes the error exit), as in the 24A446 fixture. With the page shift (12) on the native 4 KiB kernel it fired inside a good stack: AMFI panicked \"failed to create OSDictionary copy: 14\" spawning the launchd boot task after fsck (exec_check_security_entitlement, load_machfile). Bound to unixnu_kernel_stack_shift, the stack allocation alignment shift, for which sp & mask stays at least 8 KiB inside any stack. Other components keep PAGE_SHIFT_CONST for page arithmetic."
+  }
  ]
 }

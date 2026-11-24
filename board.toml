@@ -693,8 +693,10 @@ kernel_args = [
   # download + frame loop; sheng-touch-hid=1 publishes digitizer reports
   # (required); poll mode is the device-proven frame path (the interrupt path
   # is not yet verified on hardware and falls back to polling by itself).
-  "sheng-touch=4",
-  "sheng-touch-hid=1",
+  # Parked inert sheng-* / uke-dpu-scanout placeholders (not linked in desktop-only kernel);
+  # restore when Adreno740 / ShengNovatekTouch are brought up on macOS 27.3.
+  # "sheng-touch=4",
+  # "sheng-touch-hid=1",
   # "sheng-touch-poll=1",   (parked: 2 bytes over the 1000-byte command line; touch polling is far
   # past the interrupt-controller question this round asks)
   "offline-legacy-unit-scale=2",
@@ -702,29 +704,19 @@ kernel_args = [
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
   "offline-legacy-phase=4",
-  # GPU track (same values as gpu-framepresent v2/v3): the staged A732 bring-up
-  # publishes the Metal device and the compositor submits the 1200-byte overlay
-  # records whose layer 6 frame the own-present path resolves.
-  "sheng-gpu-power=9",
-  "sheng-gpu-metal=1",
-  # GPU scanout hand-off (upstream GpuScanoutClient path): the addon plugin's
-  # scanout client blits the offered frame into the scanout on the GPU; a
-  # refused offer or failed copy falls back to the CPU copy (fail-safe).
-  "sheng-fb-gpu=1",
+  # "sheng-gpu-power=9",
+  # "sheng-gpu-metal=1",
+  # "sheng-fb-gpu=1",
   "fb-bgra=1",
   "fb-half=2",
   "ca-triple-buffer=1",
   "ca-free-wakeup=1",
-  # DPU direct scanout: map the compositor's plain BGRA surface into the display bank's stage-1
-  # window and flip VIG0/VIG1, instead of the 27 MB CPU copy per frame.
-  "uke-dpu-scanout=3",
-  # "sheng-gpu-pool=1536",   (parked for the 1000-byte command line: the GPU pool size only matters
-  # once NativeAdreno runs. Restore when the boot reaches userland.)
-  # The display refresh tick (upstream display port): 120 Hz vsync messages from the family's own sender, so the render
-  # server paces to the panel instead of its 1/60 s heartbeat, and IOMFBDisplayRefresh reports the panel rate.
-  # "sheng-vsync=120",   (parked to make room for uke-gic-diag=1 under the 1000-byte command-line
-  # cap: the GPU only reaches a vsync consumer long after the point this round is measuring, and the
-  # token costs 16 bytes. Restore it when the boot gets past the interrupt controller.)
+  # "uke-dpu-scanout=3",
+  # "sheng-gpu-pool=1536",
+  # Upstream macOS 27.3 display vsync & Data protection emulation (NativeLegacyDisplay + kpi_vfs):
+  "vsync=120",
+  "vsync-fixed=1",
+  "owner-dataprotect=1",
   # stage the owner-built NativeAdrenoMetal bundle (addon blob) into Data so the
   # render server opens a native Metal device; iconservicesagent then keeps
   # CoreImage on that device instead of the null-GL crash loop.
