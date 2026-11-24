@@ -340,6 +340,8 @@ extern "C" __attribute__((weak)) bool native_adreno_fences_detail(uint32_t *a,ui
 }
 extern "C" __attribute__((weak)) uint32_t native_ufs_dpu_map(unsigned,const uint64_t *,unsigned) {return 0;}
 extern "C" __attribute__((weak)) volatile uint32_t native_ufs_dpu_state=0;
+extern "C" __attribute__((weak)) int native_gpu_trace_enabled(void) {return 0;}
+extern "C" __attribute__((weak)) void native_gpu_trace_record(uint32_t,uint32_t,const uint64_t *,uint32_t) {}
 ''')
 compile_cpp(support, OUT / 'LegacyDisplaySupport27.o')
 
