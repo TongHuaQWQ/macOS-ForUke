@@ -340,8 +340,6 @@ extern "C" bool native_adreno_fences_detail(uint32_t *a,uint32_t *b,uint32_t *c)
     if(c)*c=0;
     return false;
 }
-extern "C" uint32_t native_ufs_dpu_map(unsigned,const uint64_t *,unsigned) {return 0;}
-extern "C" volatile uint32_t native_ufs_dpu_state=0;
 extern "C" int native_gpu_trace_enabled(void) {return 0;}
 extern "C" void native_gpu_trace_record(uint32_t,uint32_t,const uint64_t *,uint32_t) {}
 ''')
