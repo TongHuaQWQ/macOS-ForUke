@@ -242,7 +242,9 @@ for name, va in sorted(bindings.items()):
         addresses += f'.globl {name}\n.set {name}, {va:#x}\n'
     else:
         addresses += f'.globl {name}.original\n.set {name}.original, {target}\n'
-        text += f'.globl {name}\n{name}:\n bti c\n b {name}.original\n'
+        text += (f'.globl {name}\n{name}:\n bti c\n'
+                 f' adrp x16, {name}.slot@PAGE\n ldr x16, [x16, {name}.slot@PAGEOFF]\n br x16\n'
+                 f'.p2align 3\n{name}.slot:\n .quad {name}.original\n.p2align 2\n')
 asm.write_text(text)
 (OUT / 'original-addresses.S').write_text(addresses)
 sdk = run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
@@ -327,21 +329,21 @@ extern "C" int boot_progress_prepare_scanout(void) {return 1;}
 extern "C" void boot_progress_cancel_scanout(void) {}
 extern "C" void boot_progress_stage(const char *) {}
 extern "C" int boot_progress_pulse_anchor(uintptr_t,uint64_t,unsigned,unsigned,unsigned) {return 0;}
-extern "C" __attribute__((weak)) bool native_adreno_fences(uint32_t *submitted,uint32_t *retired) {
+extern "C" bool native_adreno_fences(uint32_t *submitted,uint32_t *retired) {
     if(submitted)*submitted=0;
     if(retired)*retired=0;
     return false;
 }
-extern "C" __attribute__((weak)) bool native_adreno_fences_detail(uint32_t *a,uint32_t *b,uint32_t *c) {
+extern "C" bool native_adreno_fences_detail(uint32_t *a,uint32_t *b,uint32_t *c) {
     if(a)*a=0;
     if(b)*b=0;
     if(c)*c=0;
     return false;
 }
-extern "C" __attribute__((weak)) uint32_t native_ufs_dpu_map(unsigned,const uint64_t *,unsigned) {return 0;}
-extern "C" __attribute__((weak)) volatile uint32_t native_ufs_dpu_state=0;
-extern "C" __attribute__((weak)) int native_gpu_trace_enabled(void) {return 0;}
-extern "C" __attribute__((weak)) void native_gpu_trace_record(uint32_t,uint32_t,const uint64_t *,uint32_t) {}
+extern "C" uint32_t native_ufs_dpu_map(unsigned,const uint64_t *,unsigned) {return 0;}
+extern "C" volatile uint32_t native_ufs_dpu_state=0;
+extern "C" int native_gpu_trace_enabled(void) {return 0;}
+extern "C" void native_gpu_trace_record(uint32_t,uint32_t,const uint64_t *,uint32_t) {}
 ''')
 compile_cpp(support, OUT / 'LegacyDisplaySupport27.o')
 
