@@ -86,7 +86,7 @@ def main():
         header27 = header_src.read_text()
         head, sep, tail = header27.partition('class IOAESAccelerator')
         if sep:
-            if 'getAlgorithmName' not in head:
+            if 'virtual const char *getAlgorithmName();' not in head:
                 head = head.replace(
                     'OSDeclareDefaultStructors(IOCryptoAccelerator)',
                     'OSDeclareDefaultStructors(IOCryptoAccelerator)\npublic:\n  virtual const char *getAlgorithmName();',
