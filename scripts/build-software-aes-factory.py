@@ -83,12 +83,16 @@ def main():
     # produces the wrong arm64e virtual PAC discriminator.
     header_src = source.with_name('OriginalAESABI.h')
     if header_src.is_file():
-        header27 = header_src.read_text().replace(
+        header27 = header_src.read_text()
+        assert 'virtual const char *getAlgorithmName();' in header27, 'unexpected OriginalAESABI.h'
+        header27 = header27.replace(
+            'virtual const char *getAlgorithmName();',
+            'const char *getAlgorithmName() override;',
+            1,
+        ).replace(
             'OSDeclareDefaultStructors(IOCryptoAccelerator)',
             'OSDeclareDefaultStructors(IOCryptoAccelerator)\npublic:\n  virtual const char *getAlgorithmName();',
-        ).replace(
-            '  virtual const char *getAlgorithmName();\n  virtual IOReturn performAES',
-            '  const char *getAlgorithmName() override;\n  virtual IOReturn performAES',
+            1,
         )
         (factory / 'OriginalAESABI.h').write_text(header27)
     generated = factory / 'NativeAES.cpp'
