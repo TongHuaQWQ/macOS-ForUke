@@ -4,9 +4,12 @@ name: build-macos27-gpu-addon
 # UniXNU/metal2vulkan + Mesa Turnip darwin-kmd patched for Adreno 732 0x43030b00),
 # macOS apfs_boot_util shim, unixnu-absentd stand-in, and desktop addon files on
 # macOS 26 (Xcode 26.6) from UniXNU/UniXNU@main.
-# Dispatch-only so ci-* kernel pushes stay isolated.
+# Dispatch or push to addon-ci-* so ci-* kernel pushes stay isolated.
 
 on:
+  push:
+    branches:
+      - 'addon-ci-*'
   workflow_dispatch:
     inputs:
       core_commit:
@@ -35,7 +38,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     env:
-      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode || '26.6' }}.app/Contents/Developer
 
     steps:
       - name: Diagnose runner environment
@@ -52,7 +55,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
-          ref: ${{ inputs.core_commit }}
+          ref: ${{ inputs.core_commit || 'b04f131da9151182dbb26ce4e638fa8acc2933ac' }}
           path: UniXNU
 
       - uses: actions/setup-python@v5
@@ -64,7 +67,7 @@ jobs:
         run: |
           set -x
           git submodule update --init --depth 1 drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4
-          git -C drivers/AdrenoMetal fetch --depth 1 origin "${{ inputs.metal_commit }}"
+          git -C drivers/AdrenoMetal fetch --depth 1 origin "${{ inputs.metal_commit || '0b7094bfdd221c210fb68b8927c3625d610df671' }}"
           git -C drivers/AdrenoMetal checkout --detach FETCH_HEAD
           git -C drivers/Adreno740 rev-parse HEAD
           git -C drivers/AdrenoMetal rev-parse HEAD
@@ -107,7 +110,7 @@ jobs:
             UniXNU/.cache/mesa-venv
             ~/.cargo/registry
             ~/.cargo/git
-          key: macos27-gpu-addon-v2-${{ runner.arch }}-${{ inputs.core_commit }}-${{ inputs.metal_commit }}
+          key: macos27-gpu-addon-v2-${{ runner.arch }}-${{ inputs.core_commit || 'b04f131da9151182dbb26ce4e638fa8acc2933ac' }}-${{ inputs.metal_commit || '0b7094bfdd221c210fb68b8927c3625d610df671' }}
 
       - name: Prepare Mesa checkout and record Adreno 732 (0x43030b00) patch
         working-directory: UniXNU
