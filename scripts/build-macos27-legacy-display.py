@@ -357,14 +357,13 @@ extern "C" uint64_t native_legacy_surface_allocation(OSObject *surface) {
 extern "C" {
 char boot_progress_ext[8][48];
 char boot_progress_ext_wide[2][112];
-__attribute__((weak)) volatile uint32_t native_gpu_dcvs[15];
+volatile uint32_t native_gpu_dcvs[15];
 }
 extern "C" int boot_progress_prepare_scanout(void) {return 1;}
 extern "C" void boot_progress_cancel_scanout(void) {}
 extern "C" void boot_progress_stage(const char *) {}
 extern "C" int boot_progress_pulse_anchor(uintptr_t,uint64_t,unsigned,unsigned,unsigned) {return 0;}
-extern "C" __attribute__((weak)) void sheng_cpufreq_probe(void) {}
-extern "C" __attribute__((weak)) kern_return_t iokit_physical_descriptor_close_notify(IOMemoryDescriptor *,void (*)(void *,uint64_t),void *) {return 5;}
+extern "C" void sheng_cpufreq_probe(void) {}
 '''
 if not adreno_enabled:
     support_body += '''extern "C" bool native_adreno_fences(uint32_t *submitted,uint32_t *retired) {

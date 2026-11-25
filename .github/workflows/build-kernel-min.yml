@@ -565,6 +565,12 @@ jobs:
             fi
           else
             echo "kernel.macho was not produced" | tee artifacts/MISSING.txt
+            fallback_native="$OUT/tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+            if [ -n "$OUT" ] && [ -f "$fallback_native" ]; then
+              mkdir -p artifacts/native
+              cp "$fallback_native" artifacts/native/native.macho
+              shasum -a 256 "$fallback_native" | tee artifacts/native/native.macho.sha256
+            fi
           fi
           if [ -n "$OUT" ] && [ -d "$OUT/logs" ]; then
             cp -R "$OUT/logs" artifacts/logs
