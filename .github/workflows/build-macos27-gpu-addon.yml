@@ -98,8 +98,18 @@ jobs:
             rustup self update || true
             rustup toolchain install 1.98.0 --profile minimal --component rust-src
           fi
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustc" +1.98.0 --version
+          if [ -d "$HOME/.cargo/bin" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          if command -v brew >/dev/null 2>&1 && brew --prefix rustup >/dev/null 2>&1; then
+            RUSTUP_BIN="$(brew --prefix rustup)/bin"
+            echo "$RUSTUP_BIN" >> "$GITHUB_PATH"
+            export PATH="$RUSTUP_BIN:$PATH"
+          fi
+          which rustup cargo rustc
+          cargo +1.98.0 --version
+          rustc +1.98.0 --version
           which llvm-as llvm-objcopy glslc spirv-val glslangValidator ninja pkg-config python3
           python3 --version
 
