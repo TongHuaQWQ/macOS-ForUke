@@ -2,6 +2,7 @@
 #include "NativeGpuTrace.h"
 /* SPDX-License-Identifier: MIT */
 #include "NativeAdrenoSubmit.h"
+#include "NativeAdrenoSubmitDiagnostic.h"
 #include "AdrenoPM4.h"
 #include <IOKit/IOLib.h>
 
@@ -40,6 +41,7 @@ static bool auditsWanted()
 /* Fence waits: [0] calls, [1] timeouts, [2] the fence of the last timed-out wait, [3] the fence value the GPU had written then, [4] the newest fence handed out,
  * [5] the newest completed, [6] waits for a fence no job holds (observeFence path), [7] the last fence refused as never submitted. */
 extern "C" {volatile uint32_t native_adreno_fence_wait[8];}
+extern "C" {volatile uint32_t native_adreno_stall_capture_status;}
 /* The CP's state once a fence stopped advancing (NativeAdrenoRing::stallState): [0] the fence, [1] the timed-out waits of it so far, then
  * the ring's words. Taken at the 10th and again at the 1000th timed-out wait of the fence that is the next to complete. native_adreno_stall_mem
  * holds, from the same moment, the SMMU context's FSR, FAR (lo, hi) and FSYNR0, then for the BR IB1, the BV IB1 and the BV IB2 17 words: the
@@ -81,6 +83,9 @@ static void peekFetch(const NativeAdrenoVm *vm,uint64_t fetch,volatile uint32_t 
  * two before it, [11] IB1s read, [12] dwords read, [13] IB1s that could not be read. Nothing found with every IB1 read means the
  * address did not come from the job's commands. */
 extern "C" {volatile uint32_t native_adreno_stall_find[14];}
+/* The number of the hang the snapshot was taken at, 0 for one of an ordinary stall. A hang's snapshot stays until the next hang:
+ * the stalls after it are short ones that end by themselves, and a hang the hang check finds has no waiter that would take one. */
+extern "C" {volatile uint32_t native_adreno_stall_hang;}
 static bool indirectBuffer(uint32_t header) {return (header>>28)==7u && ((header>>16)&0x7fu)==0x3fu && (header&0x3fffu)==3;}
 static void findIb2(const NativeAdrenoVm *vm,const uint32_t *ring_words,size_t ring_count,uint32_t ib2_low)
 {
@@ -111,6 +116,52 @@ static void findIb2(const NativeAdrenoVm *vm,const uint32_t *ring_words,size_t r
         ++index;
     }
     for(unsigned i=0;i<14;++i)native_adreno_stall_find[i]=out[i];
+}
+/* Where the stalled job's commands hold the faulting address: every IB1 of the job and every IB2 those name (up to 512) are read for
+ * dwords equal to the fault's low address word. [0] matches, [1] of those followed by a 0 word (a 64-bit address with no upper word),
+ * [2] level of the first match (1 IB1, 2 IB2), [3..4] that IB's address low/high, [5] the match's dword offset in it, [6..15] the eight
+ * words before it, the match and the word after. [16] the nearest dword below the fault within 1 MiB followed by a 0 word (a base the
+ * faulting fetch could have offset from), [17] its distance, [18] its level, [19..20] its IB, [21] its offset, [22..29] the six words
+ * before it, it and the word after. [30] IBs read, [31] dwords read. The fault low word is searched only when its upper word is 0. */
+extern "C" {volatile uint32_t native_adreno_stall_fault[32];}
+static void findFault(const NativeAdrenoVm *vm,const uint32_t *ring_words,size_t ring_count,uint32_t far_low)
+{
+    uint32_t out[32]={};
+    static uint32_t chunk[1024];
+    static uint64_t ib2s[512];static uint32_t ib2_size[512];
+    uint32_t ib2_count=0,best=0xffffffffu;
+    auto scan=[&](uint64_t ib,uint32_t dwords,uint32_t level) {
+        ++out[30];
+        for(uint32_t at=0;at<dwords;at+=1024) {
+            const uint32_t take=dwords-at<1024?dwords-at:1024;
+            if(vm->peekWordsUncached(ib+4ull*at,chunk,take))return;
+            out[31]+=take;
+            for(uint32_t k=0;k<take;++k) {
+                const uint32_t w=chunk[k],next=k+1<take?chunk[k+1]:1;
+                if(level==1 && k+3<take && indirectBuffer(w) && ib2_count<512 && chunk[k+2]) {
+                    ib2s[ib2_count]=(uint64_t)chunk[k+2]<<32|chunk[k+1];ib2_size[ib2_count++]=chunk[k+3]&0xfffffu;
+                }
+                if(w==far_low) {
+                    if(!out[0]) {
+                        out[2]=level;out[3]=(uint32_t)ib;out[4]=(uint32_t)(ib>>32);out[5]=at+k;
+                        for(unsigned i=0;i<10;++i) {const int x=(int)k-8+(int)i;out[6+i]=x>=0 && x<(int)take?chunk[x]:0xdeadbeef;}
+                    }
+                    ++out[0];if(!next)++out[1];
+                }
+                if(w<far_low && far_low-w<=(1u<<20) && !next && far_low-w<best) {
+                    best=far_low-w;out[16]=w;out[17]=best;out[18]=level;out[19]=(uint32_t)ib;out[20]=(uint32_t)(ib>>32);out[21]=at+k;
+                    for(unsigned i=0;i<8;++i) {const int x=(int)k-6+(int)i;out[22+i]=x>=0 && x<(int)take?chunk[x]:0xdeadbeef;}
+                }
+            }
+        }
+    };
+    for(size_t i=0;i+3<ring_count;++i) {
+        if(!indirectBuffer(ring_words[i]))continue;
+        scan((uint64_t)ring_words[i+2]<<32|ring_words[i+1],ring_words[i+3]&0xfffffu,1);
+        i+=3;
+    }
+    for(uint32_t i=0;i<ib2_count;++i)scan(ib2s[i],ib2_size[i],2);
+    for(unsigned i=0;i<32;++i)native_adreno_stall_fault[i]=out[i];
 }
 static uint32_t stall_fence,stall_timeouts,stall_stage;   /* stage: 0 none yet, 1 write pointer given again, 2 translations dropped, 3 bus drained */
 static uint64_t stall_began_us,stall_last_us;   /* the fence's first and latest timed-out wait */
@@ -320,7 +371,7 @@ void NativeAdrenoSubmit::driveSwitch(const NativeAdrenoRingClock *clock)
     if(preempt_.inFlight()) {
         if(!completeSwitch()) {
             /* The CP never finished a switch: no more are tried (the restart in recover() brings the CP back). */
-            if(preempt_.timedOut(PreemptSwitchTimeoutUs)) {
+            if(!preempt_dead_ && preempt_.timedOut(PreemptSwitchTimeoutUs)) {
                 uint32_t progress[6]={};
                 (void)ring(0)->progressState(progress);
                 {
@@ -543,12 +594,16 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
     for(size_t i=0;i<count;++i) {
         const NativeAdrenoSubmitBuffer &buffer=buffers[i];
         if(!buffer.handle || !buffer.bytes || (buffer.bytes&3) || buffer.bytes>SubmitMaxIbBytes)
-            return kIOReturnBadArgument;
+            return nativeAdrenoSubmitRejected(kIOReturnBadArgument,NativeAdrenoSubmitIbSize,
+                uint32_t(i),buffer.handle,buffer.iova,buffer.bytes,0,SubmitMaxIbBytes);
         uint64_t iova=0;size_t bytes=0;unsigned permissions=0;
         IOReturn status=vm_->describe(buffer.handle,&iova,&bytes,&permissions);
-        if(status)return status;
+        if(status)return nativeAdrenoSubmitRejected(status,NativeAdrenoSubmitMapping,
+            uint32_t(i),buffer.handle,buffer.iova,buffer.bytes);
         if(!(permissions&ArmSmmu4KRead) || buffer.iova<iova ||
-            buffer.iova-iova>bytes || buffer.bytes>bytes-(buffer.iova-iova))return kIOReturnBadArgument;
+            buffer.iova-iova>bytes || buffer.bytes>bytes-(buffer.iova-iova))
+            return nativeAdrenoSubmitRejected(kIOReturnBadArgument,NativeAdrenoSubmitRange,
+                uint32_t(i),buffer.handle,buffer.iova,buffer.bytes,iova,bytes,permissions);
         uint32_t header=0;
         if(AdrenoPM4Type7(SubmitIndirectBuffer,SubmitIbWords,&header)!=AdrenoPM4Success)
             return poison();
@@ -562,14 +617,16 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
         if(!known)handles[handle_count++]=buffer.handle;
     }
     IOReturn swept=retireCompleted();
-    if(swept)return swept;
+    if(swept)return nativeAdrenoSubmitRejected(swept,NativeAdrenoSubmitRetirement);
     Job *job=free();
     if(!job)return kIOReturnNoMemory;
     for(size_t i=0;i<handle_count;++i) {
         IOReturn status=vm_->holdJob(handles[i]);
         if(status) {
+            const uint32_t rejected=uint32_t(i);const uint64_t handle=handles[i];
             while(i) {vm_->retireJobAfterCompletion(handles[--i]);++stats_.references_retired;}
-            return status;
+            return nativeAdrenoSubmitRejected(status,NativeAdrenoSubmitReference,
+                rejected,handle);
         }
         ++stats_.references_held;
     }
@@ -653,7 +710,7 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
      * submission (10944 in i568), so each frame began with page walks. A stalled fence still invalidates (below). */
     if(status) {
         for(size_t i=0;i<handle_count;++i) {vm_->retireJobAfterCompletion(handles[i]);++stats_.references_retired;}
-        return status;
+        return nativeAdrenoSubmitRejected(status,NativeAdrenoSubmitPublish);
     }
     lap(3);
     /* The ring this job goes to (the first ring alone unless the board turned the switch on). */
@@ -676,7 +733,7 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
     status=useVm(vm,clock,index);
     if(status) {
         for(size_t i=0;i<handle_count;++i) {vm_->retireJobAfterCompletion(handles[i]);++stats_.references_retired;}
-        return status;
+        return nativeAdrenoSubmitRejected(status,NativeAdrenoSubmitTable,index,0,vm->ttbr0());
     }
     /* One numbering for both rings: a fence tells its own ring, and a switch's arrival retires the jobs queued behind it. */
     /* The board's earlier submissions (the CP init and the probes) numbered themselves on the first ring: the next number is above
@@ -697,7 +754,8 @@ IOReturn NativeAdrenoSubmit::submit(NativeAdrenoVm *vm,const NativeAdrenoSubmitB
         }
         while(handle_count) {vm_->retireJobAfterCompletion(handles[--handle_count]);++stats_.references_retired;}
         /* No room in the ring yet: the caller waits for an earlier job and submits again. */
-        return status==kIOReturnNoResources?kIOReturnBusy:status;
+        return nativeAdrenoSubmitRejected(status==kIOReturnNoResources?kIOReturnBusy:status,
+            NativeAdrenoSubmitRing,index,0,0,word_count,target->lastSubmitted(),base,number);
     }
     for(size_t i=0;i<handle_count;++i)job->handles[i]=handles[i];
     job->count=handle_count;job->fence=value;job->queue=queue;job->active=true;job->vm_next=vm_->nextHandle();job->vm=vm;
@@ -858,7 +916,13 @@ void NativeAdrenoSubmit::noteStall(uint32_t observed,const NativeAdrenoRingClock
 void NativeAdrenoSubmit::snapshot(uint32_t next,uint32_t waited,uint64_t now,uint64_t pending,NativeAdrenoRing *stalled)
 {
     uint32_t words[NativeAdrenoRingStallWords]={},fault[4]={};
-    if(stalled->stallState(words))return;
+    if(native_adreno_stall_hang)return;
+    /* A failed register read must not expose the previous hang's CP words. */
+    native_adreno_stall[0]=next;native_adreno_stall[1]=stall_timeouts;
+    for(unsigned i=0;i<NativeAdrenoRingStallWords;++i)native_adreno_stall[2+i]=0;
+    const IOReturn captured=stalled->stallState(words);
+    native_adreno_stall_capture_status=uint32_t(captured);
+    if(captured)return;
     {
         const uint32_t n=native_adreno_stall_log_count;volatile uint64_t *slot=native_adreno_stall_log[n&31];
         const Job *owner=find(next);
@@ -879,6 +943,8 @@ void NativeAdrenoSubmit::snapshot(uint32_t next,uint32_t waited,uint64_t now,uin
     else peekFetch(space,(uint64_t)words[11]<<32|words[17],&native_adreno_stall_mem[4+17]);   /* BV IB1 base: the low word only */
     peekFetch(space,(uint64_t)words[21]<<32|words[20],&native_adreno_stall_mem[4+34]);
     if(job && job->word_count)findIb2(space,job->words,job->word_count,words[13]);
+    for(unsigned i=0;i<32;++i)native_adreno_stall_fault[i]=0;
+    if(job && job->word_count && fault[0] && !fault[2] && fault[1])findFault(space,job->words,job->word_count,fault[1]);
     {
         uint64_t brIb=(uint64_t)words[11]<<32|words[10],bvIb=(uint64_t)words[11]<<32|words[17];
         if(!stalled->ibBefore(words[8],&ib,&size))brIb=ib;
@@ -1041,8 +1107,12 @@ IOReturn NativeAdrenoSubmit::hangCheck(bool *hung)
         for(auto &job:jobs_)if(job.active && job.ring!=preempt_.loaded() && (job.ring==1 || preempt_dead_)) {
             const bool aged=job.ring==1 && reachable && now && job.submit_us && now-job.submit_us>PreemptStrandedUs;
             if(preempt_dead_ || aged) {
+                /* Keep the stranded ring's state before recovery rewrites its pointers. */
+                native_adreno_stall_hang=0;
+                snapshot(job.fence,fence_issued_,now,0,ring(job.ring));
                 markPreemptDead(preempt_dead_?dead_reason_:3);
                 stranded_=true;*hung=true;++stats_.hangs;
+                native_adreno_stall_hang=(uint32_t)stats_.hangs;
                 return kIOReturnSuccess;
             }
         }
@@ -1053,10 +1123,14 @@ IOReturn NativeAdrenoSubmit::hangCheck(bool *hung)
     if(fence!=hang_fence_) {hang_fence_=fence;progress_retries_=0;return kIOReturnSuccess;}
     if(fence>=last || madeProgress())return kIOReturnSuccess;
     progress_retries_=0;++stats_.hangs;*hung=true;
+    /* Where the CP stopped, before the restart clears it. */
+    native_adreno_stall_hang=0;
+    snapshot(fence+1,last,clock_now_?clock_now_(clock_cookie_):0,0,r);
+    native_adreno_stall_hang=(uint32_t)stats_.hangs;
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,const NativeAdrenoRingClock *clock,
-    NativeAdrenoRecovery *out)
+    NativeAdrenoRecovery *out,uint32_t fault_status)
 {
     if(!out)return kIOReturnBadArgument;*out={};
     if(!attached_)return kIOReturnNotReady;
@@ -1065,7 +1139,8 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     const uint32_t last0=ring(0)->lastSubmitted(),last1=preemption()?ring(1)->lastSubmitted():0;
     const uint32_t last=(int32_t)(last1-last0)>0?last1:last0;
     uint32_t fence=0;
-    const bool stranded=stranded_;
+    const bool stranded=stranded_ && !fault_status;
+    out->fault_status=fault_status;
     stranded_=false;last_stranded_=stranded;
     if(stranded) {
         /* No job is to blame: the second ring's work never got a CP. What each ring finished retires by that ring's own fence, and the
@@ -1117,7 +1192,9 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     /* A hang inside a second-ring job is blamed on the second ring: it is given up (reason 4), the replay and everything after run on the first. */
     if(guilty && guilty->ring==1)markPreemptDead(4);
     recovery_info_[0]=guilty?uint32_t(guilty->ring):9;recovery_info_[1]=last0;recovery_info_[2]=last1;recovery_info_[3]=preemption()?preempt_.loaded():0;
-    IOReturn status=restart(cookie,ring(0),hung);
+    const uint32_t completed=stranded?fence:hung;
+    out->completed=completed;
+    IOReturn status=restart(cookie,ring(0),completed);
     out->status=status;
     if(status) {native_adreno_recover_trace[0]=2;native_adreno_recover_trace[1]=uint32_t(status);return poison();}
     poisoned_=false;hang_fence_=hung;progress_retries_=0;
@@ -1135,7 +1212,7 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     if(preemption()) {
         preempt_.restart(0);low_service_us_=low_slice_until_=0;aging_grant_=false;
         ring(0)->setCurrent(true);
-        (void)ring(1)->restartSecondary(hung);
+        (void)ring(1)->restartSecondary(completed);
         ring(1)->setCurrent(false);
         for(unsigned i=0;i<ring_count_;++i) {
             ring(i)->tableInstalled(vm_->ttbr0());
@@ -1144,7 +1221,7 @@ IOReturn NativeAdrenoSubmit::recover(NativeAdrenoRestart restart,void *cookie,co
     }
     uint32_t nop=0;
     if(AdrenoPM4Type7(0x10,0,&nop)!=AdrenoPM4Success) {native_adreno_recover_trace[0]=4;return poison();}   /* CP_NOP */
-    for(uint32_t next=hung+1;next && next<=last;++next) {
+    for(uint32_t next=completed+1;next && next<=last;++next) {
         Job *job=find(next);
         NativeAdrenoVm *vm=job && job->vm?job->vm:vm_;
         const bool run=job && !vm->unusable() && job->word_count;

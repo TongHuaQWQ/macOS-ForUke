@@ -65,7 +65,7 @@ for source in sources:
     objects.append(obj)
 # GMU, SQE and ZAP firmware as strong definitions over NativeAdrenoFirmwareDefaults.cpp's weak empty
 # ones. When .cache/firmware/uke-gpu holds the verified binaries, embed them into __DATA_CONST,__const.
-# When absent on a public runner, emit fixed-size file-backed __DATA,__data slots with ASCII sentinels
+# When absent on a public runner, emit fixed-size file-backed __DATA_CONST,__const slots with ASCII sentinels
 # and _size = 0 so local post-link injection can populate them in native.macho before emit_prelink.py.
 inputs = json.loads((ROOT / 'scripts/data/uke-gpu-inputs.json').read_text())
 firmware = inputs['firmware']
@@ -87,7 +87,7 @@ for label, role, sentinel in embedded:
                       '.p2align 3', '.globl ' + label + '_size', label + '_size:', '.quad ' + label + '_end-' + label]
         present += 1
     else:
-        print('INFO: %s absent; emitting __DATA,__data slot (%d B, _size=0)' % (pin['name'], pin['bytes']))
+        print('INFO: %s absent; emitting __DATA_CONST,__const slot (%d B, _size=0)' % (pin['name'], pin['bytes']))
         if pin['bytes'] < 16:
             sys.exit('firmware %s too small for slot sentinel' % pin['name'])
         slot_asm += ['.p2align 12', '.globl ' + label, label + ':',
@@ -95,10 +95,8 @@ for label, role, sentinel in embedded:
                      '.space %d, 0' % (pin['bytes'] - 16),
                      '.p2align 3', '.globl ' + label + '_size', label + '_size:', '.quad 0']
 assembly = []
-if const_asm:
-    assembly += ['.section __DATA_CONST,__const', *const_asm]
-if slot_asm:
-    assembly += ['.section __DATA,__data', *slot_asm]
+if const_asm or slot_asm:
+    assembly += ['.section __DATA_CONST,__const', *const_asm, *slot_asm]
 fw_asm_path = out / ('firmware.S' if present == len(embedded) else 'firmware-slots.S')
 fw_asm_path.write_text('\n'.join(assembly) + '\n')
 subprocess.run(['xcrun', 'clang', '-target', TRIPLE, '-Wno-incompatible-sysroot',

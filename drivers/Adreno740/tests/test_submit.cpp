@@ -8,6 +8,13 @@
 #define CHECK(x) do {if(!(x)){std::fprintf(stderr,"line %d: %s\n",__LINE__,#x);std::exit(1);}}while(0)
 #define SMMU_BYTES 0x40000
 #define CB 0x22000
+extern "C" {
+extern volatile uint32_t native_adreno_stall_hang;
+extern volatile uint32_t native_adreno_stall_capture_status;
+extern volatile uint32_t native_adreno_stall[24];
+extern volatile uint32_t native_adreno_stall_fault[32];
+extern volatile uint32_t native_adreno_switch_timeouts;
+}
 IOReturn NativeAdrenoQueryCpu4K(NativeAdrenoCpuState *out)
 {CHECK(out);*out={};return kIOReturnSuccess;}
 IOReturn NativeAdrenoMaintainOwnedPages(void *mapping,size_t bytes,NativeAdrenoCacheOperation op)
@@ -41,6 +48,7 @@ struct CpPeer {
     std::vector<uint32_t> regs;
     std::vector<uint32_t> writes;
     unsigned publish=0,acquire=0,barriers=0,fail_publish=0,fail_acquire=0,fail_barrier=0;
+    bool fail_stall=false;
     CpPeer():regs(0x10000,0){}
 };
 static CpPeer cp;
@@ -48,7 +56,7 @@ static uint64_t clock_us=0;
 static int cwrite(void *c,uint32_t reg,uint32_t v)
 {CHECK(c==&cp && reg<cp.regs.size());cp.regs[reg]=v;cp.writes.push_back(reg);return 0;}
 static int cread(void *c,uint32_t reg,uint32_t *v)
-{CHECK(c==&cp && v && reg<cp.regs.size());*v=cp.regs[reg];return 0;}
+{CHECK(c==&cp && v && reg<cp.regs.size());if(cp.fail_stall && reg==0x0210)return 1;*v=cp.regs[reg];return 0;}
 static int cbarrier(void *c){CHECK(c==&cp);++cp.barriers;return cp.barriers==cp.fail_barrier;}
 static int cpublish(void *c,const volatile uint32_t *w,size_t bytes)
 {CHECK(c==&cp && w && (bytes==32768 || bytes==4096));++cp.publish;return cp.publish==cp.fail_publish;}
@@ -295,6 +303,33 @@ int main()
         CHECK(submit.detach()==kIOReturnNotReady);
         CHECK(submit.submit(nullptr,1,0,nullptr)==kIOReturnBadArgument);
     }
+    /* A low-word SMMU fault is searched in the hung job's own command memory. */
+    {
+        Path p;CHECK(exposed(p)==kIOReturnSuccess);
+        auto *words=static_cast<uint32_t *>(p.object.mapping());
+        std::memset(words,0,4096);
+        words[8]=0x123456;words[16]=0x123416;
+        NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,4096};uint32_t fence=0;
+        CHECK(p.submit.submit(&buffer,1,0,&fence)==kIOReturnSuccess);
+        mmio[(CB+0x58)/4]=0x80000402;mmio[(CB+0x60)/4]=0x123456;
+        bool hung=false;
+        for(unsigned i=0;i<4 && !hung;++i)CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess);
+        CHECK(hung && native_adreno_stall_fault[0]==1 && native_adreno_stall_fault[1]==1);
+        CHECK(native_adreno_stall_fault[2]==1 && native_adreno_stall_fault[3]==0x800000 && native_adreno_stall_fault[5]==8);
+        CHECK(native_adreno_stall_fault[16]==0x123416 && native_adreno_stall_fault[17]==64 && native_adreno_stall_fault[30]==1);
+        std::puts("PASS hang snapshot searches the job's fault address and nearest base");
+    }
+    {
+        Path p;CHECK(exposed(p)==kIOReturnSuccess);
+        NativeAdrenoSubmitBuffer buffer{p.handle,0x800000,4096};uint32_t fence=0;
+        CHECK(p.submit.submit(&buffer,1,0,&fence)==kIOReturnSuccess);
+        native_adreno_stall[2]=0xdeadbeef;cp.fail_stall=true;
+        bool hung=false;
+        for(unsigned i=0;i<4 && !hung;++i)CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess);
+        CHECK(hung && native_adreno_stall_capture_status && native_adreno_stall[2]==0);
+        cp.fail_stall=false;
+        std::puts("PASS failed hang capture does not retain a previous CP snapshot");
+    }
     /* msm hangcheck: no fence progress with work pending is a hang once the CP state stops moving or after three progress retries; recovery
      * marks the guilty job's VM, moves the fence past it, restarts the ring and replays the later jobs with their own fences. */
     {
@@ -308,7 +343,9 @@ int main()
             CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess && !hung);
         }
         cp.regs[0x0928]=0x9000;
+        native_adreno_stall_fault[30]=123;   /* an older address search must not survive a hang without an SMMU fault */
         CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess && hung);   /* three retries spent */
+        CHECK(native_adreno_stall_hang==1 && native_adreno_stall[12]==0x9000 && !native_adreno_stall_fault[30]);
         CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess && !hung);   /* progress retries start again: one retry for the changed state */
         static uint32_t restarted;restarted=~0u;
         auto restart=[](void *,NativeAdrenoRing *ring,uint32_t completed)->IOReturn {restarted=completed;return ring->restart(completed);};
@@ -342,11 +379,14 @@ int main()
         bool hung=true;
         CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess && !hung);   /* the first check records both threads' words */
         CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess && hung);    /* neither thread moved */
+        CHECK(native_adreno_stall_hang==1 && native_adreno_stall[18]==0x21);
         cp.regs[0x0a70]=39;   /* CP_BV_IB1_REM_SIZE moves, BR's words do not */
         CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess && !hung);
         cp.regs[0x0a66]=0x25;   /* the BV read pointer */
         CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess && !hung);
+        CHECK(native_adreno_stall[18]==0x21);   /* progress leaves the hung CP's snapshot intact */
         CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess && hung);    /* still again */
+        CHECK(native_adreno_stall_hang==2 && native_adreno_stall[18]==0x25);
         for(uint32_t reg:{0x0a66u,0x0a6du,0x0a70u,0x0a71u,0x0a74u,0x0a90u,0x0a91u})cp.regs[reg]=0;
     }
     {
@@ -446,7 +486,7 @@ int main()
         CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==0);
         std::puts("PASS a pausing wait drives the ring switch for a low-ring job");
     }
-    {
+    for(bool faulted:{false,true}) {
         /* A switch back to the first ring that the CP never finishes: the first-ring job behind it is stranded, not guilty. Its
          * client keeps its device, and the job runs again after the restart. */
         Path p;CHECK(exposed(p)==kIOReturnSuccess);NativeAdrenoRing low;
@@ -467,15 +507,27 @@ int main()
         lowfence[1]=low_fence;CHECK(p.submit.retireCompleted()==0 && p.submit.outstanding()==0);
         p.submit.nextPriority(0);CHECK(p.submit.submit(&p.vm,&buffer,1,8,&high_fence,&ringclock)==0);
         CHECK(cp.regs[0x08a0]&1);                                                    /* the switch back, which never finishes */
-        clock_us+=1100000;CHECK(p.submit.retireCompleted()==0);
+        const uint32_t timeouts=native_adreno_switch_timeouts;
+        clock_us+=1100000;
+        for(unsigned i=0;i<3;++i)CHECK(p.submit.retireCompleted()==0);
+        CHECK(native_adreno_switch_timeouts==timeouts+1);
         bool hung=false;
         for(unsigned i=0;i<4 && !hung;++i) {clock_us+=1000;CHECK(p.submit.hangCheck(&hung)==kIOReturnSuccess);}
         CHECK(hung && p.submit.deadReason()==2);
+        CHECK(native_adreno_stall_hang && native_adreno_stall[0]==high_fence);
+        CHECK(native_adreno_stall_capture_status==0);
         NativeAdrenoRecovery result{};
         auto restart=[](void *,NativeAdrenoRing *ring,uint32_t completed)->IOReturn {return ring->restart(completed);};
-        CHECK(p.submit.recover(restart,nullptr,&ringclock,&result)==kIOReturnSuccess);
-        CHECK(!result.guilty && p.submit.lastRecoveryStranded() && p.submit.outstanding()==1);
-        std::puts("PASS a first-ring job behind a switch the CP never finished is replayed, with no job blamed");
+        CHECK(p.submit.recover(restart,nullptr,&ringclock,&result,faulted?0x80000002u:0)==kIOReturnSuccess);
+        if(faulted) {
+            CHECK(result.guilty==&p.vm && !p.submit.lastRecoveryStranded() && !result.replayed &&
+                result.completed==high_fence && p.submit.outstanding()==0 && p.vm.hangs()==1);
+        } else {
+            CHECK(!result.guilty && p.submit.lastRecoveryStranded() && result.replayed==1 &&
+                result.completed==high_fence-1 && fencemem[1]==high_fence-1 && p.ring.lastSubmitted()==high_fence && p.submit.outstanding()==1);
+        }
+        std::puts(faulted?"PASS SMMU fault selects guilty recovery during a stranded switch":
+            "PASS a stranded switch is counted once and replays the oldest pending job");
     }
     /* The driver's own synchronized buffers at a submission: not cleaned, and audited by the first 8 submissions and every 1024th. A
      * dirty line the audit finds ends the trust: that submission and every later one clean them again, and the audits stop. */

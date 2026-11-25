@@ -23,6 +23,7 @@
 #include <kern/clock.h>
 #include <kern/sched_prim.h>
 #include <pexpert/pexpert.h>
+#include <IOKit/IOLib.h>
 
 extern kern_return_t kernel_thread_start_priority(thread_continue_t continuation,
     void *parameter, int priority, thread_t *new_thread);
@@ -45,7 +46,7 @@ struct uke_crash_scan_state {
 static uint8_t ukeCrashDirents[UKE_CRASH_DIR_BYTES] __attribute__((aligned(8)));
 static char ukeCrashText[UKE_CRASH_READ_BYTES + 1] __attribute__((aligned(8)));
 #define UKE_CRASH_FULL_BYTES (640 * 1024)
-static char ukeCrashFull[UKE_CRASH_FULL_BYTES] __attribute__((aligned(8)));
+static char *ukeCrashFull;
 #define UKE_CRASH_WINDOW_BYTES (12 * 1024)
 static char ukeCrashWindow[UKE_CRASH_WINDOW_BYTES + 1] __attribute__((aligned(8)));
 static uint64_t ukeCrashSeen[UKE_CRASH_SEEN];
@@ -296,6 +297,12 @@ uke_crash_symbol_value(const char *at, const char *end, char *out, size_t cap)
 static void
 uke_crash_symbols(vfs_context_t ctx, const char *name)
 {
+	if (ukeCrashFull == NULL) {
+		ukeCrashFull = (char *)IOMalloc(UKE_CRASH_FULL_BYTES);
+		if (ukeCrashFull == NULL) {
+			return;
+		}
+	}
 	char path[192];
 	uke_crash_copy(path, sizeof path, UKE_CRASH_DIR "/");
 	uke_crash_copy(path + strlen(path), sizeof path - strlen(path), name);

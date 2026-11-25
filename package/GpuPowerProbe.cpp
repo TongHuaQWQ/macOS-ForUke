@@ -281,7 +281,7 @@ constexpr uint64_t kGmuPhys[3] = {0x03d68000, 0x03d50000, 0x03d9e000};
 constexpr uint64_t kGmuLen[3] = {0x37000, 0x10000, 0x1000};
 constexpr uint32_t kGmuSysReset = 0x1f800 * 4 - 0x68000, kGmuHfiStatus = 0x1f980 * 4 - 0x68000;
 constexpr uint32_t kRsccSeqBusy = 0x101 * 4, kCxMiscTcmRet = 0x39 * 4;
-alignas(8) uint8_t gCmdDb[kCmdDbBytes];
+uint8_t *gCmdDb = nullptr;
 ShengGmuVoteInputs gVoteInputs;
 AdrenoHfiStartupConfig gStartup;
 OSSharedPtr<IOMemoryMap> gCmdDbMap, gGmuMaps[3];
@@ -1717,7 +1717,11 @@ void gmuPrerequisites(const gpb_result &r) {
     native_gpu_power_stage = 0x52;
     unsigned parse = 9, build = 9;
     uint32_t version = 0, magic = 0;
-    if (volatile uint32_t *db = mapWords(kCmdDbBase, kCmdDbBytes, gCmdDbMap)) {
+    if (!gCmdDb) {
+        gCmdDb = static_cast<uint8_t *>(IOMalloc(kCmdDbBytes));
+        if (gCmdDb) memset(gCmdDb, 0, kCmdDbBytes);
+    }
+    if (volatile uint32_t *db = gCmdDb ? mapWords(kCmdDbBase, kCmdDbBytes, gCmdDbMap) : nullptr) {
         for (uint64_t i = 0; i < kCmdDbBytes / 4; ++i) {
             const uint32_t w = db[i];
             memcpy(gCmdDb + 4 * i, &w, 4);
@@ -1755,7 +1759,7 @@ void gmuPrerequisites(const gpb_result &r) {
     // Row 4 keeps the mode and the power summary and carries the GMU state, so a command-DB diagnostic in row 7 never hides it.
     snprintf(row, sizeof row, "GPU m%u io=%d pw%u%u %s", r.mode, r.io_error, r.powered_cx, r.powered_clocks, gmuText);
     setRow(4, row);
-    if (parse != ShengGmuDbSuccess && parse != 9) {
+    if (gCmdDb && parse != ShengGmuDbSuccess && parse != 9) {
         // H<slv_id>:<cnt> of the slave table (cmd_db_header.header[i], 16 bytes from offset 8) up to the first zero id
         int at = snprintf(gmuText, sizeof gmuText, "H");
         for (unsigned i = 0; i < 8 && at < static_cast<int>(sizeof gmuText) - 8; ++i) {

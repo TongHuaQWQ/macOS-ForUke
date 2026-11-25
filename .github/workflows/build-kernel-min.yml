@@ -563,6 +563,11 @@ jobs:
             else
               echo "native kernel not collected (kernel.json native=${native:-<none>})" >> artifacts/MISSING.txt
             fi
+            ref_kernel="$OUT/tree/build/xnu/fileset-reference/mach.release.bcm2837.unstripped.noctf"
+            if [ -n "$OUT" ] && [ -f "$ref_kernel" ]; then
+              mkdir -p artifacts/fileset-reference
+              cp "$ref_kernel" artifacts/fileset-reference/
+            fi
           else
             echo "kernel.macho was not produced" | tee artifacts/MISSING.txt
             fallback_native="$OUT/tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"

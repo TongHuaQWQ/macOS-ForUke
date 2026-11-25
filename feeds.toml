@@ -27,8 +27,8 @@ local = "../UniXNU-sm7675-common"
 [[source]]
 name = "Adreno740"
 kind = "driver"
-# Local SM7675/A732-patched copy exported from UniXNU/Adreno740@031f35cc
-# (0x68000 GMU delta, TimerGmuLow 0x16220, 2196 KiB preempt record, GMU Pool adopt).
+# Local SM7675/A732-patched copy synced with UniXNU/Adreno740@2962e289c969
+# (0x68000 GMU delta, TimerGmuLow 0x16220, 2196 KiB preempt record, GMU/GPU pool adopt).
 local = "drivers/Adreno740"
 
 [[source]]
@@ -41,7 +41,7 @@ commit = "b0d812d578efa2acb005b66f73168891719af09a"
 name = "AdrenoMetal"
 kind = "driver"
 git = "https://github.com/UniXNU/AdrenoMetal.git"
-commit = "51b7003f9c05ec46f0aa4ed7e9bb47f8db893c04"
+commit = "0b7094bfdd221c210fb68b8927c3625d610df671"
 
 # USB device mode, the way the same-device upstream runs it: the Qualcomm subclass of the original
 # AppleUSBXDCI in this fileset. Allenwdk/UniXNU-uke pins the same commit and drives it with the board

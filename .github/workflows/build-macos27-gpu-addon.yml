@@ -1,16 +1,26 @@
 name: build-macos27-gpu-addon
 
-# Build the macOS 27.3 (26C5035r) NativeAdrenoMetal bundle (metal2vulkan + Mesa Turnip darwin-kmd)
-# and macOS apfs_boot_util shim from UniXNU/UniXNU@2bbb39d on macOS 26 (Xcode 26.x).
+# Build the macOS 27.3 (26C5035r) NativeAdrenoMetal bundle (UniXNU/AdrenoMetal@main +
+# UniXNU/metal2vulkan + Mesa Turnip darwin-kmd patched for Adreno 732 0x43030b00),
+# macOS apfs_boot_util shim, unixnu-absentd stand-in, and desktop addon files on
+# macOS 26 (Xcode 26.6) from UniXNU/UniXNU@main.
 # Dispatch-only so ci-* kernel pushes stay isolated.
 
 on:
   workflow_dispatch:
     inputs:
       core_commit:
-        description: 'UniXNU commit (feat/macos)'
+        description: 'UniXNU commit (main)'
         required: true
-        default: '2bbb39dcee0cada3b04e41f0256d678e80667c5b'
+        default: 'b04f131da9151182dbb26ce4e638fa8acc2933ac'
+      metal_commit:
+        description: 'UniXNU/AdrenoMetal commit (main)'
+        required: true
+        default: '0b7094bfdd221c210fb68b8927c3625d610df671'
+      xcode:
+        description: 'Xcode version on macos-26 (/Applications/Xcode_<version>.app)'
+        required: true
+        default: '26.6'
 
 permissions:
   contents: read
@@ -18,39 +28,49 @@ permissions:
 env:
   HOMEBREW_NO_AUTO_UPDATE: 1
   HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
 
 jobs:
   addon:
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
 
     steps:
       - name: Diagnose runner environment
         run: |
           set -x
+          [ -d "$DEVELOPER_DIR" ] || { echo "::error::Xcode not found at $DEVELOPER_DIR; installed: $(printf '%s ' /Applications/Xcode_*.app)"; exit 1; }
           sw_vers
           uname -m
           xcodebuild -version
           xcode-select -p
           xcrun --sdk macosx --show-sdk-path
 
-      - name: Check out UniXNU at pinned feat/macos commit
+      - name: Check out UniXNU at pinned main commit
         uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
           ref: ${{ inputs.core_commit }}
           path: UniXNU
 
-      - name: Init Adreno740, AdrenoMetal, and AdrenoPM4 submodules
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Init Adreno740, AdrenoMetal (main), and AdrenoPM4 submodules
         working-directory: UniXNU
         run: |
           set -x
           git submodule update --init --depth 1 drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4
+          git -C drivers/AdrenoMetal fetch --depth 1 origin "${{ inputs.metal_commit }}"
+          git -C drivers/AdrenoMetal checkout --detach FETCH_HEAD
           git -C drivers/Adreno740 rev-parse HEAD
           git -C drivers/AdrenoMetal rev-parse HEAD
           git -C kits/AdrenoPM4 rev-parse HEAD
 
-      - name: Install build dependencies (LLVM, glslang, shaderc/spirv-tools, bison, ninja)
+      - name: Install build dependencies (LLVM, glslang, shaderc/spirv-tools, bison, flex, ninja)
         run: |
           set -x
           for attempt in 1 2 3; do
@@ -77,7 +97,8 @@ jobs:
           fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustc" +1.98.0 --version
-          which llvm-as glslc spirv-val glslangValidator ninja pkg-config
+          which llvm-as llvm-objcopy glslc spirv-val glslangValidator ninja pkg-config python3
+          python3 --version
 
       - name: Cache Mesa venv and Cargo crates
         uses: actions/cache@v4
@@ -86,23 +107,72 @@ jobs:
             UniXNU/.cache/mesa-venv
             ~/.cargo/registry
             ~/.cargo/git
-          key: macos27-gpu-addon-v1-${{ runner.arch }}-${{ inputs.core_commit }}
+          key: macos27-gpu-addon-v2-${{ runner.arch }}-${{ inputs.core_commit }}-${{ inputs.metal_commit }}
 
-      - name: Patch Turnip KMD patch for Adreno 732 (0x43030b00)
+      - name: Prepare Mesa checkout and record Adreno 732 (0x43030b00) patch
         working-directory: UniXNU
         run: |
           python3 - <<'PY'
+          import difflib
+          import importlib.util
+          import json
           from pathlib import Path
-          p = Path('patches/mesa/turnip-darwin-kmd.patch')
-          s = p.read_text()
-          old = '+   if (info->chip_id == 0x43050a01)\n+      device->dev_id.gpu_id = 740;\n'
-          new = '+   if (info->chip_id == 0x43050a01) device->dev_id.gpu_id = 740;\n+   else if (info->chip_id == 0x43030b00) device->dev_id.gpu_id = 732;\n'
-          assert old in s, 'turnip-darwin-kmd.patch anchor not found'
-          p.write_text(s.replace(old, new, 1))
-          print('Patched', p)
+          import shutil
+          import subprocess
+          import sys
+
+          sys.path.insert(0, 'scripts')
+          from mesa_patch_identity import validate_recorded_patches
+
+          spec = importlib.util.spec_from_file_location('build_boot_runtime', 'scripts/build-boot-runtime.py')
+          bbr = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(bbr)
+
+          inputs_path = Path('scripts/data/adreno-compiler-inputs.json')
+          pins = json.loads(inputs_path.read_text())
+          mesa = Path('.cache/mesa-work')
+          if mesa.exists():
+              shutil.rmtree(mesa)
+          bbr.checkout(mesa, pins['mesa'])
+          for patch in pins['patches']:
+              subprocess.run(['git', '-C', str(mesa), 'apply', str(Path(patch).resolve())], check=True)
+
+          fd_dev = (mesa / 'src/freedreno/common/freedreno_devices.py').read_text()
+          if '0x43030b00' not in fd_dev:
+              raise SystemExit('0x43030b00 (Adreno 732) absent from pinned Mesa freedreno_devices.py!')
+          print('Verified 0x43030b00 present in freedreno_devices.py')
+
+          rel = 'src/freedreno/vulkan/tu_knl_darwin.cc'
+          target = mesa / rel
+          old = target.read_text()
+          anchor = '   if (info->chip_id == 0x43050a01)\n      device->dev_id.gpu_id = 740;\n'
+          assert anchor in old, f'{rel} anchor not found after applying recorded patches'
+          replacement = (
+              '   if (info->chip_id == 0x43050a01)\n'
+              '      device->dev_id.gpu_id = 740;\n'
+              '   else if (info->chip_id == 0x43030b00)\n'
+              '      device->dev_id.gpu_id = 732;\n'
+          )
+          new = old.replace(anchor, replacement, 1)
+          diff_lines = list(difflib.unified_diff(
+              old.splitlines(keepends=True),
+              new.splitlines(keepends=True),
+              fromfile='a/' + rel,
+              tofile='b/' + rel,
+              n=3,
+          ))
+          patch_rel = 'patches/mesa/turnip-uke-a732-chip-id.patch'
+          patch_file = Path(patch_rel)
+          patch_file.write_text(f'diff --git a/{rel} b/{rel}\n' + ''.join(diff_lines))
+          subprocess.run(['git', '-C', str(mesa), 'apply', str(patch_file.resolve())], check=True)
+
+          pins['patches'].append(patch_rel)
+          inputs_path.write_text(json.dumps(pins, indent=2) + '\n')
+          validate_recorded_patches(Path('.').resolve(), mesa.resolve(), pins)
+          print('Recorded and validated', patch_rel)
           PY
 
-      - name: Build Turnip (macos27), NativeAdrenoMetal, apfs_boot_util, and addon blob
+      - name: Build Turnip (macos27), NativeAdrenoMetal, apfs_boot_util, absentd, and addon blob
         working-directory: UniXNU
         run: |
           set -x
@@ -111,6 +181,7 @@ jobs:
           import json
           import os
           from pathlib import Path
+          import plistlib
           import shutil
           import subprocess
           import tempfile
@@ -124,33 +195,64 @@ jobs:
               shutil.rmtree(out_dir)
           out_dir.mkdir(parents=True)
 
-          # Check Mesa checkout and ensure 0x43030b00 exists in freedreno_devices.py before full build.
-          pins = json.loads(Path('scripts/data/adreno-compiler-inputs.json').read_text())
-          mesa = Path('.cache/mesa-work')
-          if not mesa.exists():
-              bbr.checkout(mesa, pins['mesa'])
-              for patch in pins['patches']:
-                  subprocess.run(['git', '-C', str(mesa), 'apply', str(Path(patch).resolve())], check=True)
-          fd_dev = (mesa / 'src/freedreno/common/freedreno_devices.py').read_text()
-          if '0x43030b00' not in fd_dev:
-              raise SystemExit('0x43030b00 (Adreno 732) absent from pinned Mesa freedreno_devices.py!')
-          print('Verified 0x43030b00 present in freedreno_devices.py')
-
           plugin = bbr.build_plugin('macos27')
           base_addon = out_dir / 'gpuaddon-base.bin'
           env = dict(os.environ, ADRENO_PLUGIN_DIR=str(plugin))
-          subprocess.run(['python3', 'scripts/make-gpu-addon.py', '--publish', '--no-daemon', '--prefix', 'GPUBundles', str(base_addon)],
-                         env=env, check=True)
+          subprocess.run(
+              ['python3', 'scripts/make-gpu-addon.py', '--publish', '--no-daemon', '--prefix', 'GPUBundles', str(base_addon)],
+              env=env,
+              check=True,
+          )
 
           with tempfile.TemporaryDirectory(prefix='addon-work-', dir='build') as td:
               work = Path(td)
               shimmed = bbr.build_boot_shims(work, base_addon)
+
+              absent = work / 'absent'
+              bbr.script('absent-service/build.py', absent, 'macos27')
+              with_absent = work / 'addon-absent.bin'
+              bbr.script('addon-add-dir.py', shimmed, with_absent, 'bin', absent / 'bin')
+
               tmpl = work / 'user-template'
               tmpl.mkdir()
               (tmpl / '.skipbuddy').write_bytes(b'\n')
+
+              jobs = work / 'desktop-jobs'
+              jobs.mkdir()
+              command = (
+                  "source='/Library/GPUBundles/Shader Cache.app'; "
+                  '[ -d "$source" ] || source=\'/private/var/ngpu/Applications/Shader Cache.app\'; '
+                  "destination='/Applications/Shader Cache.app'; "
+                  '[ -d "$source" ] || exit 0; /bin/mkdir -p /Applications; '
+                  'if [ -L "$destination" ] || [ ! -e "$destination" ]; then '
+                  '/bin/ln -sfn "$source" "$destination"; fi'
+              )
+              (jobs / 'org.unixnu.shader-cache.install.plist').write_bytes(
+                  plistlib.dumps(
+                      dict(Label='org.unixnu.shader-cache.install', RunAtLoad=True, ProgramArguments=['/bin/sh', '-c', command]),
+                      fmt=plistlib.FMT_XML,
+                  )
+              )
+              (jobs / 'org.unixnu.icon-cache.generation.plist').write_bytes(
+                  plistlib.dumps(bbr.icon_cache_job(), fmt=plistlib.FMT_XML)
+              )
+
+              manual = work / 'desktop-share'
+              manual.mkdir()
+              (manual / 'manual-session').write_text('1\n')
+
               final_addon = out_dir / 'gpuaddon-macos27.bin'
-              subprocess.run(['python3', 'scripts/addon-add-dir.py', str(shimmed), str(final_addon),
-                              'Library/User Template/Non_localized', str(tmpl)], check=True)
+              bbr.script(
+                  'addon-add-dir.py',
+                  with_absent,
+                  final_addon,
+                  'Library/User Template/Non_localized',
+                  tmpl,
+                  'Library/LaunchDaemons',
+                  jobs,
+                  'test/share',
+                  manual,
+              )
               hashes = bbr.addon_hashes(final_addon, work / 'verify')
 
           (out_dir / 'cdhashes.json').write_text(json.dumps(dict(cdhashes=hashes), indent=2) + '\n')
