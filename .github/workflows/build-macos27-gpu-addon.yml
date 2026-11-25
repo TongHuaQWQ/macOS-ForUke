@@ -66,7 +66,7 @@ jobs:
         working-directory: UniXNU
         run: |
           set -x
-          git submodule update --init --depth 1 drivers/Adreno740 drivers/AdrenoMetal kits/AdrenoPM4
+          git submodule update --init --depth 1 drivers/Adreno740 drivers/AdrenoMetal drivers/GopFramebuffer kits/AdrenoPM4
           git -C drivers/AdrenoMetal fetch --depth 1 origin "${{ inputs.metal_commit || '0b7094bfdd221c210fb68b8927c3625d610df671' }}"
           git -C drivers/AdrenoMetal checkout --detach FETCH_HEAD
           git -C drivers/Adreno740 rev-parse HEAD
