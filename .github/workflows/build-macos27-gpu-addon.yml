@@ -189,6 +189,15 @@ jobs:
         working-directory: UniXNU
         run: |
           set -x
+          # Mesa's meson header probe misses dlfcn.h with the arm64e macos27 target; disk_cache.h needs it.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/build-turnip-darwin.py')
+          s = p.read_text()
+          old = "'-fstack-protector-strong']"
+          assert old in s
+          p.write_text(s.replace(old, "'-fstack-protector-strong', '-DHAVE_DLFCN_H=1']", 1))
+          PY
           python3 - <<'PY'
           import importlib.util
           import json
