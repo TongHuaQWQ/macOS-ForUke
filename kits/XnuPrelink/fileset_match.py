@@ -638,18 +638,19 @@ class Matcher:
         """Find the reviewed symbol again after the kernel that carried the recorded address grew.
 
         Only addresses that are function starts carrying the declared symbol compete. When the name is
-        duplicated -- which is what these records exist for -- the winner is the one whose symbol set has no
-        other `<same>_external` style alias, because the alias is precisely the address AppleImage4 must not
-        be routed to. Anything else is reported with the candidates instead of guessed.
+        duplicated -- which is what these records exist for (e.g. _kalloc_type_impl and
+        _kfree_type_var_impl in osfmk/kern/kalloc.c vs static helpers of the same name) -- the
+        exported kext-callable entry is the one that also carries the `<symbol>_external` alias.
+        Anything else is reported with the candidates instead of guessed.
         """
         candidates = sorted(address for address, names in self.native.symbol_names.items()
                             if symbol in names and address in self.native.functions)
         if len(candidates) > 1:
-            plain = [address for address in candidates
-                     if not any(name != symbol and name.endswith('_external')
-                                for name in self.native.symbol_names[address])]
-            if len(plain) == 1:
-                candidates = plain
+            external = [address for address in candidates
+                        if any(name == f'{symbol}_external'
+                               for name in self.native.symbol_names[address])]
+            if len(external) == 1:
+                candidates = external
         if len(candidates) != 1:
             described = ', '.join(
                 f'{address:#x} ({", ".join(sorted(self.native.symbol_names[address]))})'
