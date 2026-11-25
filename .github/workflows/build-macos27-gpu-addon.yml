@@ -151,7 +151,7 @@ jobs:
               subprocess.run(['git', '-C', str(mesa), 'apply', str(Path(patch).resolve())], check=True)
 
           fd_dev = (mesa / 'src/freedreno/common/freedreno_devices.py').read_text()
-          if '0x43030b00' not in fd_dev:
+          if '0x43030b00' not in fd_dev.lower():
               raise SystemExit('0x43030b00 (Adreno 732) absent from pinned Mesa freedreno_devices.py!')
           print('Verified 0x43030b00 present in freedreno_devices.py')
 
@@ -164,7 +164,7 @@ jobs:
               '   if (info->chip_id == 0x43050a01)\n'
               '      device->dev_id.gpu_id = 740;\n'
               '   else if (info->chip_id == 0x43030b00)\n'
-              '      device->dev_id.gpu_id = 732;\n'
+              '      device->dev_id.gpu_id = 735;\n'
           )
           new = old.replace(anchor, replacement, 1)
           diff_lines = list(difflib.unified_diff(
