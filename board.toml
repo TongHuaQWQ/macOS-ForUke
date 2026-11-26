@@ -681,7 +681,9 @@ kernel_args = [
   # whether the vendor eUSB2 sequence actually took effect). Without this arg the graphics console
   # stays as it is and the card owns the panel. Cost: kernel text is no longer drawn, so a panic is
   # only readable through the panic screen itself. Restore this line when text is what is being read.
-  "-uketextconsole",
+  # Parked for graphical desktop boot: -uketextconsole keeps the console in text mode and scrolls the
+  # 27 MB GOP framebuffer synchronously on every newline, starving single-core userland/WindowServer.
+  # "-uketextconsole",
   "kt_fixed_zones=120",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",
@@ -813,11 +815,14 @@ kernel_args = [
   "bluetooth=0",
   # "bt-rails=0",
   "disable-watchdogd=1",
-  "exec-log=1",
+  # "exec-log=1",
   "log=1",
+  "log-gpu=1",
+  "log-video=1",
+  "ci-mps=0",
   # Parked sheng-log=1 / uke-log-first / uke-log-last to keep kernel_args <= 1000 B while
   # syncing UniXNU-sheng macOS 27.3 display/compositor arguments.
-  "nointr_consio=1",
+  # "nointr_consio=1",
   # b261: make the FIRST platform error panic instead of being swallowed. The 2026-11-18 00:37 boot
   # printed "ArmDTPlatformIO: platform error ... (ignored)" without end, and the kernel never reset, so
   # the DRAM the diagnostics live in was only recovered by a long press - which loses it. ArmDTPlatformIO
