@@ -38,20 +38,8 @@ static const struct QcomMaskedWrite kQcomEusb2Init[] = {
     {0x64, 0x08, 0x00},                 /* HS_PHY_CTRL2: USB2_SUSPEND_N_SEL */
     {0x94, 0x02, 0x00},                 /* CFG0: CMN_CTRL_OVERRIDE_EN */
 };
-/* PM7550BA repeater, offsets from its peripheral base (SID 7, 0xfd00 - this board's own DT: eusb2-repeater@fd00
- * {reg = <0xfd00>} under qcom,pm7550ba@7, live.dts:12814): enable, then the PMIC tuning table. */
+/* PM8550B repeater, offsets from its peripheral base (SID 7, 0xfd00): enable, then the PMIC tuning table. */
 enum {kQcomRepeaterStatus = 0x08, kQcomRepeaterOk = 0x80, kQcomRepeaterEnable = 0x46, kQcomRepeaterEnableBit = 0x80,
-      kQcomRepeaterForceEn5 = 0xe8, kQcomRepeaterForceVal5 = 0xed, kQcomRepeaterTuneFirst = 0x50, kQcomRepeaterTuneBytes = 12};
-/* The 12 tuning bytes are this device's own DT, not sheng's SM8550 table that this file used to carry
- * (0x51=0x08, 0x54=0x03, 0x57=0x05 - three of another board's values, wrong on cliffs). The DT stores each
- * entry as the pair (value, offset) in qcom,param-override-seq*, so the order here is offsets 0x50..0x5b:
- *   live.dts:12820  qcom,param-override-seq          device  <- written at bring-up, we are a device port
- *   live.dts:12821  qcom,param-override-seq-factory  factory tuning (vendor picks it for some platform ids)
- *   live.dts:12822  qcom,param-override-seq-host     host
- * The device sequence is the one phy-qcom-eusb2-repeater.c applies for PHY_MODE_USB_DEVICE, and it is what the
- * vendor's own repeater-qti-pmic-eusb2.ko writes on this unit (RE: work/re/docs/2026-11-14-eusb2-repeater-spmi.md). */
-static const uint8_t kQcomRepeaterTuneDevice[kQcomRepeaterTuneBytes] = {
-    0x00, 0x0c, 0x03, 0x07, 0x02, 0x03, 0x00, 0x04, 0x02, 0x00, 0x03, 0x02};
-static const uint8_t kQcomRepeaterTuneHost[kQcomRepeaterTuneBytes] = {
-    0x00, 0x08, 0x05, 0x07, 0x02, 0x01, 0x00, 0x06, 0x02, 0x00, 0x03, 0x02};
+      kQcomRepeaterForceEn5 = 0xe8, kQcomRepeaterForceVal5 = 0xed};
+static const struct {uint8_t offset, value;} kQcomRepeaterTune[] = {{0x51, 0x08}, {0x54, 0x03}, {0x57, 0x05}};
 #endif

@@ -801,6 +801,7 @@ kernel_args = [
   # usb=0 during desktop bring-up to avoid 1 Hz beat console spam; restore usb=4 when testing USB.
   "usb=1",
   # "usb-rails=0",
+  "usb-host=5",
   # usb-conn=1 asserts GCTL.SOFTCONN from the beat sampler, i.e. pulls the device up by hand. The family does it
   # in XDCI_POWER_ON, which configd's USBDeviceConfiguration asks for -- and this board has no userland yet, so
   # nothing asks. With the counter in the beat line (`pwron=`) one panel then says which of the two it is: a

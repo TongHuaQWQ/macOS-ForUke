@@ -542,7 +542,11 @@ def main():
             if (base / name).is_dir():
                 kernel_includes += ['-I', str(base / name)]
     objects.append(OUT / 'QcomDwc3.o')
-    compile_unit(driver / 'QcomDwc3.cpp', cxx_record, OUT / 'QcomDwc3.o', common, 'c++')
+    compile_unit(driver / 'QcomDwc3.cpp', cxx_record, OUT / 'QcomDwc3.o', common + ['-DQCOM_DWC3_UKE_USB2=1'], 'c++')
+    compile_unit(kits / 'UkeUsbBoard.cpp', cxx_record, OUT / 'UkeUsbBoard.o', common + ['-DQCOM_DWC3_UKE_USB2=1'], 'c++')
+    objects.append(OUT / 'UkeUsbBoard.o')
+    compile_unit(kits / 'UkeUsbWcdBus.cpp', cxx_record, OUT / 'UkeUsbWcdBus.o', common + ['-DQCOM_DWC3_UKE_USB2=1'], 'c++')
+    objects.append(OUT / 'UkeUsbWcdBus.o')
     compile_unit(kits / 'UsbProbe.cpp', cxx_record, OUT / 'UsbProbe.o', common, 'c++')
     objects.append(OUT / 'UsbProbe.o')
     for unit in ('GeniI2c.c', 'QcomRpmh.c', 'QcomDwc3Platform.c'):
