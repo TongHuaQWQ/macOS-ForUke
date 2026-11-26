@@ -43,7 +43,8 @@ bool ensureSe0() {
     volatile uint32_t *se0 = mapPa(kSe0, 0x4000);
     if (!gcc || !se0) return false;
     // GPIOs 52 and 53: SE0 I2C SDA/SCL (function 1, 2 mA, pull-up).
-    for (unsigned pin : {52u, 53u}) {
+    const unsigned pins[] = {52u, 53u};
+    for (unsigned pin : pins) {
         volatile uint32_t *tlmm = mapPa(0x0f100000ull + 0x1000ull * pin, 0x1000);
         if (!tlmm) return false;
         uint32_t cfg = rd(tlmm, 0);
