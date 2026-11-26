@@ -217,7 +217,8 @@ def header(name, fixture_data, extra_overrides):
             '// authenticates with that slot\'s recorded diversity, which is what lets an original caller\n'
             '// call the native override. Slots the driver overrides are reached through the macros below.\n'
             '#pragma once\n'
-            '#include <IOKit/IOService.h>\n\n']
+            '#include <IOKit/IOService.h>\n'
+            'class IOInterruptEventSource;\n\n']
     for slot, macro in sorted(macros.items()):
         text.append(f'#define {macro} {methods[slot]["name"]}\n')
     text.append(f'\nclass {name} : public IOService {{\n'
@@ -413,7 +414,9 @@ def compile_unit(source, record_name, obj, extra, language):
     (OUT / (obj.stem + '-compile-command.json')).write_text(json.dumps(command, indent=2) + '\n')
     (OUT / (obj.stem + '-compile.log')).write_text(result.stdout)
     if result.returncode:
-        raise SystemExit(f'{source.name} failed to compile:\n{result.stdout[-6000:]}')
+        err_lines = [l for l in result.stdout.splitlines() if 'error:' in l or 'fatal error:' in l]
+        summary = '\n'.join(err_lines[:40]) + '\n---\n' + result.stdout[-3000:]
+        raise SystemExit(f'{source.name} failed to compile:\n{summary}')
     if '-Werror' not in command:
         errors = [line for line in result.stdout.splitlines() if re.search(r'(^|: )error: ', line)]
         if errors:

@@ -678,7 +678,7 @@ public:
         uint32_t *fields = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(this) + 0x2628);
         fields[0] = 1; fields[1] = 0; fields[2] = 4; fields[3] = 4;
     }
-#ifdef QCOM_DWC3_UKE_USB2
+#if defined(QCOM_DWC3_UKE_USB2) && defined(XDCI_CONNECTION_DONE)
     void XDCI_CONNECTION_DONE() override {
         AppleUSBXDCI::XDCI_CONNECTION_DONE();
         // Uke can receive bus reset and connection-done after a cable replug
@@ -692,6 +692,8 @@ public:
         const IOReturn result = changePowerStateTo(kPowerStateOn);
         printf("[usb] uke reconnect power request=%08x dsts=%08x\n", static_cast<uint32_t>(result), dsts);
     }
+#endif
+#if defined(QCOM_DWC3_UKE_USB2) && defined(XDCI_UPDATE_REGISTER_FIELD)
     void XDCI_UPDATE_REGISTER_FIELD(uint32_t offset, uint32_t shift, uint32_t mask, uint32_t value) override {
         // The stock stack enables DCFG.LPMCap after controller reset. Uke's
         // OEM snps,usb2-gadget-lpm-disable quirk requires that bit to stay clear.
