@@ -681,9 +681,8 @@ kernel_args = [
   # whether the vendor eUSB2 sequence actually took effect). Without this arg the graphics console
   # stays as it is and the card owns the panel. Cost: kernel text is no longer drawn, so a panic is
   # only readable through the panic screen itself. Restore this line when text is what is being read.
-  # Parked for graphical desktop boot: -uketextconsole keeps the console in text mode and scrolls the
-  # 27 MB GOP framebuffer synchronously on every newline, starving single-core userland/WindowServer.
-  # "-uketextconsole",
+  # Diagnostic text console without exec-log=1 spam, so UKE GPU3 (o/n/K68xx) and any SMP panic are visible.
+  "-uketextconsole",
   "kt_fixed_zones=120",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",
@@ -977,7 +976,7 @@ kernel_args = [
   # amfi_get_out_of_my_way=1 REMOVED: early_security_init + vmm-present=1 + AMFI stack-shift fix +
   # 3 owner trust caches handle AMFI directly without disabling code signing/entitlement enforcement.
   # "amfi_get_out_of_my_way=1",
-  # "smp=1",  # parked: secondary CPUs hit lock_ticket.c:398 spinlock timeout on uke; keep single-core for userland/USB/BT bring-up
+  "smp=1",
   "uke-stall-off=1",
   # uke-serror-resume=4 continues past an asynchronous platform error instead of stopping the boot,
   # after printing it and staging it into the pram panic header (uke-serror-detail.patch). Only the
