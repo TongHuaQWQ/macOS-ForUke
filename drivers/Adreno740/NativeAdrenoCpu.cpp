@@ -207,7 +207,8 @@ IOReturn NativeAdrenoPoolScrub(void *mapping,size_t bytes,bool drop_lines)
     if(!status) {
         volatile uint64_t *const mine=native_adreno_pool_scrubbing[(unsigned)cpu_number()&15];
         mine[1]=bytes;mine[0]=physical;
-        bzero(address,bytes);
+        volatile uint64_t *words=static_cast<volatile uint64_t *>(address);
+        for(size_t i=0;i<bytes/sizeof(uint64_t);++i)words[i]=0;
         __asm__ volatile("dsb sy":::"memory");
         mine[0]=0;
     }

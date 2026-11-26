@@ -202,7 +202,8 @@ IOReturn NativeAdrenoMemory::allocate(size_t bytes,unsigned bits,bool contiguous
         descriptor_->getLength()!=bytes)goto failed;
     status=takeSegments(descriptor_,bytes,limit,contiguous);
     if(status!=kIOReturnSuccess)goto failed;
-    bzero(mapping_,bytes);
+    volatile uint64_t *words=static_cast<volatile uint64_t *>(mapping_);
+    for(size_t i=0;i<bytes/sizeof(uint64_t);++i)words[i]=0;
     status=NativeAdrenoMaintainOwnedPages(mapping_,bytes,NativeAdrenoClean);
     if(status!=kIOReturnSuccess)goto failed;
     NativeAdrenoNotePhase(NativeAdrenoPhaseAllocate,bytes);
@@ -427,7 +428,8 @@ IOReturn NativeAdrenoMemory::borrow(void *mapping,uint64_t physical,size_t bytes
     if(!spans_)return kIOReturnNoMemory;
     span_capacity_=1;span_count_=1;spans_[0]={0,physical,bytes};
     mapping_=mapping;bytes_=bytes;prepared_=true;borrowed_=true;
-    bzero(mapping_,bytes);
+    volatile uint64_t *words=static_cast<volatile uint64_t *>(mapping_);
+    for(size_t i=0;i<bytes/sizeof(uint64_t);++i)words[i]=0;
     return kIOReturnSuccess;
 }
 IOReturn NativeAdrenoMemory::adopt(uint64_t physical,size_t bytes,unsigned bits)

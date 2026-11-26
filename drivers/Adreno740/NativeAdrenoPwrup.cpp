@@ -35,7 +35,9 @@ IOReturn NativeAdrenoPwrupList::pack(const NativeAdrenoPwrupCounts &counts,
     if((counts.ifpc && (!ifpc_regs || !ifpc_values)) ||
         (counts.preemption && (!preemption_regs || !preemption_values)) ||
         (counts.dynamic && !dynamic_triplets))return kIOReturnBadArgument;
-    memset(out,0,needed);
+    /* out may be mapped write-combined (kIOMapWriteCombineCache); avoid bzero/dc zva alignment faults on ARM64. */
+    volatile uint8_t *dst=out;
+    for(size_t i=0;i<needed;++i)dst[i]=0;
     /* gpu_req/cpu_req/turn stay zero; unions carry the list lengths. */
     out[12]=static_cast<uint8_t>(counts.ifpc);
     out[13]=static_cast<uint8_t>(counts.preemption);
