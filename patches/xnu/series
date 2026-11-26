@@ -221,6 +221,15 @@ zzzzzzzzzzzzzzzzzzzzz-uke-source-storage-start.patch
 #     sheng_sigp_recover.
 zzzzzzzzzzzzzzzzzzzzzz-uke-macos27-userland.patch
 
+# Allenwdk/UniXNU-uke arm64e USB OTG / XHCI / HID fixes:
+#   * classify IOSocketEventSource and AppleUSB(Host)RequestCompleter active on arm64e PAC
+#   * register QcomDwc3Xhci and AppleUSB20/30XHCIPort/HubPort for own power notifications on arm64e
+#   * keep attached USB ports powered while an IOUSBHostDevice is attached under QcomDwc3Xhci
+zzzzzzzzzzzzzzzzzzzzzzz-uke-usb-socket-event-source.patch
+zzzzzzzzzzzzzzzzzzzzzzzz-uke-usb-request-completer-active.patch
+zzzzzzzzzzzzzzzzzzzzzzzzz-uke-usb-xhci-pm-interest.patch
+zzzzzzzzzzzzzzzzzzzzzzzzzz-uke-usb-enumeration-power.patch
+
 # uke-boot-marks.patch is NOT applied: its uke_mark() calls ml_io_map() at _arm_init+0x34,
 # which is before arm_vm_init() at +0x768, so the bootstrap pmap is not up yet. The official entry
 # probe (patch-xnu-entry-probe.py) asked the same questions without touching the kernel source:

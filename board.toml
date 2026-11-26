@@ -682,7 +682,7 @@ kernel_args = [
   # stays as it is and the card owns the panel. Cost: kernel text is no longer drawn, so a panic is
   # only readable through the panic screen itself. Restore this line when text is what is being read.
   # Diagnostic text console without exec-log=1 spam, so UKE GPU3 (o/n/K68xx) and any SMP panic are visible.
-  "-uketextconsole",
+  # "-uketextconsole",
   "kt_fixed_zones=120",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",
@@ -799,7 +799,7 @@ kernel_args = [
   # stage 10 the nub ("usb-drd0") registered, 11 the controller started, 12 the role thread, and negative stages -12..-17
   # naming which of those failed. Same byte count as "usb=1", so the 1000-byte command line is untouched.
   # usb=0 during desktop bring-up to avoid 1 Hz beat console spam; restore usb=4 when testing USB.
-  "usb=0",
+  "usb=1",
   # "usb-rails=0",
   # usb-conn=1 asserts GCTL.SOFTCONN from the beat sampler, i.e. pulls the device up by hand. The family does it
   # in XDCI_POWER_ON, which configd's USBDeviceConfiguration asks for -- and this board has no userland yet, so
