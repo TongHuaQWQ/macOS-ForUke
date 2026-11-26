@@ -119,9 +119,13 @@ struct NativeAdrenoMetalDiagView {
     char reader[3][17];
     char name_reader[17];
     char starter[3][17];
-    char report[64];
-    char report2[64];
+    char report[112];
+    char report2[112];
 };
+extern "C" volatile uint32_t native_adreno_wc_enabled __attribute__((weak));
+extern "C" volatile uint32_t native_adreno_owned_coherent __attribute__((weak));
+extern "C" volatile uint32_t native_adreno_io_coherent __attribute__((weak));
+extern "C" volatile uint32_t native_adreno_walk_coherent[3] __attribute__((weak));
 extern "C" NativeAdrenoMetalDiagView native_adreno_metal_diag;
 struct NativeAdrenoOpenRecordView {char name[20]; uint32_t type, macf, res, attach, foreign;};
 extern "C" NativeAdrenoOpenRecordView native_adreno_open_log[8];
@@ -1030,6 +1034,143 @@ int wrapperRound(IOService *svc, int &ok, int &n, IOReturn &err, int &errAt, uin
     uc->release();
     return matched;
 }
+extern "C" {char native_gpu_coherence_row[120]; uint32_t native_gpu_coherence[8]; char native_gpu_walk_row[80];}
+static bool dramPage(uint64_t pa, uint32_t *out) {
+    IODeviceMemory *m = IODeviceMemory::withRange(pa & ~uint64_t(0xfff), 0x1000);
+    if (!m) return false;
+    IOMemoryMap *map = m->map(kIOMapAnywhere | kIOMapInhibitCache);
+    m->release();
+    if (!map) return false;
+    const volatile uint32_t *p = reinterpret_cast<const volatile uint32_t *>(map->getVirtualAddress());
+    for (unsigned i = 0; i < 1024; ++i) out[i] = p[i];
+    map->release();
+    return true;
+}
+static bool gpuCopyPage(uint64_t src, uint64_t dst) {
+    uint32_t words[8] = {};
+    if (AdrenoPM4Type7(0x75, 5, &words[0]) != AdrenoPM4Success || AdrenoPM4Type7(0x12, 0, &words[6]) != AdrenoPM4Success) return false;
+    words[1] = 1024; words[2] = uint32_t(src); words[3] = uint32_t(src >> 32); words[4] = uint32_t(dst); words[5] = uint32_t(dst >> 32);
+    return cpFence(words, 7);
+}
+static unsigned gCoherenceAttempts;
+static bool walkProbe(NativeAdrenoVm *vm) {
+    if (!&native_adreno_walk_coherent) return false;
+    constexpr uint64_t kBase = 0x18100000;
+    constexpr size_t kBytes = 2 * 4096;
+    uint8_t *buf = static_cast<uint8_t *>(IOMallocAligned(kBytes, 4096));
+    if (!buf) {snprintf(native_gpu_walk_row, sizeof native_gpu_walk_row, "W nomem -> off"); return false;}
+    volatile uint32_t *A = reinterpret_cast<volatile uint32_t *>(buf), *B = A + 1024;
+    for (unsigned i = 0; i < 1024; ++i) {A[i] = 0x66660000u | i; B[i] = 0;}
+    (void)NativeAdrenoMaintainOwnedPages(buf, kBytes, NativeAdrenoCleanInvalidate);
+    NativeAdrenoMemory mem;
+    IOReturn st = mem.importTask(kernel_task, uint64_t(uintptr_t(buf)), kBytes, 40, kBytes);
+    uint64_t phys[2] = {};
+    for (size_t j = 0; !st && j < mem.spanCount(); ++j)
+        for (size_t at = 0; at < mem.spans()[j].bytes; at += 4096) phys[(mem.spans()[j].offset + at) / 4096] = mem.spans()[j].physical + at;
+    static uint32_t words[1024];
+    unsigned dirtyAt = 0, copied = 0;
+    uint32_t fault[4] = {};
+    bool pass = false;
+    for (unsigned attempt = 0; attempt < 8 && !st && phys[0] && phys[1] && !dirtyAt; ++attempt) {
+        uint64_t handle = 0, pte = 0;
+        native_adreno_walk_coherent[0] = 1;
+        st = vm->map(&mem, 0, kBase + attempt * 0x200000ull, 3, 1, 3, &handle);
+        native_adreno_walk_coherent[0] = 0;
+        if (st) break;
+        if (vm->leafPhysical(phys[0], &pte) && dramPage(pte & ~0xfffull, words)) {
+            const uint64_t inDram = uint64_t(words[(pte & 0xfff) / 4]) | uint64_t(words[(pte & 0xfff) / 4 + 1]) << 32;
+            if ((inDram & 0x0000fffffffff000ull) != phys[0]) {
+                dirtyAt = attempt + 1;
+                const uint64_t iova = kBase + attempt * 0x200000ull;
+                if (gpuCopyPage(iova, iova + 4096) && dramPage(phys[1], words))
+                    for (unsigned i = 0; i < 1024; ++i) copied += words[i] == (0x66660000u | i);
+                (void)vm->faultState(fault);
+            }
+        }
+        (void)vm->unmap(handle);
+    }
+    if (fault[0]) {
+        uint32_t far[3] = {};
+        if (NativeAdrenoGpuContext *context = NativeAdrenoGpuContextObject()) (void)context->clearFault(fault[0], far);
+    }
+    pass = !st && dirtyAt && copied == 1024 && !fault[0];
+    (void)NativeAdrenoMaintainOwnedPages(buf, kBytes, NativeAdrenoCleanInvalidate);
+    (void)mem.release();
+    IOFreeAligned(buf, kBytes);
+    snprintf(native_gpu_walk_row, sizeof native_gpu_walk_row, "W d%u c%u f%x s%x -> %s", dirtyAt, copied, fault[0], uint32_t(st),
+             pass ? "on" : "off");
+    return pass;
+}
+static void coherenceProbe(NativeAdrenoVm *vm) {
+    uint32_t *k = native_gpu_coherence;
+    unsigned wanted = 1;
+    PE_parse_boot_argn("gpu-coherent", &wanted, sizeof wanted);
+    if (!wanted || !vm || !&native_adreno_io_coherent) {
+        snprintf(native_gpu_coherence_row, sizeof native_gpu_coherence_row, "H skip (arg %u vm %d)", wanted, vm != nullptr);
+        IOLog("UKE GPU: %s\n", native_gpu_coherence_row);
+        return;
+    }
+    constexpr uint64_t kIova = 0x18000000;
+    constexpr size_t kBytes = 4 * 4096;
+    uint8_t *buf = static_cast<uint8_t *>(IOMallocAligned(kBytes, 4096));
+    NativeAdrenoMemory mem;
+    uint64_t handle = 0;
+    IOReturn st = buf ? mem.importTask(kernel_task, uint64_t(uintptr_t(buf)), kBytes, 40, kBytes) : kIOReturnNoMemory;
+    k[0] = 1;
+    if (!st) {k[0] = 2; st = vm->map(&mem, 0, kIova, 3, 1, 3, &handle);}
+    uint64_t phys[4] = {};
+    for (size_t j = 0; !st && j < mem.spanCount(); ++j)
+        for (size_t at = 0; at < mem.spans()[j].bytes; at += 4096) phys[(mem.spans()[j].offset + at) / 4096] = mem.spans()[j].physical + at;
+    static uint32_t words[1024];
+    bool pass = false;
+    if (!st && phys[0] && phys[1] && phys[2] && phys[3]) {
+        k[0] = 3;
+        volatile uint32_t *S = reinterpret_cast<volatile uint32_t *>(buf), *D = S + 1024, *R = S + 2048, *T = S + 3072;
+        bool dirty = false;
+        for (unsigned attempt = 0; attempt < 8 && !st && !dirty; ++attempt) {
+            gCoherenceAttempts = attempt + 1;
+            for (unsigned i = 0; i < 1024; ++i) {S[i] = 0x11110000u | i; D[i] = 0; R[i] = 0x33330000u | i; T[i] = 0x44440000u | i;}
+            st = NativeAdrenoMaintainOwnedPages(buf, kBytes, NativeAdrenoCleanInvalidate);
+            for (unsigned i = 0; i < 1024; ++i) S[i] = 0x22220000u | i;
+            __asm__ volatile("dsb sy" ::: "memory");
+            k[1] = 0;
+            if (!st && dramPage(phys[0], words)) for (unsigned i = 0; i < 1024; i += 16) k[1] += words[i] == (0x11110000u | i);
+            dirty = k[1] >= 48;
+        }
+        if (!st && dirty) {
+            k[0] = 4;
+            if (gpuCopyPage(kIova, kIova + 4096) && dramPage(phys[1], words)) {
+                k[0] = 5;
+                for (unsigned i = 0; i < 1024; ++i) {k[2] += words[i] == (0x22220000u | i); k[3] += words[i] == (0x11110000u | i);}
+            }
+        }
+        if (!st && k[0] == 5) st = NativeAdrenoMaintainOwnedPages(const_cast<uint32_t *>(T), 4096, NativeAdrenoClean);
+        uint32_t touch = 0;
+        for (unsigned i = 0; i < 1024; ++i) touch += T[i];
+        __asm__ volatile("dsb sy" ::: "memory");
+        if (!st && k[0] == 5 && gpuCopyPage(kIova + 8192, kIova + 12288)) {
+            k[0] = 6;
+            for (unsigned i = 0; i < 1024; ++i) k[4] += T[i] == (0x33330000u | i);
+            if (dramPage(phys[3], words)) for (unsigned i = 0; i < 1024; ++i) k[5] += words[i] == (0x33330000u | i);
+        }
+        (void)touch;
+        pass = k[0] == 6 && k[1] >= 48 && k[2] == 1024 && k[4] == 1024 && k[5] == 1024;
+    }
+    k[6] = uint32_t(st);
+    if (handle) (void)vm->unmap(handle);
+    if (buf) (void)NativeAdrenoMaintainOwnedPages(buf, kBytes, NativeAdrenoCleanInvalidate);
+    (void)mem.release();
+    if (buf) IOFreeAligned(buf, kBytes);
+    k[7] = pass;
+    native_adreno_io_coherent = pass ? 1 : 0;
+    unsigned walk = 1;
+    PE_parse_boot_argn("gpu-walk", &walk, sizeof walk);
+    if (&native_adreno_walk_coherent) native_adreno_walk_coherent[0] = pass && walk && walkProbe(vm) ? 1 : 0;
+    snprintf(native_gpu_coherence_row, sizeof native_gpu_coherence_row, "H d%u/64 a%u r%u/%u w%u/%u s%x k%u -> %s", k[1], gCoherenceAttempts,
+             k[2], k[3], k[4], k[5], k[6], k[0], pass ? "on" : "off");
+    IOLog("UKE GPU: %s\n", native_gpu_coherence_row);
+    if (native_gpu_walk_row[0]) IOLog("UKE GPU: %s\n", native_gpu_walk_row);
+}
 void publishAndWrapperTest(bool rounds) {
     char row[64];
     if (!native_adreno_publish || !native_adreno_published_service || !native_adreno_publish_stats) {setRow(5, "P nolink"); return;}
@@ -1038,6 +1179,17 @@ void publishAndWrapperTest(bool rounds) {
     // userClientTest attaches the submit object; with the self-tests skipped it still has to be attached before a client opens.
     if (vm) gSubmit.attach(vm, &gRing);
     native_adreno_dram_read32 = dramRead32;
+    if (&native_adreno_wc_enabled) {
+        unsigned wc = 1;
+        PE_parse_boot_argn("gpu-wc", &wc, sizeof wc);
+        native_adreno_wc_enabled = wc ? 1 : 0;
+    }
+    if (&native_adreno_owned_coherent) {
+        unsigned owned = 1;
+        PE_parse_boot_argn("gpu-owned-coherent", &owned, sizeof owned);
+        native_adreno_owned_coherent = owned ? 1 : 0;
+    }
+    coherenceProbe(vm);
     const IOReturn timer = gTimer.attach(&gTimerIo, NativeAdrenoTimeCp);
     const unsigned ias = NativeAdrenoGpuContextInputBits && NativeAdrenoGpuContextInputBits() ? NativeAdrenoGpuContextInputBits() : 31;
     if (ias > 32 && ias <= 48) {
@@ -1154,8 +1306,8 @@ void metalRows() {
     setRow(7, row);
     // GPU7/GPU8 (wide): the raw test's report line and the Turnip phase's line (T result or W watchdog sample). setRow mirrors slots
     // 4..7 into the kernel log; mirror these two as well, so the plugin's own verdict is in the userdata dump and not only on the page.
-    if (d.report[0]) snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0], "R %.63s", d.report);
-    if (d.report2[0]) snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.63s", d.report2);
+    if (d.report[0]) snprintf(boot_progress_ext_wide[0], sizeof boot_progress_ext_wide[0], "R %.109s", d.report);
+    if (d.report2[0]) snprintf(boot_progress_ext_wide[1], sizeof boot_progress_ext_wide[1], "%.111s", d.report2);
     for (unsigned i = 0; i < 2; ++i) {
         if (__builtin_memcmp(loggedWide[i], boot_progress_ext_wide[i], 111)) {
             __builtin_memcpy(loggedWide[i], boot_progress_ext_wide[i], 112);

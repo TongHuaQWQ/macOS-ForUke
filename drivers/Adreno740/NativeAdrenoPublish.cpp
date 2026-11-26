@@ -73,8 +73,8 @@ struct NativeAdrenoMetalDiag {
     char reader[3][17];      /* process names that read a registry property of the accelerator, newest first */
     char name_reader[17];    /* latest process that read MetalPluginName specifically */
     char starter[3][17];     /* processes that sent plugin marker 1 (the plugin's initWithAcceleratorPort: started), newest first */
-    char report[64];         /* the plugin's own result line (SetMetadata text), latest */
-    char report2[64];        /* the plugin's Turnip-phase line (text starting "T " or "W "), latest */
+    char report[112];        /* the plugin's own result line (SetMetadata text), latest */
+    char report2[112];       /* the plugin's Turnip-phase line (text starting "T " or "W "), latest */
     uint32_t grants;         /* opens granted to the render server by this driver in place of the sandbox verdict (the view in GpuPowerProbe.cpp ends before this) */
 } native_adreno_metal_diag;
 /* BO CPU views (clientMemoryForType for a BO token): [0] calls, [1] new descriptors, [2] served from the view cache, [3] refused (not a BO / out of
