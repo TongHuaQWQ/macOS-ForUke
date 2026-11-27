@@ -19,10 +19,19 @@ def main():
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT
     data = path.read_bytes() if path.is_file() else b''
     OUT.mkdir(parents=True, exist_ok=True)
+    import os
+    placement = '__attribute__((section("__DATA,__firmware"))) ' if os.environ.get('UNIXNU_XNU_TARGET') == 'macosx' else ''
     lines = ['/* Generated; contains vendor firmware, do not commit. */', '#include <stdint.h>']
-    lines.append(f'const uint32_t native_touch_firmware_size = {len(data)};')
-    body = ','.join(str(b) for b in data) if data else '0'
-    lines.append(f'const uint8_t native_touch_firmware[{max(len(data), 1)}] = {{{body}}};')
+    if data:
+        lines.append(f'const uint32_t native_touch_firmware_size = {len(data)};')
+        body = ','.join(str(b) for b in data)
+        lines.append(f'{placement}const uint8_t native_touch_firmware[{len(data)}] = {{{body}}};')
+    else:
+        slot_bytes = 245760
+        sentinel = b'UKEFW_TCH_SLOT0\x00'
+        lines.append('const uint32_t native_touch_firmware_size = 0;')
+        head = ','.join(str(b) for b in sentinel)
+        lines.append(f'{placement}const uint8_t native_touch_firmware[{slot_bytes}] = {{{head}}};')
     (OUT / 'NvtFirmware.c').write_text('\n'.join(lines) + '\n')
     print(f'touch firmware object: {len(data)} bytes sha256 {hashlib.sha256(data).hexdigest()[:16] if data else "-"}')
 

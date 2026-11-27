@@ -799,9 +799,17 @@ uke_last_log_beacon(const char *text)
 	/* Byte-wise volatile: a vectorised tail store would fault on the legacy device window above. */
 	{
 		volatile unsigned char *p = (volatile unsigned char *)(base + 0x1100);
+		unsigned ended = 0;
 
 		for (i = 0; i < 64; i++) {
-			p[i] = (i < 63 && text[i] != '\0') ? (unsigned char)text[i] : 0;
+			unsigned char ch = 0;
+			if (!ended && i < 63) {
+				ch = (unsigned char)text[i];
+				if (ch == '\0') {
+					ended = 1;
+				}
+			}
+			p[i] = ch;
 		}
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");

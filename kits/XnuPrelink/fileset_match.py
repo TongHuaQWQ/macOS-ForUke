@@ -849,6 +849,8 @@ class Matcher:
         """Identical functions reference their data at identical instruction offsets."""
         votes = defaultdict(Counter)
         for orig, native in self.pairs.items():
+            if orig not in self.original.functions or native not in self.native.functions:
+                continue
             left, right = self.comparable_functions(orig, native)
             if left['digest'] != right['digest'] or len(left['refs']) != len(right['refs']):
                 continue
@@ -872,6 +874,8 @@ class Matcher:
         """Use corresponding call sites in already paired, equal-shaped functions."""
         votes = defaultdict(set)
         for orig, native in self.pairs.items():
+            if orig not in self.original.functions or native not in self.native.functions:
+                continue
             left, right = self.comparable_functions(orig, native)
             if not left or not right or left['digest'] != right['digest'] or left['length'] != right['length']:
                 continue

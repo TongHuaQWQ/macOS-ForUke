@@ -105,3 +105,23 @@ bool native_legacy_dp_debug() {
 
 extern "C" __attribute__((weak))
 void uke_usb_pm_snapshot(IOService *) {}
+
+extern "C"
+uint32_t uke_ufs_dpu_map_external(unsigned, const uint64_t *, unsigned) {
+    return 0;
+}
+
+extern "C" __attribute__((weak))
+uint32_t native_ufs_dpu_live(unsigned) {
+    return 0;
+}
+
+extern "C" __attribute__((weak))
+bool native_legacy_panel_dma_left_ready() {
+    return false;
+}
+
+extern "C" __attribute__((weak))
+IOReturn native_legacy_panel_route_dma(bool) {
+    return kIOReturnUnsupported;
+}

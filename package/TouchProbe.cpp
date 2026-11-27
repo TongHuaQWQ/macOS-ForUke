@@ -17,11 +17,14 @@
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 extern "C" {
-#include "../../drivers/QcomGeniSpi/GeniSpi.h"
-#include "../../drivers/ShengNovatekTouch/NvtProtocol.h"
-#include "../../drivers/ShengNovatekTouch/NvtTouchCore.h"
+// The module sources live under the build tree's drivers/ (the tree links this package as kits/uke, so a
+// path relative to the package no longer reaches them); the builder adds their directories with -I.
+#include "GeniSpi.h"
+#include "NvtProtocol.h"
+#include "NvtTouchCore.h"
 #include "TouchBoard.h"
 #include "SmmuBypass.h"
+#include "UkeUsbBoard.h"
 extern const uint8_t native_touch_firmware[] __attribute__((weak_import));
 extern const uint32_t native_touch_firmware_size __attribute__((weak_import));
 }
@@ -396,12 +399,15 @@ bool prepareDma(Session &s) {
     cacheRange(virt, 2 * kDmaBytes, 1);
     if (!mapRegion(TB_APPS_SMMU_BASE, TB_APPS_SMMU_SIZE, s.smmu)) {fail(43, -12); return false;}
     mark(s, 43);
-    struct smmu_io io = {reinterpret_cast<void *>(s.smmu.va), smmuRd, smmuWr};
-    struct smmu_plan plan = smmu_plan_bypass(&io, TB_QUP_SMMU_SID, s.dmaPhys, 2 * kDmaBytes);
-    s.smmuSlot = static_cast<int>(plan.slot); s.smmuBank = static_cast<int>(plan.bank);
-    if (plan.error) {s.smmuErr = smmuErrorCode(plan.error); fail(43, -100 - s.smmuErr); return false;}
-    const char *e = smmu_configure_bypass(&io, &plan, TB_QUP_SMMU_SID);
-    if (e) {s.smmuErr = smmuErrorCode(e); fail(44, -100 - s.smmuErr); return false;}
+    {
+        AppsSmmuLock guard;
+        struct smmu_io io = {reinterpret_cast<void *>(s.smmu.va), smmuRd, smmuWr};
+        struct smmu_plan plan = smmu_plan_bypass(&io, TB_QUP_SMMU_SID, s.dmaPhys, 2 * kDmaBytes);
+        s.smmuSlot = static_cast<int>(plan.slot); s.smmuBank = static_cast<int>(plan.bank);
+        if (plan.error) {s.smmuErr = smmuErrorCode(plan.error); fail(43, -100 - s.smmuErr); return false;}
+        const char *e = smmu_configure_bypass(&io, &plan, TB_QUP_SMMU_SID);
+        if (e) {s.smmuErr = smmuErrorCode(e); fail(44, -100 - s.smmuErr); return false;}
+    }
     s.spi.use_dma = 1;
     s.spi.dma.ctx = nullptr;
     s.spi.dma.clean = dmaClean;
@@ -467,6 +473,15 @@ bool configureClock(Session &s, unsigned hz) {
 // INTR_STATUS (bit 0; acknowledged by writing 0). All TLMM pin interrupts share the summary SPI 208
 // (uke-live.dts pinctrl@f000000 interrupts = <0 0xd0 4>), INTID 240.
 extern "C" int armcpu_spi_attach(uint32_t, bool, void (*)(void *), void *, uint32_t *, uint64_t *) __attribute__((weak_import));
+extern "C" {
+volatile uint32_t native_touch_cost[9];
+volatile uint32_t native_touch_doze[4];
+}
+static void touchCostAdd(unsigned slot, uint64_t from) {
+    uint64_t ns;
+    absolutetime_to_nanoseconds(mach_absolute_time() - from, &ns);
+    native_touch_cost[slot] = native_touch_cost[slot] + static_cast<uint32_t>(ns / 1000);
+}
 extern "C" {volatile uint32_t native_touch_irq_stats[4];}   // [0] 0 not armed, 1 armed, 2 attach failed, [1] interrupts, [2] spurious, [3] attach status
 extern "C" {
 extern volatile uint32_t native_hid_input_events[8];      // [2] device start, [3] driver check, [6] touch reports
@@ -475,8 +490,8 @@ extern volatile uint32_t native_touch_edge_stats[4];      // [0] edge hook insta
 }
 // BootProgress's on-screen row, weak: the GPU defconfig builds without that archive and then this no-op wins.
 extern "C" __attribute__((weak)) void native_progress_touch_line(const char *) {}
-// Upstream NativeHidInput's button sink, weak no-op here: uke has no PMIC button source yet.
-extern "C" __attribute__((weak)) void native_buttons_set_sink(void (*)(void *, uint32_t), void *) {}
+// Upstream NativeHidInput's button sink, no-op here: uke has no PMIC button source yet.
+extern "C" void native_buttons_set_sink(void (*)(void *, uint32_t), void *) {}
 extern "C" {
 extern volatile uint32_t native_hid_stage, native_hid_resource_found;   // HidInputProbe: where the HID gate stopped
 extern volatile int native_hid_load_status, native_hid_matching_load_status;
@@ -629,6 +644,8 @@ static void touchThread(void *, wait_result_t) {
         mark(*s, 11);
         uint32_t lastCounter = 0xffffffffu;
         unsigned tick = 0, rowTick = 0, hbTick = 0;
+        uint64_t consoleHeartbeatNs = 0;
+        bool consoleHeartbeatPrinted = false;
         s->mn = 0; s->mx = 0;
         // Event driven (upstream sheng int-189): the controller pulses its interrupt line (GPIO 54, rising edge,
         // devicetree novatek,irq-gpio flags 0x2001) for every frame, the TLMM raises its summary interrupt, the
@@ -639,6 +656,9 @@ static void touchThread(void *, wait_result_t) {
         PE_parse_boot_argn("sheng-touch-poll", &pollOnly, sizeof pollOnly);
         const bool irqArmed = !pollOnly && armTouchIrq(*s);
         uint32_t seen = gTouchIrqEvents;
+        uint64_t dozeAfter, lastContact = mach_absolute_time(), lastWake = lastContact;
+        nanoseconds_to_absolutetime(3000000000ull, &dozeAfter);
+        bool dozeAsked = false;
         for (;;) {
             if (irqArmed) {
                 assert_wait((event_t)&gTouchIrqEvents, THREAD_UNINT);
@@ -646,6 +666,7 @@ static void touchThread(void *, wait_result_t) {
                 else thread_block(THREAD_CONTINUE_NULL);
                 seen = gTouchIrqEvents;
             }
+            native_touch_cost[0] = native_touch_cost[0] + 1;
             for (;;) {   // every frame that is ready now
                 native_touch_loop_step = 1;
                 const bool high = (rd32(s->tlmmIrq.va, 4) & 1) != 0;
@@ -653,26 +674,34 @@ static void touchThread(void *, wait_result_t) {
                 if (high) ++s->irqSeen;
                 uint8_t pk[NVT_THP_PEEK_LEN];
                 native_touch_loop_step = 2;
+                const uint64_t peekAt = mach_absolute_time();
                 if (nvt_peek_frame_header(&s->chip, pk)) {fail(11, NVT_ERR_BUS); break;}
+                touchCostAdd(6, peekAt);
+                native_touch_cost[1] = native_touch_cost[1] + 1;
                 native_touch_loop_step = 3;
                 ++s->peeks;
                 for (unsigned q = 0; q < 24; ++q) s->thp[q] = pk[q];
                 if ((++rowTick & 255) == 0) rows(*s);
-                if (!nvt_peek_valid(pk)) {++s->bad; break;}
+                if (!nvt_peek_valid(pk)) {++s->bad; native_touch_cost[3] = native_touch_cost[3] + 1; break;}
                 const unsigned counter = nvt_peek_counter(pk), type = nvt_peek_type(pk);
-                if (counter == lastCounter) break;
+                if (counter == lastCounter) {native_touch_cost[2] = native_touch_cost[2] + 1; break;}
                 lastCounter = counter;
                 ++s->fresh;
                 s->lastType = type;
+                native_touch_doze[3] = type;
                 if (type != 2 && type != 4) continue;
                 native_touch_loop_step = 4;
+                const uint64_t readAt = mach_absolute_time();
                 if (nvt_read_frame(&s->chip, s->frame)) {fail(11, NVT_ERR_BUS); break;}
+                touchCostAdd(7, readAt);
+                native_touch_cost[4] = native_touch_cost[4] + 1;
                 native_touch_loop_step = 5;
                 ++s->reads;
                 for (unsigned q = 0; q < 24; ++q) s->head[q] = s->frame[q];
                 if (!nvt_frame_header_valid(s->frame)) {++s->bad; continue;}   // torn: the chip rewrote it while it was read
                 native_touch_valid = native_touch_valid + 1;
                 if (native_touch_valid == 1) IOLog("UKE TCH: first valid frame type%u\n", type);
+                const uint64_t processAt = mach_absolute_time();
                 int16_t *matrix = s->matrix;
                 nvt_frame_matrix(s->frame, matrix);
                 int mn = matrix[0], mx = matrix[0];
@@ -685,11 +714,30 @@ static void touchThread(void *, wait_result_t) {
                 native_touch_frames = native_touch_frames + 1;
                 if (n >= 0) {
                     native_touch_contacts = static_cast<uint32_t>(n);
-                    if (n > 0) {native_touch_last_x = out[0].x; native_touch_last_y = out[0].y;}
+                    if (n > 0) {
+                        lastContact = mach_absolute_time();
+                        dozeAsked = false;
+                        native_touch_last_x = out[0].x;
+                        native_touch_last_y = out[0].y;
+                    }
                     publish(static_cast<unsigned>(n), out);
                 }
+                touchCostAdd(8, processAt);
+                native_touch_cost[5] = native_touch_cost[5] + 1;
                 if ((++tick & 15) == 0) rows(*s);
                 if (irqArmed && gTouchIrqEvents == seen) break;   // no further pulse: the frame just read was the only one
+            }
+            const uint64_t now = mach_absolute_time();
+            // A wake after a quiet interval starts a fresh doze window, even if its frame has no contact yet.
+            if (now - lastWake >= dozeAfter) {lastContact = now; dozeAsked = false;}
+            lastWake = now;
+            if (dozeAsked) {
+                native_touch_doze[2] = native_touch_doze[2] + 1;
+            } else if (now - lastContact >= dozeAfter) {
+                dozeAsked = true;
+                native_touch_doze[0] = native_touch_doze[0] + 1;
+                native_touch_doze[2] = 0;
+                if (nvt_set_custom_cmd(&s->chip, 0x01, 0x02)) native_touch_doze[1] = native_touch_doze[1] + 1;
             }
             if (!irqArmed) IOSleep(pollOnly ? 2 : 10);   // fallback / diagnosis only
             if ((++hbTick & 127) == 0) {   // heartbeat ~1.3 s in poll mode: driver, report and edge counters with the finger set
@@ -699,9 +747,17 @@ static void touchThread(void *, wait_result_t) {
                     native_touch_last_x, native_touch_last_y, native_hid_input_results[3], native_hid_input_events[6],
                     (int)native_hid_input_results[6], native_touch_edge_stats[0], native_touch_edge_stats[1],
                     native_touch_edge_stats[2], native_touch_irq_stats[1]);
-                IOLog("UKE TCH: hb %s\n", hb);
                 native_progress_touch_line(hb);
-                if (hbTick == 127)   // once: the HID gate state (HidInputProbe)
+                uint64_t nowNs;
+                absolutetime_to_nanoseconds(mach_absolute_time(), &nowNs);
+                const bool firstHeartbeat = !consoleHeartbeatPrinted;
+                // Keep sampling and the diagnostic state fresh; limit only screen log traffic.
+                if (firstHeartbeat || nowNs - consoleHeartbeatNs >= UINT64_C(10000000000)) {
+                    consoleHeartbeatNs = nowNs;
+                    consoleHeartbeatPrinted = true;
+                    IOLog("UKE TCH: hb %s\n", hb);
+                }
+                if (firstHeartbeat)   // once: the HID gate state (HidInputProbe)
                     IOLog("UKE TCH: hid stage%u load%d match%d classes %u %u %u %u %u res%u meta%d obj%llx e%u,%u,%u,%u,%u,%u,%u,%u\n",
                         native_hid_stage, native_hid_load_status, native_hid_matching_load_status,
                         native_hid_class_sizes[0], native_hid_class_sizes[1], native_hid_class_sizes[2],
@@ -718,7 +774,7 @@ static void touchThread(void *, wait_result_t) {
 
 extern "C" void native_touch_probe(void) {
     unsigned stage = 0;
-    if (!PE_parse_boot_argn("sheng-touch", &stage, sizeof stage) || stage < 1 || native_touch_stage_req) return;
+    if ((!PE_parse_boot_argn("touch", &stage, sizeof stage) && !PE_parse_boot_argn("sheng-touch", &stage, sizeof stage)) || stage < 1 || native_touch_stage_req) return;
     if (stage > 4) stage = 4;
     native_touch_stage_req = stage;
     thread_t thread = nullptr;

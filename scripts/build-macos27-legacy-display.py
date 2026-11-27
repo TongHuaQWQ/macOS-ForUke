@@ -307,6 +307,29 @@ def compile_cpp(src, dst, extra=()):
     run(cmd, cwd=r['directory'])
 
 
+c_record = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json').read_text().strip().rstrip(','))
+
+
+def compile_c(src, dst, extra=()):
+    cmd, args, i = [], native_arguments(c_record['arguments']), 0
+    while i < len(args):
+        value = args[i]
+        if value == c_record['file']:
+            cmd.append(str(src))
+        elif value == '-o':
+            cmd += ['-o', str(dst)]
+            i += 1
+        elif value in ('-MF', '-MT', '-MJ'):
+            i += 1
+        elif value == '-Xclang' and args[i + 1].startswith('-W'):
+            i += 1
+        elif not value.startswith('-W') and value not in ('-MD', '-MP'):
+            cmd.append(value)
+        i += 1
+    cmd += ['-Wall', '-Wextra', '-Wno-unknown-warning-option', '-Wno-unused-parameter', *extra]
+    run(cmd, cwd=c_record['directory'])
+
+
 KITS = ROOT / 'kits/uke'
 adreno_enabled = os.environ.get('XNU_NATIVE_ADRENO', '0') == '1'
 compile_cpp(source, OUT / 'LegacyDisplayProbe.o')
@@ -472,6 +495,144 @@ if adreno_enabled:
     ) for x in ('-I', str(ROOT / d)))
     compile_cpp(KITS / 'GpuPowerProbe.cpp', OUT / 'GpuPowerProbe.o', adreno_inc)
     extra_objects.append(OUT / 'GpuPowerProbe.o')
+
+# NativeHidInput (IOHIDDevice on 26C5035r) + uke SM7675 Novatek NT36532 touchscreen (GENI SPI + TouchProbe).
+hid_abi_path = Path(__file__).resolve().with_name(f'hid-device-{BUILD}.json')
+if hid_abi_path.is_file():
+    HID_OUT = OUT / 'hid-touch'
+    HID_OUT.mkdir(parents=True, exist_ok=True)
+    hid_abi = json.loads(hid_abi_path.read_text())
+    require(hid_abi['kernelcache_sha256'] == abi['kernelcache_sha256'], 'HID fixture of the same collection')
+    hid_slots = [(int(t, 16), int(d, 16)) for t, d in hid_abi['slots']]
+    hid_pure = {i for i, (t, _) in enumerate(hid_slots) if t == slots[214][0]}
+    iohid_candidates = [
+        ROOT / 'refer/IOHIDFamily',
+        ROOT / '.cache/IOHIDFamily',
+        Path('/home/tonghua/Code/mcOS/workspace/UniXNU/out/feeds/IOHIDFamily-f53ac321'),
+    ]
+    iohid = next((p for p in iohid_candidates if (p / 'IOHIDFamily/IOHIDDevice.h').is_file()), None)
+    if iohid is None:
+        iohid = ROOT / '.cache/IOHIDFamily'
+        subprocess.run(['git', 'clone', '-q', '--depth', '1',
+                        'https://github.com/apple-oss-distributions/IOHIDFamily.git', str(iohid)], check=True)
+    hid_inc = HID_OUT / 'include'
+    for src_sub, dst_sub in ((iohid / 'IOHIDFamily', 'IOKit/hid'),
+                             (iohid / 'IOHIDSystem/IOKit/hidsystem', 'IOKit/hidsystem')):
+        dst_dir = hid_inc / dst_sub
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for hdr in sorted(src_sub.glob('*.h')):
+            target_hdr = dst_dir / hdr.name
+            if not target_hdr.exists():
+                target_hdr.symlink_to(hdr)
+    if not (Path(macsdk) / 'System/Library/Frameworks/Kernel.framework/Headers/IOKit/graphics/IOGraphicsTypes.h').is_file():
+        gfx_dir = hid_inc / 'IOKit/graphics'
+        gfx_dir.mkdir(parents=True, exist_ok=True)
+        (gfx_dir / 'IOGraphicsTypes.h').write_text(
+            '#pragma once\n#include <IOKit/IOTypes.h>\n'
+            'typedef struct IOGPoint { SInt16 x; SInt16 y; } IOGPoint;\n'
+            'typedef struct IOGSize { SInt16 width; SInt16 height; } IOGSize;\n'
+            'typedef struct IOGBounds { SInt16 minx; SInt16 maxx; SInt16 miny; SInt16 maxy; } IOGBounds;\n'
+        )
+    if not (Path(macsdk) / 'System/Library/Frameworks/Kernel.framework/Headers/HIDDriverKit/IOHIDDevice.h').is_file():
+        hdk_dir = hid_inc / 'HIDDriverKit'
+        hdk_dir.mkdir(parents=True, exist_ok=True)
+        for hdr_name in ('IOHIDDeviceTypes.h', 'IOHIDKeys.h', 'IOHIDUsageTables.h'):
+            src_hdr = iohid / 'IOHIDFamily' / hdr_name
+            dst_hdr = hdk_dir / hdr_name
+            if src_hdr.is_file() and not dst_hdr.exists():
+                dst_hdr.symlink_to(src_hdr)
+        run(['xcrun', 'iig', '--def', iohid / 'HIDDriverKit/IOHIDDevice.iig',
+             '--header', hdk_dir / 'IOHIDDevice.h', '--impl', HID_OUT / 'IOHIDDevice.iig.cpp'])
+        hdk_lines = (hdk_dir / 'IOHIDDevice.h').read_text().splitlines()
+        import re as _re
+        in_args = False
+        for li, line in enumerate(hdk_lines):
+            if line.startswith('#define ') and '_Args' in line:
+                in_args = True
+            if in_args:
+                hdk_lines[li] = _re.sub(r'\s*=\s*[^,)\\]+', '', line)
+                if not line.rstrip().endswith('\\'):
+                    in_args = False
+        (hdk_dir / 'IOHIDDevice.h').write_text('\n'.join(hdk_lines) + '\n')
+    dev_root = Path(os.environ.get('UNIXNU_DEVICE', '')) if os.environ.get('UNIXNU_DEVICE') else None
+    hid_cpp = next(p for p in (
+        ROOT / 'drivers/ShengHidInput/NativeHidInput.cpp',
+        (dev_root / 'drivers/ShengHidInput/NativeHidInput.cpp') if dev_root else Path('/nonexistent'),
+    ) if p.is_file())
+    compile_cpp(hid_cpp, HID_OUT / 'NativeHidInput.o',
+                ('-I', str(hid_inc), '-idirafter', f'{macsdk}/usr/include',
+                 '-idirafter', f'{macsdk}/System/Library/Frameworks/Kernel.framework/Headers',
+                 '-DNATIVE_HID_SOURCE_API=1', '-Wno-unused-private-field', '-Wno-deprecated-declarations'))
+    hid_raw = (HID_OUT / 'NativeHidInput.o').read_bytes()
+    hid_found = object_symbols(hid_raw)
+    hid_bindings = {n: int(v, 16) + slide for n, v in hid_abi['bindings'].items()}
+    by_div = {}
+    for idx, (_, div) in enumerate(hid_slots):
+        by_div.setdefault(div, []).append(idx)
+    hid_vtables = [n for n, _, k in hid_found if n.startswith('__ZTV') and k != 1 and '9MetaClassE' not in n]
+    slot_of = {}
+    for vt_name in hid_vtables:
+        for idx, entry in enumerate(object_vtable(hid_raw, hid_found, vt_name, len(hid_slots))):
+            if entry and '11IOHIDDevice' in entry[0]:
+                require(slot_of.setdefault(entry[0], idx) == idx, f'{entry[0]}: one slot in every owned vtable')
+    for name in sorted({n for n, _, k in hid_found if k == 1 and '11IOHIDDevice' in n} - set(hid_bindings)):
+        if name in slot_of:
+            slot = slot_of[name]
+        else:
+            matches = by_div.get(discriminator(name[1:]), [])
+            require(len(matches) == 1, f'{name}: one original IOHIDDevice slot with its discriminator')
+            slot = matches[0]
+        require(slot not in hid_pure, f'{name}: not an abstract original slot')
+        hid_bindings[name] = hid_slots[slot][0] + slide
+    for vt_name in hid_vtables:
+        entries = object_vtable(hid_raw, hid_found, vt_name, len(hid_slots))
+        require(all(entries), f'{vt_name}: at least the {len(hid_slots)} IOHIDDevice entries')
+        for idx, (name, word) in enumerate(entries):
+            require(word >> 63 and word >> 48 & 1 and word >> 49 & 3 == 0 and (word >> 32) & 0xffff == hid_slots[idx][1],
+                    f'{vt_name} slot {idx} ({name}) signed with the original diversity {hid_slots[idx][1]:#x}')
+            if '11IOHIDDevice' in name:
+                require(hid_bindings.get(name) == hid_slots[idx][0] + slide,
+                        f'{vt_name} slot {idx} ({name}) is the original entry')
+    HID_DATA = {'__ZN11IOHIDDevice10gMetaClassE', '__ZTV11IOHIDDevice'}
+    hid_text, hid_addresses = '.text\n.p2align 2\n', ''
+    for name, va in sorted(hid_bindings.items()):
+        if name in HID_DATA:
+            hid_addresses += f'.globl {name}\n.set {name}, {va:#x}\n'
+        else:
+            hid_addresses += f'.globl {name}.original\n.set {name}.original, {va:#x}\n'
+            hid_text += (f'.globl {name}\n{name}:\n bti c\n'
+                         f' adrp x16, {name}.slot@PAGE\n ldr x16, [x16, {name}.slot@PAGEOFF]\n br x16\n'
+                         f'.p2align 3\n{name}.slot:\n .quad {name}.original\n.p2align 2\n')
+    (HID_OUT / 'hid-bindings.S').write_text(hid_text)
+    (HID_OUT / 'hid-addresses.S').write_text(hid_addresses)
+    for stem in ('hid-bindings', 'hid-addresses'):
+        run(['xcrun', 'clang', '-target', TRIPLE, '-isysroot', sdk, '-c', HID_OUT / (stem + '.S'), '-o', HID_OUT / (stem + '.o')])
+    hid_late = HID_OUT / 'NativeHidInput.late.o'
+    run([llvm / 'llvm-objcopy', '--remove-section=__DATA,__mod_init_func',
+         '--globalize-symbol=__GLOBAL__sub_I_NativeHidInput.cpp',
+         HID_OUT / 'NativeHidInput.o', hid_late])
+    compile_cpp(KITS / 'HidInputProbe.cpp', HID_OUT / 'HidInputProbe.o')
+    # uke SM7675 Novatek NT36532 touch panel (GENI SPI + NvtProtocol + NvtTouchCore + NvtFirmware).
+    nvt_dir = next(p for p in (
+        ROOT / 'drivers/NativeNovatekTouch',
+        (dev_root / 'drivers/NativeNovatekTouch') if dev_root else Path('/nonexistent'),
+        ROOT / 'drivers/ShengNovatekTouch',
+    ) if (p / 'NvtTouchCore.c').is_file())
+    spi_dir = ROOT / 'drivers/QcomGeniSpi'
+    run(['python3', ROOT / 'scripts/gen-touch-firmware.py'])
+    compile_cpp(KITS / 'TouchProbe.cpp', HID_OUT / 'TouchProbe.o',
+                ('-I', str(spi_dir), '-I', str(nvt_dir), '-I', str(KITS)))
+    for c_src, c_name in ((spi_dir / 'GeniSpi.c', 'GeniSpi.o'),
+                          (nvt_dir / 'NvtProtocol.c', 'NvtProtocol.o'),
+                          (nvt_dir / 'NvtTouchCore.c', 'NvtTouchCore.o'),
+                          (ROOT / 'build/native-touch/NvtFirmware.c', 'NvtFirmware.o')):
+        compile_c(c_src, HID_OUT / c_name, ('-I', str(spi_dir), '-I', str(nvt_dir)))
+    extra_objects += [
+        hid_late, HID_OUT / 'hid-bindings.o', HID_OUT / 'hid-addresses.o', HID_OUT / 'HidInputProbe.o',
+        HID_OUT / 'TouchProbe.o', HID_OUT / 'GeniSpi.o', HID_OUT / 'NvtProtocol.o',
+        HID_OUT / 'NvtTouchCore.o', HID_OUT / 'NvtFirmware.o',
+    ]
+    print(f'HID+Touch: {len(hid_bindings)} IOHIDDevice bindings, vtables {hid_vtables} match {BUILD} diversities')
 
 keystore_source = ROOT / 'kits/uke/KeyStoreProbe.cpp'
 compile_cpp(keystore_source, OUT / 'KeyStoreProbe.o')

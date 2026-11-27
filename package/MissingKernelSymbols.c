@@ -60,8 +60,16 @@ csr_check(uint32_t mask)
 				volatile unsigned char *slot = (volatile unsigned char *)(va + 0x1200);
 				const char *text = "UKEUSB-VIA-CSRCHECK";
 				unsigned i;
+				int ended = 0;
 				for (i = 0; i < 64; i++) {
-					slot[i] = (i < 63 && text[i] != '\0') ? (unsigned char)text[i] : 0;
+					unsigned char ch = 0;
+					if (!ended && i < 63) {
+						ch = (unsigned char)text[i];
+						if (ch == '\0') {
+							ended = 1;
+						}
+					}
+					slot[i] = ch;
 				}
 				__asm__ volatile ("dsb sy" ::: "memory");
 			}

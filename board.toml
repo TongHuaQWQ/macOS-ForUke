@@ -208,7 +208,7 @@ target = "macos27"
 build = "26C5035r"
 data_gib = 192
 skip_setup = false
-gpu_addon = false
+# gpu_addon = false
 trust_components = ["StaticTrustCache", "Cryptex1,SystemTrustCache", "Cryptex1,AppTrustCache"]
 bluetooth_tool = "scripts/build-bluetooth-userspace.py"
 bluetooth_target = "macos27"
@@ -610,7 +610,7 @@ root_policies = "{tree}/build/sheng-source-storage/root-policies.bin"
 # The owner-built Metal addon (build-gpu-addon-blob.py, produced by the kernel
 # archives above): payloads/kernel.macho.gpuaddon, placed by the DarwinBoot
 # loader after the trust caches and staged into Data by kern_exec.c.
-gpu_addon = "build/uke-gpu-addon/gpu-addon.z"
+# gpu_addon = "build/uke-gpu-addon/gpu-addon.z"
 kernel_args = [
   # Dropped -v and serial=3 (synced with UniXNU-sheng macos-27.3-26C5035r: no UART, serial=3 only
   # polls every 16 ms; console text uses -uketextconsole).
@@ -799,9 +799,11 @@ kernel_args = [
   # stage 10 the nub ("usb-drd0") registered, 11 the controller started, 12 the role thread, and negative stages -12..-17
   # naming which of those failed. Same byte count as "usb=1", so the 1000-byte command line is untouched.
   # usb=0 during desktop bring-up to avoid 1 Hz beat console spam; restore usb=4 when testing USB.
-  "usb=1",
+  "usb=0",
   # "usb-rails=0",
   "usb-host=5",
+  "touch=4",
+  "touch-hid=1",
   # usb-conn=1 asserts GCTL.SOFTCONN from the beat sampler, i.e. pulls the device up by hand. The family does it
   # in XDCI_POWER_ON, which configd's USBDeviceConfiguration asks for -- and this board has no userland yet, so
   # nothing asks. With the counter in the beat line (`pwron=`) one panel then says which of the two it is: a
