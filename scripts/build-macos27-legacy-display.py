@@ -541,7 +541,10 @@ if hid_abi_path.is_file():
             dst_hdr = hdk_dir / hdr_name
             if src_hdr.is_file() and not dst_hdr.exists():
                 dst_hdr.symlink_to(src_hdr)
-        run(['xcrun', 'iig', '--def', iohid / 'HIDDriverKit/IOHIDDevice.iig',
+        import shutil as _shutil
+        iig_bin = _shutil.which('iig.py.bak') or 'iig'
+        iig_cmd = [iig_bin] if iig_bin.endswith('iig.py.bak') else ['xcrun', 'iig']
+        run(iig_cmd + ['--def', iohid / 'HIDDriverKit/IOHIDDevice.iig',
              '--header', hdk_dir / 'IOHIDDevice.h', '--impl', HID_OUT / 'IOHIDDevice.iig.cpp'])
         hdk_lines = (hdk_dir / 'IOHIDDevice.h').read_text().splitlines()
         import re as _re

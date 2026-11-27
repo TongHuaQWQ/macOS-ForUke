@@ -801,7 +801,8 @@ kernel_args = [
   # usb=0 during desktop bring-up to avoid 1 Hz beat console spam; restore usb=4 when testing USB.
   "usb=0",
   # "usb-rails=0",
-  "usb-host=5",
+  # "usb-host=5",
+  # "uke-usb-otg=1",
   "touch=4",
   "touch-hid=1",
   # usb-conn=1 asserts GCTL.SOFTCONN from the beat sampler, i.e. pulls the device up by hand. The family does it
